@@ -81,6 +81,9 @@ out
 # Nuxt.js build / generate output
 .nuxt
 dist
+# The compiled twext fixtures are checked in so the suite runs from a clean clone.
+!test-fixtures/*/dist/
+!test-fixtures/*/dist/**
 .output
 
 # Gatsby files
@@ -122,7 +125,7 @@ dist
 # TernJS port file
 .tern-port
 
-# Stores Visual Studio Code versions used for testing Visual Studio Code extensions
+# Stores VSCode versions used for testing VSCode extensions
 .vscode-test
 
 # pnpm
@@ -142,8 +145,6 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 
-# Astro generated types
-.astro/
-
-# Turbo Repo
-.turbo
+# TwextHub runtime data
+data/
+*.db

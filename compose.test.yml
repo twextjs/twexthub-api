@@ -1,0 +1,33 @@
+# The Postgres that `npm test` expects: the same image, port, and credentials
+# the CI test job runs (see .github/workflows/ci.yml), so a green suite locally
+# means the same suite is green in CI. `npm run test:setup` starts it and
+# creates the test database; the data lives in a named volume, so this is a
+# one-time start per machine rather than something to re-run before every test.
+#
+# Its own compose project (`twexthub-test`, not the directory's `twexthub`) so
+# its up/down never touches a compose.example.yml stack running from the same
+# checkout, or vice versa.
+name: twexthub-test
+
+services:
+  test-db:
+    container_name: twexthub-pg
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: twexthub_test
+    ports:
+      # Published on loopback only: the credentials are a fixture shared in
+      # source control, and nothing outside the machine needs to reach it.
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres-test-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d twexthub_test']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-test-data:

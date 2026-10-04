@@ -1,0 +1,39 @@
+name: 'Greetings'
+description: 'A tiny extension that greets people. Test fixture for TwextHub.'
+author: 'TwextHub CI'
+license: 'MIT'
+version: '1.0.0'
+
+entryPoint: 'src/index.js'
+outputPath: 'dist/Greeter.js'
+
+extension:
+  id: 'greeter'
+  name: 'Greeter'
+  className: 'Greeter'
+  color1: '#0094FF'
+  color2: '#6100A0'
+  color3: '#FFB600'
+
+blocks:
+  - opcode: greet
+    blockType: reporter
+    text: 'hello [name]'
+    arguments:
+      name:
+        type: string
+        defaultValue: 'world'
+  - opcode: greetYell
+    blockType: reporter
+    text: 'hello [name] uppercase'
+    arguments:
+      name:
+        type: string
+        defaultValue: 'world'
+  - opcode: greetBlock
+    blockType: command
+    text: 'show greeting [name]'
+    arguments:
+      name:
+        type: string
+        defaultValue: 'world'

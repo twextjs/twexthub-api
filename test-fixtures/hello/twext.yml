@@ -1,0 +1,18 @@
+name: 'Hello'
+description: 'A minimal "hello world" extension. Test fixture for TwextHub.'
+license: 'MIT'
+version: '0.1.0'
+
+entryPoint: 'src/index.js'
+outputPath: 'dist/Hello.js'
+
+extension:
+  id: 'hello'
+  name: 'Hello'
+  className: 'Hello'
+  color1: '#FF6680'
+
+blocks:
+  - opcode: hello
+    blockType: reporter
+    text: 'hello'

@@ -1,0 +1,5 @@
+# Keep compiled twext output byte-identical to what the CLI produces.
+test-fixtures/*/dist/
+
+# Runtime data is not source.
+data/

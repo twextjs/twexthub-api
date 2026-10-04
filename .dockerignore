@@ -1,0 +1,18 @@
+node_modules
+data
+.git
+.github
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# The image is configured via env vars (TWEXTHUB_*); a baked-in config.yaml
+# would pin a database URL that is only meaningful on some machine.
+config.yaml
+
+# Test-only assets are not needed at runtime.
+test
+test-fixtures
+eslint.config.js

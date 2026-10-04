@@ -1,0 +1,53 @@
+{
+  "name": "@twextjs/twexthub-api",
+  "version": "1.1.1",
+  "private": true,
+  "description": "A lightweight registry of Twext-compiled extensions (\"Twexts\") for use in TurboWarp",
+  "homepage": "https://github.com/twextjs/twexthub#readme",
+  "bugs": {
+    "url": "https://github.com/twextjs/twexthub/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/twextjs/twexthub.git"
+  },
+  "license": "Apache-2.0",
+  "author": "Twext Team",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "migrate": "node src/migrate.js",
+    "test": "node test/preflight.mjs && node --test --test-concurrency=1 \"test/*.test.js\"",
+    "test:setup": "docker compose -f compose.test.yml up -d --wait && npm run test:db:create",
+    "test:db:create": "node scripts/test-db.mjs",
+    "test:teardown": "docker compose -f compose.test.yml down",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "doctoc": "doctoc --notitle .",
+    "check": "npm run lint && npm run format:check && npm test"
+  },
+  "dependencies": {
+    "@twextjs/twext": "^1.0.0",
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.7.0",
+    "postgres": "^3.4.7",
+    "semver": "^7.7.2",
+    "sharp": "^0.35.5",
+    "tar": "^7.5.22",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.0",
+    "@lifelinejs/lifeline": "^0.1.0",
+    "doctoc": "^2.5.0",
+    "eslint": "^10.0.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.9",
+    "supertest": "^7.3.0"
+  }
+}
