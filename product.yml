@@ -1,5 +1,5 @@
 name: 'TwextHub'
-version: '1.0.0'
+version: '1.0.1'
 tagline: 'A lightweight registry of Twext-compiled extensions ("Twexts") for use in TurboWarp'
 author: 'Twext Team'
 homepage: 'https://github.com/twextjs/twexthub'
