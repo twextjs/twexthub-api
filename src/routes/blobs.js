@@ -1,13 +1,12 @@
 import { existsSync, statSync } from 'node:fs';
 import { Router } from 'express';
 import { notFound } from '../errors.js';
-import { canSee, isAdmin } from '../auth.js';
+import { isAdmin } from '../auth.js';
 import { blobPathFor, hashFile } from '../blobs.js';
 
 // A digest is only as secret as the URL carrying it, so the blob route applies
-// the same status and visibility rules as the download route: anyone can fetch
-// compiled output that is published and public, everything else needs to pass
-// the caller's access check.
+// the same status rule as the download route: anyone can fetch compiled output
+// that is published, everything else needs to pass the caller's access check.
 const PUBLIC_STATUSES = new Set(['published', 'deprecated', 'yanked']);
 
 export function makeBlobsRouter({ sql, config }) {
@@ -23,25 +22,22 @@ export function makeBlobsRouter({ sql, config }) {
     const abs = blobPathFor(config.dataDir, digest);
     if (!existsSync(abs)) throw notFound();
     const rows = await sql`
-      SELECT namespace, extension_id, status, visibility, blob_size
+      SELECT namespace, extension_id, status, blob_size
       FROM versions
       WHERE blob_digest = ${digest}
       ORDER BY id DESC
     `;
     if (rows.length === 0) throw notFound();
     const [row] = rows;
-    const isPublic = rows.some(
-      (candidate) => PUBLIC_STATUSES.has(candidate.status) && candidate.visibility === 'public',
-    );
+    const isPublic = rows.some((candidate) => PUBLIC_STATUSES.has(candidate.status));
     if (isPublic) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
     } else {
-      // Same status rule as the download route, and it comes first: canSee
-      // answers visibility, so asking it about a pending or staging row would
-      // let its owner read a blob the download route refuses.
+      // Same status rule as the download route: the newest row is the one that
+      // was checked out, so an unreviewed version's bytes are for the moderation
+      // queue rather than for whoever holds the digest.
       if (!PUBLIC_STATUSES.has(row.status) && !(row.status === 'pending' && isAdmin(req.auth)))
         throw notFound();
-      if (!(await canSee(sql, req.auth?.user ?? null, row))) throw notFound();
       res.set('Cache-Control', 'private, no-store');
     }
     if (row.blob_size !== null && row.blob_size !== undefined) {

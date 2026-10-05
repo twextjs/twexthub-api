@@ -20,7 +20,6 @@ const MOVED_TABLES = [
   'dist_tags',
   'extension_owners',
   'extension_owner_invites',
-  'extension_access',
   'webhooks',
   'download_events',
   'extension_daily_downloads',
@@ -28,8 +27,8 @@ const MOVED_TABLES = [
 
 // The subset whose key includes the address and would therefore collide if the
 // destination already had rows under it. Clearing them first is not tidiness:
-// deleting an extension deliberately leaves its owners, tags, access grants,
-// webhooks, download history and daily counters behind (the owner rows have to
+// deleting an extension deliberately leaves its owners, tags, webhooks, download
+// history and daily counters behind (the owner rows have to
 // survive, and the download tables are append-only history nobody prunes). So a
 // namespace that published `widget` last year and deleted it can still be the
 // destination of a transfer of `widget` today, and without this the move would

@@ -86,10 +86,10 @@ export async function totalDownloads(sql, namespace, extensionId) {
   return rows[0]?.total ?? 0n;
 }
 
-export async function trendingExtensions(sql, { limit = 10, visibility = sql`` } = {}) {
+export async function trendingExtensions(sql, { limit = 10 } = {}) {
   const rows = await sql`
     WITH latest AS (
-      SELECT v.namespace, v.extension_id, v.visibility,
+      SELECT v.namespace, v.extension_id,
         row_number() OVER (
           PARTITION BY v.namespace, v.extension_id
           ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
@@ -103,7 +103,6 @@ export async function trendingExtensions(sql, { limit = 10, visibility = sql`` }
     FROM extension_daily_downloads d
     JOIN latest s ON s.namespace = d.namespace AND s.extension_id = d.extension_id AND s.rn = 1
     WHERE d.day >= ${new Date(utcMidnight(new Date()).getTime() - 6 * DAY_MS).toISOString()}::date
-      ${visibility}
     GROUP BY d.namespace, d.extension_id
     ORDER BY downloads DESC, d.namespace ASC, d.extension_id ASC
     LIMIT ${limit}

@@ -328,9 +328,8 @@ test('a version awaiting moderation is not served by digest', async () => {
   `;
   assert.ok(row.blob_digest, 'the pending version should have compiled output');
 
-  // A pending version is public until an admin approves it, so a check on
-  // visibility alone would hand its compiled output to any caller holding the
-  // digest. The status rule the download route applies has to come first.
+  // Knowing the digest is not authorization: an unreviewed version's compiled
+  // output stays with the moderation queue.
   await request(app).get(`/v1/blobs/${row.blob_digest}`).expect(404);
   // Not to the owner either: the download route refuses them the same way.
   await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(ownerToken)).expect(404);

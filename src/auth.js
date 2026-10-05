@@ -114,21 +114,6 @@ export function requireAuth(req, res, next) {
   next();
 }
 
-// Owners and admins see everything; a private extension is additionally
-// visible to accounts holding an explicit access grant. Shared by the detail,
-// download and blob routes so they cannot drift apart.
-export async function canSee(sql, user, row) {
-  if (row.visibility !== 'private') return true;
-  if (!user) return false;
-  if (user.role === 'admin' || user.namespace === row.namespace) return true;
-  if (await isExtensionOwner(sql, user, row.namespace, row.extension_id)) return true;
-  const [grant] = await sql`
-    SELECT 1 FROM extension_access
-    WHERE user_id = ${user.id} AND namespace = ${row.namespace} AND extension_id = ${row.extension_id}
-  `;
-  return Boolean(grant);
-}
-
 // An extension owner is an account or an organization, and an organization's
 // owners all stand behind its row. So one test answers both: the direct match
 // covers the account case, and the organization_owners branch covers @org/id

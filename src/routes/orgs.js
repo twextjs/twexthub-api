@@ -221,7 +221,6 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
         'dist_tags',
         'extension_owners',
         'extension_owner_invites',
-        'extension_access',
         'download_events',
         'extension_daily_downloads',
       ]) {
@@ -393,7 +392,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
 
   // What this organization publishes, newest first, using the registry listing
   // so the sort, license filter and cursor paging are the same ones the public
-  // index uses. Owners see their private extensions; everyone else does not.
+  // index uses.
   router.get('/:namespace/extensions', async (req, res) => {
     const org = await loadOrg(req.params.namespace);
     res.json(await listExtensions(req, { namespace: org.namespace }));

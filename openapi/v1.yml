@@ -54,8 +54,8 @@ info:
     pseudo-account that publishes under it, has a profile and holds webhooks,
     but has no password, no session and no role. It is created at `POST /orgs`
     and managed by the accounts listed at `/orgs/{namespace}/owners`; an owner
-    of the organization can publish, see private extensions and manage webhooks
-    in its namespace. Because it is only ever acted for by its owners, no
+    of the organization can publish and manage webhooks in its namespace.
+    Because it is only ever acted for by its owners, no
     organization credential exists to leak or revoke, and the account endpoints
     refuse it and point at `/orgs`.
 servers:
@@ -885,8 +885,7 @@ paths:
       security: []
       description: >
         The registry listing scoped to this namespace, with the same `sort`,
-        `license`, cursor and paging behaviour. An owner of the organization
-        sees its private extensions; everyone else sees only the public ones.
+        `license`, cursor and paging behaviour.
       parameters:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/LicenseFilter'
@@ -1211,9 +1210,7 @@ paths:
         Latest published version per `(namespace, id)`. Defaults to
         newest-first; `sort` changes the ranking. `namespace` narrows the
         listing to one account or organization, which is also what
-        `GET /orgs/{namespace}/extensions` does with a membership check: an
-        owner of the organization sees its private extensions, and everyone
-        else sees only the public ones.
+        `GET /orgs/{namespace}/extensions` does.
       parameters:
         - $ref: '#/components/parameters/Sort'
         - $ref: '#/components/parameters/LicenseFilter'
@@ -1517,20 +1514,18 @@ paths:
       tags: [Open]
       security: []
       description: >
-        Every version of the extension the caller may read, highest SemVer
-        first, so the first entry is the one a range resolution returns.
-        Yanked versions are excluded, and a version the caller cannot read is
-        left out of the list rather than turning the whole response into a
-        `403` — a range that selects nothing readable is an empty list, not a
-        `404`.
+        Every published or deprecated version of the extension, highest
+        SemVer first, so the first entry is the one a range resolution
+        returns. Yanked versions are excluded, and a range that matches
+        nothing is an empty list rather than a `404`.
       parameters:
         - name: range
           in: query
           schema: { type: string }
           description: >
             A SemVer range such as `^1.2` or `>=2.0.0 <3`. Omit it for every
-            readable version. A prerelease satisfies a range only when the
-            range names one or is `*`.
+            version. A prerelease satisfies a range only when the range names
+            one or is `*`.
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Dir'
         - $ref: '#/components/parameters/Limit'
@@ -1566,10 +1561,6 @@ paths:
         the current highest version for this package. Requires the `publish`
         scope (sessions satisfy this implicitly). A legacy JSON body gets
         `415`.
-      parameters:
-        - name: visibility
-          in: query
-          schema: { type: string, enum: [public, private], default: public }
       requestBody:
         required: true
         content:
@@ -1763,8 +1754,8 @@ paths:
       description: >
         The namespace account or an admin; a co-owner cannot widen the list.
         This records an invitation and grants nothing on its own: the candidate
-        answers it at `POST .../accept`, and until then they cannot publish, yank,
-        tag or read a private version. The candidate is notified, or every owner
+        answers it at `POST .../accept`, and until then they cannot publish, yank
+        or tag. The candidate is notified, or every owner
         of it when the candidate is an organization. Asking twice is a `204`, so a
         retry needs no state. The namespace account owns the published address
         and cannot be invited to it.
@@ -1955,12 +1946,11 @@ paths:
         The receiving namespace or an admin; an account accepts for itself, and
         any account on the owner list of an organization accepts for that
         organization. The move is a single transaction: the versions, dist-tags,
-        owners, access grants, webhooks and download history all change address
-        together, or none of them do.
+        owners, webhooks and download history all change address together, or
+        none of them do.
 
         The old address answers `301` to the new one, so a pinned reference keeps
-        resolving, and a caller who could not read the extension at its new
-        address is still refused rather than being pointed at it. The storage
+        resolving. The storage
         charge moves with the bytes. `versions.owner_id` is not rewritten: the
         audit trail still says who published each version.
 
@@ -1989,85 +1979,6 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-
-  /@{namespace}/{id}/access:
-    parameters:
-      - $ref: '#/components/parameters/NamespacePath'
-      - $ref: '#/components/parameters/ExtensionIdPath'
-    get:
-      summary: List an extension's access grants
-      operationId: listExtensionAccess
-      tags: [Userspace]
-      description: >
-        Owner or admin; requires the `publish` scope. Grants in the order they
-        were made.
-
-        A grant is what lets another account read a private version through
-        `GET /@{namespace}/{id}`, its `/versions/{version}` metadata, and
-        `/download`. Grants only mean something on a private extension, but they
-        are recorded on any extension, so flipping one to private later keeps
-        the grants it already had.
-      responses:
-        '200':
-          description: The accounts this extension has been shared with
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [data]
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      required: [namespace, display_name, created_at]
-                      properties:
-                        namespace: { $ref: '#/components/schemas/Namespace' }
-                        display_name: { type: string }
-                        created_at:
-                          { type: string, format: date-time, description: When the grant was made. }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-
-  /@{namespace}/{id}/access/{granteeNamespace}:
-    parameters:
-      - $ref: '#/components/parameters/NamespacePath'
-      - $ref: '#/components/parameters/ExtensionIdPath'
-      - name: granteeNamespace
-        in: path
-        required: true
-        schema: { $ref: '#/components/schemas/Namespace' }
-    put:
-      summary: Grant an account access to an extension
-      operationId: grantExtensionAccess
-      tags: [Userspace]
-      description: >
-        Owner or admin. Idempotent: granting an account that already has access
-        is the same 204 as granting it for the first time. 404 when the
-        extension has no version yet or the grantee is not an account.
-
-        The namespace account always has access to its own extension, so
-        granting it to itself is refused with a `422` rather than stored as a
-        row that grants nothing.
-      responses:
-        '204': { description: Access granted (idempotent) }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
-        '422': { $ref: '#/components/responses/UnprocessableEntity' }
-    delete:
-      summary: Revoke an account's access to an extension
-      operationId: revokeExtensionAccess
-      tags: [Userspace]
-      description: >
-        Owner or admin. 404 when that account has no grant, so a revoked grant
-        is not stored as a tombstone.
-      responses:
-        '204': { description: Access revoked }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '404': { $ref: '#/components/responses/NotFound' }
 
   /@{namespace}/{id}/webhooks:
     parameters:
@@ -2261,8 +2172,7 @@ paths:
         published, yanked, and deprecated versions are public, while an admin
         may fetch a `pending` version for review -- that being the admin role on
         the account and the `admin` scope on the credential together, as on the
-        review route. Private versions require an authorized bearer token. 404
-        for any other status or a missing blob.
+        review route. 404 for any other status or a missing blob.
       responses:
         '200':
           description: Compiled extension
@@ -2295,9 +2205,9 @@ paths:
         after an unrelated version is deleted.
 
         A digest is only as secret as the URL carrying it, so this route runs
-        the download route's own status and visibility checks rather than
-        treating content addressing as permission. A digest reached by at least
-        one public published, deprecated, or yanked version is public and served
+        the download route's own status checks rather than treating content
+        addressing as permission. A digest reached by at least
+        one published, deprecated, or yanked version is served
         cacheable for a year; anything else needs a bearer token the same way
         `/download` needs one, and a `pending` version stays admin-only —
         the admin role and the `admin` scope together, as on the review route.
@@ -2321,8 +2231,7 @@ paths:
       tags: [Adminspace]
       description: >
         Records publishes, review decisions, yanks, deprecations, tag and
-        owner changes, quota changes, role changes, and access grants,
-        newest first.
+        owner changes, quota changes and role changes, newest first.
       parameters:
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Dir'
@@ -2948,7 +2857,6 @@ components:
         license: { type: string }
         description: { type: string }
         author: { type: ['string', 'null'] }
-        visibility: { type: string, enum: [public, private] }
         createdAt: { type: string, format: date-time }
         publishedAt:
           { type: string, format: date-time, description: Absent while pending or rejected. }
@@ -3081,8 +2989,8 @@ components:
           description: >-
             e.g. version.publish, version.approve, version.reject,
             version.yank, version.deprecate, tag.set, tag.remove, owner.invite,
-            owner.accept, owner.withdraw, owner.remove, access.grant,
-            access.revoke, quota.set, extension.transfer.request,
+            owner.accept, owner.withdraw, owner.remove, quota.set,
+            extension.transfer.request,
             extension.transfer.withdraw, extension.transfer,
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,

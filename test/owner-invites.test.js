@@ -244,38 +244,6 @@ describe('an organization as an extension owner', () => {
     });
   });
 
-  test('the grant reaches the private surface and the listing filter', async () => {
-    const { ns, owner } = await publishedExtension('secret', { visibility: 'private' });
-    const acme = await makeOrg();
-    const outsider = await signupAndAccept(app, uniqNs());
-
-    const seen = async (token) =>
-      (await request(app).get(`/v1/extensions?namespace=${ns}`).set(bearer(token)).expect(200)).body
-        .data.length;
-    await request(app).get(`/v1/@${ns}/secret`).set(bearer(acme.owner.token)).expect(404);
-    assert.equal(await seen(acme.owner.token), 0);
-
-    await invite(ns, 'secret', acme.ns, owner.token);
-    await accept(ns, 'secret', acme.ns, acme.owner.token);
-
-    const detail = await request(app)
-      .get(`/v1/@${ns}/secret`)
-      .set(bearer(acme.owner.token))
-      .expect(200);
-    assert.equal(detail.body.namespace, ns);
-    assert.equal(await seen(acme.owner.token), 1);
-
-    // A private extension stays out of everyone else's hands, and the address
-    // is still the account's, not the organization's.
-    assert.equal(await seen(outsider.token), 0);
-    await request(app).get(`/v1/@${ns}/secret`).set(bearer(outsider.token)).expect(404);
-    const orgListing = await request(app)
-      .get(`/v1/extensions?namespace=${acme.ns}`)
-      .set(bearer(acme.owner.token))
-      .expect(200);
-    assert.equal(orgListing.body.data.length, 0);
-  });
-
   test('deleting the organization drops the row it held', async () => {
     const { ns, owner } = await publishedExtension();
     const acme = await makeOrg();
