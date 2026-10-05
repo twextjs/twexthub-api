@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import https from 'node:https';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  apiPath,
+  bearer,
+  boot,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
+} from './helpers.mjs';
 import {
   attemptDelivery,
   claimDue,
@@ -30,7 +38,7 @@ function settle() {
 async function publishApproved(ns, token, adminToken, id, version) {
   await publishProject(app, ns, id, token, { version, code: `// ${id}@${version}` });
   await request(app)
-    .patch(`/v1/@${ns}/${id}/versions/${version}`)
+    .patch(apiPath(`/@${ns}/${id}/versions/${version}`))
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
@@ -102,7 +110,7 @@ test('creating a webhook returns the secret once; listing never does', async () 
   const { owner, ns } = await makeOwner();
 
   const created = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(201);
@@ -111,7 +119,7 @@ test('creating a webhook returns the secret once; listing never does', async () 
   assert.ok(created.body.id);
 
   const list = await request(app)
-    .get(`/v1/@${ns}/hooked/webhooks`)
+    .get(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .expect(200);
   assert.equal(list.body.data.length, 1);
@@ -124,34 +132,34 @@ test('webhook validation rejects bad events, bad urls, and non-owners', async ()
   const outsider = await signupAndAccept(app, uniqNs());
 
   await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(outsider.token))
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(403);
 
   const badEvents = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: PUBLIC_URL, events: ['nope'] });
   assert.equal(badEvents.status, 422);
   assert.equal(badEvents.body.errors[0].field, 'events');
 
   const missingUrl = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ events: ['version.published'] });
   assert.equal(missingUrl.status, 422);
   assert.equal(missingUrl.body.errors[0].field, 'url');
 
   const localhost = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: 'https://localhost:9911/hook', events: ['version.published'] });
   assert.equal(localhost.status, 422);
   assert.match(localhost.body.errors[0].message, /Localhost|public/);
 
   const plaintext = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: 'http://hooks.example.com/hook', events: ['version.published'] });
   assert.equal(plaintext.status, 422, 'only https destinations are accepted');
@@ -166,7 +174,7 @@ test('webhook targets inside non-RFC1918 internal ranges are refused', async () 
   const refused = ['100.64.0.1', '100.127.255.255', '198.18.0.1', '198.19.255.255', '192.0.0.1'];
   for (const address of refused) {
     const r = await request(app)
-      .post(`/v1/@${ns}/hooked/webhooks`)
+      .post(apiPath(`/@${ns}/hooked/webhooks`))
       .set(bearer(owner.token))
       .send({ url: `https://${address}/hook`, events: ['version.published'] });
     assert.equal(r.status, 422, `${address} should be refused`);
@@ -181,7 +189,7 @@ test('neighbours just outside the refused ranges are still allowed', async () =>
   const allowed = ['100.63.255.255', '100.128.0.0', '198.17.255.255', '198.20.0.0', '192.0.1.1'];
   for (const address of allowed) {
     const r = await request(app)
-      .post(`/v1/@${ns}/hooked/webhooks`)
+      .post(apiPath(`/@${ns}/hooked/webhooks`))
       .set(bearer(owner.token))
       .send({ url: `https://${address}/hook`, events: ['version.published'] });
     assert.equal(r.status, 201, `${address} should be accepted, got ${JSON.stringify(r.body)}`);
@@ -191,7 +199,7 @@ test('neighbours just outside the refused ranges are still allowed', async () =>
 test('registry events schedule deliveries for subscribed hooks', async () => {
   const { owner, ns } = await makeOwner();
   await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: PUBLIC_URL, events: WEBHOOK_EVENTS })
     .expect(201);
@@ -203,25 +211,25 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     code: '// hooked@2.0.0',
   });
   await request(app)
-    .patch(`/v1/@${ns}/hooked/versions/2.0.0`)
+    .patch(apiPath(`/@${ns}/hooked/versions/2.0.0`))
     .set(bearer(owner.token))
     .send({ deprecationMessage: 'old' })
     .expect(200);
   await request(app)
-    .delete(`/v1/@${ns}/hooked/versions/2.0.0`)
+    .delete(apiPath(`/@${ns}/hooked/versions/2.0.0`))
     .set(bearer(owner.token))
     .expect(204);
   const other = await signupAndAccept(app, uniqNs());
   await request(app)
-    .put(`/v1/@${ns}/hooked/owners/${other.user.namespace}`)
+    .put(apiPath(`/@${ns}/hooked/owners/${other.user.namespace}`))
     .set(bearer(owner.token))
     .expect(204);
   await request(app)
-    .post(`/v1/@${ns}/hooked/owners/${other.user.namespace}/accept`)
+    .post(apiPath(`/@${ns}/hooked/owners/${other.user.namespace}/accept`))
     .set(bearer(other.token))
     .expect(200);
   await request(app)
-    .delete(`/v1/@${ns}/hooked/owners/${other.user.namespace}`)
+    .delete(apiPath(`/@${ns}/hooked/owners/${other.user.namespace}`))
     .set(bearer(owner.token))
     .expect(204);
 
@@ -269,7 +277,7 @@ test('version.rejected fires from the review endpoint', async () => {
   // A webhook on an extension that has no versions yet is allowed; the first
   // publish is then held as pending and rejected by an admin.
   await request(app)
-    .post(`/v1/@${newcomerNs}/fresh/webhooks`)
+    .post(apiPath(`/@${newcomerNs}/fresh/webhooks`))
     .set(bearer(newcomer.token))
     .send({ url: PUBLIC_URL, events: ['version.rejected'] })
     .expect(201);
@@ -278,7 +286,7 @@ test('version.rejected fires from the review endpoint', async () => {
     code: '// x',
   });
   await request(app)
-    .patch(`/v1/@${newcomerNs}/fresh/versions/1.0.0`)
+    .patch(apiPath(`/@${newcomerNs}/fresh/versions/1.0.0`))
     .set(bearer(admin.token))
     .send({ status: 'rejected', reason: 'nope' })
     .expect(200);
@@ -314,7 +322,7 @@ test('delivery posts the signed payload and records status', async () => {
   try {
     const { owner, ns } = await makeOwner();
     const created = await request(app)
-      .post(`/v1/@${ns}/hooked/webhooks`)
+      .post(apiPath(`/@${ns}/hooked/webhooks`))
       .set(bearer(owner.token))
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(201);
@@ -372,7 +380,7 @@ test('a delivery connects to the address it validated, not the hostname', async 
   try {
     const { owner, ns } = await makeOwner();
     const created = await request(app)
-      .post(`/v1/@${ns}/hooked/webhooks`)
+      .post(apiPath(`/@${ns}/hooked/webhooks`))
       .set(bearer(owner.token))
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(201);
@@ -406,7 +414,7 @@ test('a delivery connects to the address it validated, not the hostname', async 
 test('failed deliveries retry with backoff then mark failed', async () => {
   const { owner, ns } = await makeOwner();
   const rejected = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: 'https://never.invalid/hook', events: ['version.published'] });
   assert.equal(rejected.status, 422, 'unresolvable hosts are rejected at create time');
@@ -499,7 +507,7 @@ test('the retry delay is measured from the end of the attempt, not the claim', a
 test('deleting a webhook removes its pending deliveries', async () => {
   const { owner, ns } = await makeOwner();
   const created = await request(app)
-    .post(`/v1/@${ns}/hooked/webhooks`)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
     .set(bearer(owner.token))
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(201);
@@ -512,11 +520,11 @@ test('deleting a webhook removes its pending deliveries', async () => {
   assert.equal(count[0].n, 1);
 
   await request(app)
-    .delete(`/v1/@${ns}/hooked/webhooks/${created.body.id}`)
+    .delete(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}`))
     .set(bearer(owner.token))
     .expect(204);
   await request(app)
-    .delete(`/v1/@${ns}/hooked/webhooks/${created.body.id}`)
+    .delete(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}`))
     .set(bearer(owner.token))
     .expect(404);
 

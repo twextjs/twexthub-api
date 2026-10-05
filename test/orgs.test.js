@@ -6,6 +6,7 @@ import { sourcePathFor } from '../src/sources.js';
 import request from 'supertest';
 import sharp from 'sharp';
 import {
+  apiPath,
   approveVersion,
   bearer,
   boot,
@@ -37,7 +38,7 @@ async function org(body = {}) {
   const owner = await signupAndAccept(app, uniqNs());
   const namespace = body.namespace ?? uniqNs();
   const created = await request(app)
-    .post('/v1/orgs')
+    .post(apiPath('/orgs'))
     .set(bearer(owner.token))
     .send({ namespace, displayName: 'Acme Inc', ...body });
   assert.equal(created.status, 201, `org create failed: ${JSON.stringify(created.body)}`);
@@ -48,7 +49,9 @@ describe('creating an organization', () => {
   test('the creator is its first owner and it cannot sign in', async () => {
     const { ns, owner } = await org();
 
-    const read = await request(app).get(`/v1/orgs/${ns}`).expect(200);
+    const read = await request(app)
+      .get(apiPath(`/orgs/${ns}`))
+      .expect(200);
     assert.equal(read.body.namespace, ns);
     assert.equal(read.body.displayName, 'Acme Inc');
     assert.equal(read.body.bio, '');
@@ -57,7 +60,9 @@ describe('creating an organization', () => {
     assert.equal(read.body.role, undefined);
     assert.equal(read.body.kind, undefined);
 
-    const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+    const owners = await request(app)
+      .get(apiPath(`/orgs/${ns}/owners`))
+      .expect(200);
     assert.deepEqual(
       owners.body.data.map((row) => row.namespace),
       [owner.user.namespace],
@@ -66,7 +71,7 @@ describe('creating an organization', () => {
     // No password means no session: signing in has to say what the namespace is
     // rather than report bad credentials.
     const login = await request(app)
-      .post('/v1/sessions')
+      .post(apiPath('/sessions'))
       .send({ namespace: ns, password: 'correct-horse-battery-staple' });
     assert.equal(login.status, 403);
     assert.match(login.body.detail, /organization/);
@@ -77,7 +82,9 @@ describe('creating an organization', () => {
     assert.equal(created.displayName, created.ns);
     assert.equal(created.bio, 'Our team');
     assert.equal(created.github, 'acme');
-    const read = await request(app).get(`/v1/orgs/${created.ns}`).expect(200);
+    const read = await request(app)
+      .get(apiPath(`/orgs/${created.ns}`))
+      .expect(200);
     assert.equal(read.body.displayName, created.ns);
   });
 
@@ -85,20 +92,20 @@ describe('creating an organization', () => {
     const owner = await signupAndAccept(app, uniqNs());
     const ns = uniqNs();
     const taken = await request(app)
-      .post('/v1/orgs')
+      .post(apiPath('/orgs'))
       .set(bearer(owner.token))
       .send({ namespace: ns })
       .expect(201);
 
     const clash = await request(app)
-      .post('/v1/orgs')
+      .post(apiPath('/orgs'))
       .set(bearer(owner.token))
       .send({ namespace: ns });
     assert.equal(clash.status, 409);
 
     // ...and an account cannot be signed up over one either.
     const account = await request(app)
-      .post('/v1/users')
+      .post(apiPath('/users'))
       .send({ namespace: ns, password: 'correct-horse-battery-staple' });
     assert.equal(account.status, 409);
     assert.equal(taken.body.namespace, ns);
@@ -108,14 +115,14 @@ describe('creating an organization', () => {
     const owner = await signupAndAccept(app, uniqNs());
     const ns = uniqNs();
     const bad = await request(app)
-      .post('/v1/orgs')
+      .post(apiPath('/orgs'))
       .set(bearer(owner.token))
       .send({ namespace: ns, website: 'javascript:alert(1)', bio: 'x'.repeat(281) });
     assert.equal(bad.status, 422);
     assert.deepEqual(bad.body.errors.map((e) => e.field).sort(), ['bio', 'website']);
 
     const created = await request(app)
-      .post('/v1/orgs')
+      .post(apiPath('/orgs'))
       .set(bearer(owner.token))
       .send({
         namespace: ns,
@@ -131,17 +138,17 @@ describe('creating an organization', () => {
   });
 
   test('creation needs a session, accepted terms, and an account', async () => {
-    await request(app).post('/v1/orgs').send({ namespace: uniqNs() }).expect(401);
+    await request(app).post(apiPath('/orgs')).send({ namespace: uniqNs() }).expect(401);
 
     const owner = await signupAndAccept(app, uniqNs());
     const latecomer = await request(app)
-      .post('/v1/users')
+      .post(apiPath('/users'))
       .send({ namespace: uniqNs(), password: 'correct-horse-battery-staple' })
       .expect(201);
     // The terms gate is the same one that guards a publish: an organization
     // that nobody has agreed to the terms for should not go out.
     const gated = await request(app)
-      .post('/v1/orgs')
+      .post(apiPath('/orgs'))
       .set(bearer(latecomer.body.token))
       .send({ namespace: uniqNs() });
     assert.equal(gated.status, 403);
@@ -151,19 +158,19 @@ describe('creating an organization', () => {
   test('managing organizations needs the manage:orgs scope', async () => {
     const { ns, owner } = await org();
     const created = await request(app)
-      .post('/v1/tokens')
+      .post(apiPath('/tokens'))
       .set(bearer(owner.token))
       .send({ name: 'automation', scopes: ['publish', 'yank'] })
       .expect(201);
     for (const [method, route, body] of [
-      ['post', '/v1/orgs', { namespace: uniqNs() }],
-      ['patch', `/v1/orgs/${ns}`, { bio: 'Changed' }],
-      ['delete', `/v1/orgs/${ns}`],
-      ['put', `/v1/orgs/${ns}/owners/${owner.user.namespace}`],
-      ['delete', `/v1/orgs/${ns}/owners/${owner.user.namespace}`],
-      ['get', `/v1/orgs/${ns}/webhooks`],
-      ['post', `/v1/orgs/${ns}/webhooks`, { url: PUBLIC_URL, events: ['version.published'] }],
-      ['delete', `/v1/orgs/${ns}/webhooks/1`],
+      ['post', apiPath('/orgs'), { namespace: uniqNs() }],
+      ['patch', apiPath(`/orgs/${ns}`), { bio: 'Changed' }],
+      ['delete', apiPath(`/orgs/${ns}`)],
+      ['put', apiPath(`/orgs/${ns}/owners/${owner.user.namespace}`)],
+      ['delete', apiPath(`/orgs/${ns}/owners/${owner.user.namespace}`)],
+      ['get', apiPath(`/orgs/${ns}/webhooks`)],
+      ['post', apiPath(`/orgs/${ns}/webhooks`), { url: PUBLIC_URL, events: ['version.published'] }],
+      ['delete', apiPath(`/orgs/${ns}/webhooks/1`)],
     ]) {
       const client = request(app);
       const denied = await client[method](route)
@@ -177,7 +184,7 @@ describe('creating an organization', () => {
   test('the list is public and pages', async () => {
     const a = await org();
     const b = await org();
-    const list = await request(app).get('/v1/orgs').expect(200);
+    const list = await request(app).get(apiPath('/orgs')).expect(200);
     assert.deepEqual(list.body.data.map((row) => row.namespace).sort(), [a.ns, b.ns].sort());
     assert.ok(list.body._links);
   });
@@ -189,7 +196,7 @@ describe('changing an organization', () => {
     const outsider = await signupAndAccept(app, uniqNs());
 
     const updated = await request(app)
-      .patch(`/v1/orgs/${ns}`)
+      .patch(apiPath(`/orgs/${ns}`))
       .set(bearer(owner.token))
       .send({ displayName: 'Acme Corp', bio: 'Now with a website.', website: null })
       .expect(200);
@@ -197,21 +204,28 @@ describe('changing an organization', () => {
     assert.equal(updated.body.website, null);
 
     await request(app)
-      .patch(`/v1/orgs/${ns}`)
+      .patch(apiPath(`/orgs/${ns}`))
       .set(bearer(outsider.token))
       .send({ displayName: 'Hijacked' })
       .expect(403);
 
     // An account of the same name is not the organization: /orgs/:ns is only
     // reachable for kind = 'organization'.
-    await request(app).patch(`/v1/orgs/${ns}`).send({ displayName: 'x' }).expect(401);
+    await request(app)
+      .patch(apiPath(`/orgs/${ns}`))
+      .send({ displayName: 'x' })
+      .expect(401);
   });
 
   test('an empty or invalid patch is rejected', async () => {
     const { ns, owner } = await org();
-    await request(app).patch(`/v1/orgs/${ns}`).set(bearer(owner.token)).send({}).expect(422);
+    await request(app)
+      .patch(apiPath(`/orgs/${ns}`))
+      .set(bearer(owner.token))
+      .send({})
+      .expect(422);
     const bad = await request(app)
-      .patch(`/v1/orgs/${ns}`)
+      .patch(apiPath(`/orgs/${ns}`))
       .set(bearer(owner.token))
       .send({ github: 'not a username' });
     assert.equal(bad.status, 422);
@@ -221,14 +235,14 @@ describe('changing an organization', () => {
   test('the account routes refuse to touch an organization', async () => {
     const { ns, owner } = await org();
     const patched = await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(owner.token))
       .send({ displayName: 'Via users' });
     assert.equal(patched.status, 403);
     assert.match(patched.body.detail, /organization/);
 
     const removed = await request(app)
-      .delete(`/v1/users/${ns}`)
+      .delete(apiPath(`/users/${ns}`))
       .set(bearer(owner.token))
       .expect(403);
     assert.match(removed.body.detail, /organization/);
@@ -236,7 +250,9 @@ describe('changing an organization', () => {
 
   test('the public user shows an organization without account fields', async () => {
     const { ns } = await org();
-    const read = await request(app).get(`/v1/users/${ns}`).expect(200);
+    const read = await request(app)
+      .get(apiPath(`/users/${ns}`))
+      .expect(200);
     assert.equal(read.body.kind, 'organization');
     assert.equal(read.body.role, undefined);
     assert.equal(read.body.termsAcceptedVersion, undefined);
@@ -246,7 +262,7 @@ describe('changing an organization', () => {
   test('an admin is an owner of every organization', async () => {
     const admin = await signupAndAccept(app, uniqNs());
     await request(app)
-      .patch(`/v1/users/${admin.user.namespace}`)
+      .patch(apiPath(`/users/${admin.user.namespace}`))
       .set(bearer(admin.token))
       .send({ role: 'admin' })
       .expect(200);
@@ -255,20 +271,29 @@ describe('changing an organization', () => {
     // No row in the owner list and no need for one: the admin reaches every
     // organization the same way an extension's owners reach their extension.
     const read = await request(app)
-      .patch(`/v1/orgs/${ns}`)
+      .patch(apiPath(`/orgs/${ns}`))
       .set(bearer(admin.token))
       .send({ bio: 'edited by an admin' })
       .expect(200);
     assert.equal(read.body.bio, 'edited by an admin');
-    const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+    const owners = await request(app)
+      .get(apiPath(`/orgs/${ns}/owners`))
+      .expect(200);
     assert.equal(owners.body.data.length, 1);
   });
 
   test('deleting the organization takes its namespace with it', async () => {
     const { ns, owner } = await org();
-    await request(app).delete(`/v1/orgs/${ns}`).set(bearer(owner.token)).expect(204);
-    await request(app).get(`/v1/orgs/${ns}`).expect(404);
-    await request(app).get(`/v1/users/${ns}`).expect(404);
+    await request(app)
+      .delete(apiPath(`/orgs/${ns}`))
+      .set(bearer(owner.token))
+      .expect(204);
+    await request(app)
+      .get(apiPath(`/orgs/${ns}`))
+      .expect(404);
+    await request(app)
+      .get(apiPath(`/users/${ns}`))
+      .expect(404);
   });
 
   test('organization deletion clears namespace state at either transfer endpoint', async () => {
@@ -298,7 +323,10 @@ describe('changing an organization', () => {
         VALUES (${from}, ${to}, ${to}, 'cleanup')`;
     }
 
-    await request(app).delete(`/v1/orgs/${ns}`).set(bearer(owner.token)).expect(204);
+    await request(app)
+      .delete(apiPath(`/orgs/${ns}`))
+      .set(bearer(owner.token))
+      .expect(204);
 
     for (const table of [
       'dist_tags',
@@ -336,7 +364,10 @@ describe('changing an organization', () => {
         VALUES (${hook.id}, 'version.published', '{}', '{}', 'test-signature')
       `;
     }
-    await request(app).delete(`/v1/orgs/${ns}`).set(bearer(owner.token)).expect(204);
+    await request(app)
+      .delete(apiPath(`/orgs/${ns}`))
+      .set(bearer(owner.token))
+      .expect(204);
     assert.equal((await sql`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
     assert.equal((await sql`SELECT 1 FROM webhooks WHERE namespace = ${ns}`).length, 0);
     assert.equal((await sql`SELECT 1 FROM webhook_deliveries`).length, 0);
@@ -346,7 +377,9 @@ describe('changing an organization', () => {
     await assert.rejects(stat(sourcePathFor(config.dataDir, version.source_digest)), {
       code: 'ENOENT',
     });
-    await request(app).get(`/v1/users/${owner.user.namespace}`).expect(200);
+    await request(app)
+      .get(apiPath(`/users/${owner.user.namespace}`))
+      .expect(200);
   });
 });
 
@@ -356,26 +389,28 @@ describe('owners', () => {
     const coowner = await signupAndAccept(app, uniqNs());
 
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
 
     // Adding yourself again is a no-op rather than a duplicate row.
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
       .set(bearer(coowner.token))
       .expect(204);
-    const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+    const owners = await request(app)
+      .get(apiPath(`/orgs/${ns}/owners`))
+      .expect(200);
     assert.equal(owners.body.data.length, 2);
 
     await request(app)
-      .patch(`/v1/orgs/${ns}`)
+      .patch(apiPath(`/orgs/${ns}`))
       .set(bearer(coowner.token))
       .send({ bio: 'edited by a co-owner' })
       .expect(200);
 
     const notes = await request(app)
-      .get('/v1/notifications')
+      .get(apiPath('/notifications'))
       .set(bearer(coowner.token))
       .expect(200);
     assert.equal(notes.body.data.length, 1);
@@ -389,11 +424,11 @@ describe('owners', () => {
     const candidate = await signupAndAccept(app, uniqNs());
 
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${candidate.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${candidate.user.namespace}`))
       .set(bearer(outsider.token))
       .expect(403);
     await request(app)
-      .delete(`/v1/orgs/${ns}/owners/${owner.user.namespace}`)
+      .delete(apiPath(`/orgs/${ns}/owners/${owner.user.namespace}`))
       .set(bearer(outsider.token))
       .expect(403);
   });
@@ -402,7 +437,7 @@ describe('owners', () => {
     const { ns, owner } = await org();
     const other = await org();
     const refused = await request(app)
-      .put(`/v1/orgs/${ns}/owners/${other.ns}`)
+      .put(apiPath(`/orgs/${ns}/owners/${other.ns}`))
       .set(bearer(owner.token));
     assert.equal(refused.status, 422);
     assert.equal(refused.body.errors[0].field, 'namespace');
@@ -412,24 +447,24 @@ describe('owners', () => {
     const { ns, owner } = await org();
     const coowner = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
 
     // With two owners the co-owner can step down, and the creator cannot
     // follow them out.
     await request(app)
-      .delete(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+      .delete(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
       .set(bearer(coowner.token))
       .expect(204);
     const refused = await request(app)
-      .delete(`/v1/orgs/${ns}/owners/${owner.user.namespace}`)
+      .delete(apiPath(`/orgs/${ns}/owners/${owner.user.namespace}`))
       .set(bearer(owner.token));
     assert.equal(refused.status, 409);
     assert.match(refused.body.detail, /only owner/);
 
     const notes = await request(app)
-      .get('/v1/notifications')
+      .get(apiPath('/notifications'))
       .set(bearer(coowner.token))
       .expect(200);
     assert.match(notes.body.data[0].message, /removed as an owner/);
@@ -439,7 +474,7 @@ describe('owners', () => {
     const { ns, owner } = await org();
     const outsider = await signupAndAccept(app, uniqNs());
     await request(app)
-      .delete(`/v1/orgs/${ns}/owners/${outsider.user.namespace}`)
+      .delete(apiPath(`/orgs/${ns}/owners/${outsider.user.namespace}`))
       .set(bearer(owner.token))
       .expect(404);
   });
@@ -453,7 +488,7 @@ describe('owners', () => {
       const { ns, owner } = await org();
       const coowner = await signupAndAccept(app, uniqNs());
       await request(app)
-        .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+        .put(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
         .set(bearer(owner.token))
         .expect(204);
       const accounts = [owner, coowner];
@@ -462,17 +497,21 @@ describe('owners', () => {
           const account = accounts[i];
           const route =
             action === 'remove'
-              ? `/v1/orgs/${ns}/owners/${account.user.namespace}`
-              : `/v1/users/${account.user.namespace}`;
+              ? apiPath(`/orgs/${ns}/owners/${account.user.namespace}`)
+              : apiPath(`/users/${account.user.namespace}`);
           return request(app).delete(route).set(bearer(account.token));
         }),
       );
       assert.deepEqual(responses.map((r) => r.status).sort(), [204, 409]);
-      const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+      const owners = await request(app)
+        .get(apiPath(`/orgs/${ns}/owners`))
+        .expect(200);
       assert.equal(owners.body.data.length, 1);
       const retained = accounts[responses.findIndex((r) => r.status === 409)];
       assert.equal(owners.body.data[0].namespace, retained.user.namespace);
-      await request(app).get(`/v1/users/${retained.user.namespace}`).expect(200);
+      await request(app)
+        .get(apiPath(`/users/${retained.user.namespace}`))
+        .expect(200);
     });
   }
 
@@ -484,7 +523,7 @@ describe('owners', () => {
     for (const [index, { ns, owner }] of organizations.entries()) {
       const id = `removed${index}`;
       await request(app)
-        .put(`/v1/orgs/${ns}/owners/${publisher.user.namespace}`)
+        .put(apiPath(`/orgs/${ns}/owners/${publisher.user.namespace}`))
         .set(bearer(owner.token))
         .expect(204);
       await publishProject(app, ns, id, publisher.token, { code: 'const removed = 1;' });
@@ -493,7 +532,7 @@ describe('owners', () => {
     }
     const removed = await sql`SELECT * FROM versions WHERE extension_id LIKE 'removed%'`;
     await request(app)
-      .delete(`/v1/users/${publisher.user.namespace}`)
+      .delete(apiPath(`/users/${publisher.user.namespace}`))
       .set(bearer(publisher.token))
       .expect(204);
     for (const { ns } of organizations) {
@@ -519,7 +558,7 @@ describe('owners', () => {
   test('an account that is the last owner of an organization cannot be deleted', async () => {
     const { ns, owner } = await org();
     const refused = await request(app)
-      .delete(`/v1/users/${owner.user.namespace}`)
+      .delete(apiPath(`/users/${owner.user.namespace}`))
       .set(bearer(owner.token));
     assert.equal(refused.status, 409);
     assert.match(refused.body.detail, new RegExp(`@${ns}`));
@@ -528,14 +567,16 @@ describe('owners', () => {
     // list loses the row.
     const coowner = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${coowner.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${coowner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await request(app)
-      .delete(`/v1/users/${owner.user.namespace}`)
+      .delete(apiPath(`/users/${owner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
-    const owners = await request(app).get(`/v1/orgs/${ns}/owners`).expect(200);
+    const owners = await request(app)
+      .get(apiPath(`/orgs/${ns}/owners`))
+      .expect(200);
     assert.deepEqual(
       owners.body.data.map((row) => row.namespace),
       [coowner.user.namespace],
@@ -550,12 +591,12 @@ describe('extensions', () => {
     const manager = await signupAndAccept(app, uniqNs());
     const candidate = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${manager.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${manager.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await publishProject(app, ns, 'secret', owner.token);
     await approveVersion(app, admin.token, ns, 'secret', '1.0.0');
-    const extensionPath = `/v1/@${ns}/secret`;
+    const extensionPath = apiPath(`/@${ns}/secret`);
     const ownerPath = `${extensionPath}/owners/${candidate.user.namespace}`;
 
     await request(app).put(ownerPath).set(bearer(manager.token)).expect(204);
@@ -589,15 +630,15 @@ describe('extensions', () => {
     const coowner = await signupAndAccept(app, uniqNs());
     const candidate = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/orgs/${ns}/owners/${formerOwner.user.namespace}`)
+      .put(apiPath(`/orgs/${ns}/owners/${formerOwner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await request(app)
-      .delete(`/v1/orgs/${ns}/owners/${formerOwner.user.namespace}`)
+      .delete(apiPath(`/orgs/${ns}/owners/${formerOwner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await publishProject(app, ns, 'hello', owner.token);
-    const extensionPath = `/v1/@${ns}/hello`;
+    const extensionPath = apiPath(`/@${ns}/hello`);
     await request(app)
       .put(`${extensionPath}/owners/${coowner.user.namespace}`)
       .set(bearer(owner.token))
@@ -640,20 +681,24 @@ describe('extensions', () => {
     await publishProject(app, ns, 'widget', owner.token);
     await approveVersion(app, admin.token, ns, 'widget', '1.0.0');
 
-    const list = await request(app).get(`/v1/orgs/${ns}/extensions`).expect(200);
+    const list = await request(app)
+      .get(apiPath(`/orgs/${ns}/extensions`))
+      .expect(200);
     assert.deepEqual(
       list.body.data.map((row) => `${row.namespace}/${row.id}`),
       [`${ns}/widget`],
     );
 
     // The same filter is available on the registry listing, and the two agree.
-    const registry = await request(app).get(`/v1/extensions?namespace=${ns}`).expect(200);
+    const registry = await request(app)
+      .get(apiPath(`/extensions?namespace=${ns}`))
+      .expect(200);
     assert.deepEqual(
       registry.body.data.map((row) => `${row.namespace}/${row.id}`),
       [`${ns}/widget`],
     );
 
-    const bad = await request(app).get('/v1/extensions?namespace=Not Valid');
+    const bad = await request(app).get(apiPath('/extensions?namespace=Not Valid'));
     assert.equal(bad.status, 400);
   });
 });
@@ -664,14 +709,16 @@ describe('webhooks', () => {
     const { ns, owner } = await org();
     const url = PUBLIC_URL;
     const created = await request(app)
-      .post(`/v1/orgs/${ns}/webhooks`)
+      .post(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(owner.token))
       .send({ url, events: ['version.published'] })
       .expect(201);
     assert.ok(created.body.secret, 'the secret is returned once, at creation');
     assert.equal(created.body.extension_id, null, 'the hook names no single extension');
 
-    const list = await request(app).get(`/v1/orgs/${ns}/webhooks`).set(bearer(owner.token));
+    const list = await request(app)
+      .get(apiPath(`/orgs/${ns}/webhooks`))
+      .set(bearer(owner.token));
     assert.equal(list.body.data.length, 1);
     assert.equal(list.body.data[0].secret, undefined, 'listing never returns the secret');
 
@@ -705,7 +752,7 @@ describe('webhooks', () => {
   test('a hook on one extension is not the organization hook', async () => {
     const { ns, owner } = await org();
     const created = await request(app)
-      .post(`/v1/orgs/${ns}/webhooks`)
+      .post(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(owner.token))
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(201);
@@ -716,7 +763,7 @@ describe('webhooks', () => {
     // The per-extension collection is a different scope, so the namespace-wide
     // hook must not turn up in it...
     const perExtension = await request(app)
-      .get(`/v1/@${ns}/one/webhooks`)
+      .get(apiPath(`/@${ns}/one/webhooks`))
       .set(bearer(owner.token))
       .expect(200);
     assert.deepEqual(perExtension.body.data, []);
@@ -724,17 +771,17 @@ describe('webhooks', () => {
     // ...and deleting the id from either collection is refused when it belongs
     // to the other one.
     const wrongScope = await request(app)
-      .delete(`/v1/@${ns}/one/webhooks/${orgHookId}`)
+      .delete(apiPath(`/@${ns}/one/webhooks/${orgHookId}`))
       .set(bearer(owner.token))
       .expect(404);
     assert.equal(wrongScope.status, 404);
 
     await request(app)
-      .delete(`/v1/orgs/${ns}/webhooks/${orgHookId}`)
+      .delete(apiPath(`/orgs/${ns}/webhooks/${orgHookId}`))
       .set(bearer(owner.token))
       .expect(204);
     await request(app)
-      .get(`/v1/orgs/${ns}/webhooks`)
+      .get(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(owner.token))
       .expect(200)
       .expect((r) => assert.deepEqual(r.body.data, []));
@@ -744,24 +791,27 @@ describe('webhooks', () => {
     const { ns } = await org();
     const outsider = await signupAndAccept(app, uniqNs());
     await request(app)
-      .post(`/v1/orgs/${ns}/webhooks`)
+      .post(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(outsider.token))
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(403);
-    await request(app).get(`/v1/orgs/${ns}/webhooks`).set(bearer(outsider.token)).expect(403);
+    await request(app)
+      .get(apiPath(`/orgs/${ns}/webhooks`))
+      .set(bearer(outsider.token))
+      .expect(403);
   });
 
   test('hook input is validated the same way as an extension hook', async () => {
     const { ns, owner } = await org();
     const badEvents = await request(app)
-      .post(`/v1/orgs/${ns}/webhooks`)
+      .post(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(owner.token))
       .send({ url: PUBLIC_URL, events: ['nope'] });
     assert.equal(badEvents.status, 422);
     assert.equal(badEvents.body.errors[0].field, 'events');
 
     const badUrl = await request(app)
-      .post(`/v1/orgs/${ns}/webhooks`)
+      .post(apiPath(`/orgs/${ns}/webhooks`))
       .set(bearer(owner.token))
       .send({ url: 'https://localhost:9911/hook', events: ['version.published'] });
     assert.equal(badUrl.status, 422);
@@ -772,10 +822,14 @@ describe('webhooks', () => {
 describe('images', () => {
   test('an avatar is served under /orgs and the identicon is the fallback', async () => {
     const { ns } = await org();
-    const identicon = await request(app).get(`/v1/orgs/${ns}/avatar`).expect(200);
+    const identicon = await request(app)
+      .get(apiPath(`/orgs/${ns}/avatar`))
+      .expect(200);
     assert.match(identicon.headers['content-type'], /svg/);
 
-    const orgProfile = await request(app).get(`/v1/orgs/${ns}`).expect(200);
+    const orgProfile = await request(app)
+      .get(apiPath(`/orgs/${ns}`))
+      .expect(200);
     // Nothing uploaded and nothing linked: the body says so rather than
     // pointing at the identicon, which is what an account reports too.
     assert.equal(orgProfile.body.avatarUrl, null);
@@ -792,20 +846,20 @@ describe('images', () => {
       .toBuffer();
 
     await request(app)
-      .put(`/v1/orgs/${ns}/avatar`)
+      .put(apiPath(`/orgs/${ns}/avatar`))
       .set(bearer(outsider.token))
       .set('Content-Type', 'image/png')
       .send(png)
       .expect(403);
 
     const uploaded = await request(app)
-      .put(`/v1/orgs/${ns}/avatar`)
+      .put(apiPath(`/orgs/${ns}/avatar`))
       .set(bearer(owner.token))
       .set('Content-Type', 'image/png')
       .send(png)
       .expect(200);
     const url = new URL(uploaded.body.avatarUrl);
-    assert.equal(url.pathname, `/v1/orgs/${ns}/avatar`);
+    assert.equal(url.pathname, apiPath(`/orgs/${ns}/avatar`));
     assert.ok(url.searchParams.get('v'), 'the published URL names the exact bytes');
 
     const fetched = await request(app)
@@ -813,8 +867,13 @@ describe('images', () => {
       .expect(200);
     assert.equal(fetched.headers['cache-control'], 'public, max-age=31536000, immutable');
 
-    await request(app).delete(`/v1/orgs/${ns}/avatar`).set(bearer(owner.token)).expect(200);
-    const cleared = await request(app).get(`/v1/orgs/${ns}`).expect(200);
+    await request(app)
+      .delete(apiPath(`/orgs/${ns}/avatar`))
+      .set(bearer(owner.token))
+      .expect(200);
+    const cleared = await request(app)
+      .get(apiPath(`/orgs/${ns}`))
+      .expect(200);
     assert.equal(cleared.body.avatarUrl, null);
   });
 });

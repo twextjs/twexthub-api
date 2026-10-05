@@ -2,6 +2,7 @@ import { test, before, beforeEach, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
+  apiPath,
   approveVersion,
   bearer,
   boot,
@@ -26,7 +27,7 @@ async function makeOrg() {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = uniqNs();
   const created = await request(app)
-    .post('/v1/orgs')
+    .post(apiPath('/orgs'))
     .set(bearer(owner.token))
     .send({ namespace: ns, displayName: 'Acme Inc' });
   assert.equal(created.status, 201, `org create failed: ${JSON.stringify(created.body)}`);
@@ -35,7 +36,7 @@ async function makeOrg() {
 
 async function addOrgOwner(org, who) {
   await request(app)
-    .put(`/v1/orgs/${org.ns}/owners/${who.user.namespace}`)
+    .put(apiPath(`/orgs/${org.ns}/owners/${who.user.namespace}`))
     .set(bearer(org.owner.token))
     .expect(204);
 }
@@ -54,23 +55,34 @@ async function publishedExtension(id = 'hello', opts = {}) {
 }
 
 const ownerNames = async (ns, id) =>
-  (await request(app).get(`/v1/@${ns}/${id}/owners`).expect(200)).body.data.map(
-    (row) => row.namespace,
-  );
+  (
+    await request(app)
+      .get(apiPath(`/@${ns}/${id}/owners`))
+      .expect(200)
+  ).body.data.map((row) => row.namespace);
 
 const pendingFor = async (ns, id, token) =>
   (
-    await request(app).get(`/v1/@${ns}/${id}/owners/pending`).set(bearer(token)).expect(200)
+    await request(app)
+      .get(apiPath(`/@${ns}/${id}/owners/pending`))
+      .set(bearer(token))
+      .expect(200)
   ).body.data.map((row) => row.namespace);
 
 const invite = (ns, id, who, token) =>
-  request(app).put(`/v1/@${ns}/${id}/owners/${who}`).set(bearer(token)).expect(204);
+  request(app)
+    .put(apiPath(`/@${ns}/${id}/owners/${who}`))
+    .set(bearer(token))
+    .expect(204);
 
 const accept = (ns, id, who, token) =>
-  request(app).post(`/v1/@${ns}/${id}/owners/${who}/accept`).set(bearer(token)).expect(200);
+  request(app)
+    .post(apiPath(`/@${ns}/${id}/owners/${who}/accept`))
+    .set(bearer(token))
+    .expect(200);
 
 const notifications = async (token) =>
-  (await request(app).get('/v1/notifications').set(bearer(token)).expect(200)).body.data;
+  (await request(app).get(apiPath('/notifications')).set(bearer(token)).expect(200)).body.data;
 
 describe('an invitation grants nothing until it is accepted', () => {
   test('concurrent acceptances grant ownership only once', async () => {
@@ -83,7 +95,7 @@ describe('an invitation grants nothing until it is accepted', () => {
       for (let i = 0; i < 2; i += 1) {
         attempts.push(
           request(app)
-            .post(`/v1/@${ns}/hello/owners/${candidate.user.namespace}/accept`)
+            .post(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}/accept`))
             .set(bearer(candidate.token))
             .then((response) => response),
         );
@@ -135,7 +147,7 @@ describe('an invitation grants nothing until it is accepted', () => {
     const other = await signupAndAccept(app, uniqNs());
     await invite(ns, 'hello', other.user.namespace, owner.token);
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${other.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${other.user.namespace}/accept`))
       .set(bearer(stranger.token))
       .expect(403);
   });
@@ -148,7 +160,7 @@ describe('an invitation grants nothing until it is accepted', () => {
     await invite(ns, 'hello', candidate.user.namespace, owner.token);
 
     const pending = await request(app)
-      .get(`/v1/@${ns}/hello/owners/pending`)
+      .get(apiPath(`/@${ns}/hello/owners/pending`))
       .set(bearer(candidate.token))
       .expect(200);
     assert.deepEqual(pending.body.data, [
@@ -174,7 +186,10 @@ describe('an invitation grants nothing until it is accepted', () => {
 
   test('the namespace account cannot be invited', async () => {
     const { ns, owner } = await publishedExtension();
-    await request(app).put(`/v1/@${ns}/hello/owners/${ns}`).set(bearer(owner.token)).expect(422);
+    await request(app)
+      .put(apiPath(`/@${ns}/hello/owners/${ns}`))
+      .set(bearer(owner.token))
+      .expect(422);
   });
 
   test('a co-owner cannot invite a third party', async () => {
@@ -187,7 +202,7 @@ describe('an invitation grants nothing until it is accepted', () => {
     // the namespace account's to send, and an admin's.
     const third = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/@${ns}/hello/owners/${third.user.namespace}`)
+      .put(apiPath(`/@${ns}/hello/owners/${third.user.namespace}`))
       .set(bearer(coOwner.token))
       .expect(403);
     assert.ok(!(await ownerNames(ns, 'hello')).includes(third.user.namespace));
@@ -214,7 +229,7 @@ describe('an organization as an extension owner', () => {
     // invitation or speak for it, however well it knows the extension.
     assert.deepEqual(await pendingFor(ns, 'hello', partner.token), []);
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${acme.ns}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${acme.ns}/accept`))
       .set(bearer(partner.token))
       .expect(403);
 
@@ -223,9 +238,11 @@ describe('an organization as an extension owner', () => {
     await accept(ns, 'hello', acme.ns, partner.token);
 
     assert.ok((await ownerNames(ns, 'hello')).includes(acme.ns));
-    const listed = (await request(app).get(`/v1/@${ns}/hello/owners`).expect(200)).body.data.find(
-      (row) => row.namespace === acme.ns,
-    );
+    const listed = (
+      await request(app)
+        .get(apiPath(`/@${ns}/hello/owners`))
+        .expect(200)
+    ).body.data.find((row) => row.namespace === acme.ns);
     assert.equal(listed.kind, 'organization');
     assert.deepEqual(await pendingFor(ns, 'hello', acme.owner.token), []);
 
@@ -251,7 +268,10 @@ describe('an organization as an extension owner', () => {
     await accept(ns, 'hello', acme.ns, acme.owner.token);
     assert.ok((await ownerNames(ns, 'hello')).includes(acme.ns));
 
-    await request(app).delete(`/v1/orgs/${acme.ns}`).set(bearer(acme.owner.token)).expect(204);
+    await request(app)
+      .delete(apiPath(`/orgs/${acme.ns}`))
+      .set(bearer(acme.owner.token))
+      .expect(204);
 
     assert.ok(!(await ownerNames(ns, 'hello')).includes(acme.ns));
     await publishProject(
@@ -272,13 +292,13 @@ describe('withdrawing', () => {
     await invite(ns, 'hello', candidate.user.namespace, owner.token);
 
     await request(app)
-      .delete(`/v1/@${ns}/hello/owners/${candidate.user.namespace}`)
+      .delete(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
 
     assert.ok((await notifications(candidate.token)).some((row) => /withdrawn/.test(row.message)));
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${candidate.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}/accept`))
       .set(bearer(candidate.token))
       .expect(404);
     await publishProject(
@@ -292,7 +312,7 @@ describe('withdrawing', () => {
 
     // Nothing left to withdraw or remove.
     await request(app)
-      .delete(`/v1/@${ns}/hello/owners/${candidate.user.namespace}`)
+      .delete(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}`))
       .set(bearer(owner.token))
       .expect(404);
   });
@@ -310,7 +330,7 @@ describe('withdrawing', () => {
     });
 
     await request(app)
-      .delete(`/v1/@${ns}/hello/owners/${acme.ns}`)
+      .delete(apiPath(`/@${ns}/hello/owners/${acme.ns}`))
       .set(bearer(owner.token))
       .expect(204);
 
@@ -324,12 +344,15 @@ describe('withdrawing', () => {
     const candidate = await signupAndAccept(app, uniqNs());
     await invite(ns, 'hello', candidate.user.namespace, owner.token);
 
-    await request(app).delete(`/v1/@${ns}/hello`).set(bearer(owner.token)).expect(204);
+    await request(app)
+      .delete(apiPath(`/@${ns}/hello`))
+      .set(bearer(owner.token))
+      .expect(204);
 
     const [{ count }] = await sql`SELECT count(*)::int AS count FROM extension_owner_invites`;
     assert.equal(count, 0);
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${candidate.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}/accept`))
       .set(bearer(candidate.token))
       .expect(404);
   });

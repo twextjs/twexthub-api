@@ -7,7 +7,15 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import request from 'supertest';
 import YAML from 'yaml';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, tarballFromDir } from './helpers.mjs';
+import {
+  apiPath,
+  bearer,
+  boot,
+  resetDb,
+  signupAndAccept,
+  tarballFromDir,
+  uniqNs,
+} from './helpers.mjs';
 import { compileProject } from '../src/compiler.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test-fixtures');
@@ -24,13 +32,13 @@ after(async () => {
 
 async function approveFixture(adminToken, ns, id, version) {
   const queue = await request(app)
-    .get('/v1/versions?status=pending')
+    .get(apiPath('/versions?status=pending'))
     .set(bearer(adminToken))
     .expect(200);
   const entry = queue.body.data.find((v) => v.namespace === ns && v.id === id);
   assert.ok(entry, `pending entry for ${id}`);
   await request(app)
-    .patch(`/v1/@${ns}/${id}/versions/${version}`)
+    .patch(apiPath(`/@${ns}/${id}/versions/${version}`))
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
@@ -84,7 +92,7 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   const version = manifest.version;
 
   const pub = await request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
+    .post(apiPath(`/@${ns}/${id}/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(await tarballFromDir(path.join(FIXTURES, 'greeter')))
@@ -97,7 +105,9 @@ test('fixture greeter round-trips byte-for-byte', async () => {
   await approveFixture(admin.token, ns, id, version);
 
   // The server's sandbox build must reproduce the committed artifact exactly.
-  const dl = await request(app).get(`/v1/@${ns}/${id}/versions/${version}/download`).expect(200);
+  const dl = await request(app)
+    .get(apiPath(`/@${ns}/${id}/versions/${version}/download`))
+    .expect(200);
   assert.match(dl.headers['content-type'], /javascript/);
   assert.deepEqual(
     Buffer.from(dl.text, 'utf8'),
@@ -105,7 +115,9 @@ test('fixture greeter round-trips byte-for-byte', async () => {
     'downloaded bytes must match the compiled fixture exactly',
   );
 
-  const detail = await request(app).get(`/v1/@${ns}/${id}`).expect(200);
+  const detail = await request(app)
+    .get(apiPath(`/@${ns}/${id}`))
+    .expect(200);
   assert.equal(detail.body.version, version);
   assert.equal(detail.body.color1, '#0094FF');
   assert.equal(detail.body.license, 'MIT');
@@ -123,7 +135,7 @@ test('fixture hello auto-publishes after first approval; source changes are hono
   const original = await helloFixture.run();
 
   await request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
+    .post(apiPath(`/@${ns}/${id}/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(await tarballFromDir(path.join(FIXTURES, 'hello')))
@@ -131,7 +143,7 @@ test('fixture hello auto-publishes after first approval; source changes are hono
   await approveFixture(admin.token, ns, id, version);
 
   const firstDownload = await request(app)
-    .get(`/v1/@${ns}/${id}/versions/${version}/download`)
+    .get(apiPath(`/@${ns}/${id}/versions/${version}/download`))
     .expect(200);
   assert.deepEqual(Buffer.from(firstDownload.text, 'utf8'), original);
 
@@ -154,7 +166,9 @@ test('fixture hello auto-publishes after first approval; source changes are hono
   assert.equal(second.status, 201);
   assert.equal(second.body.status, 'published');
 
-  const dl = await request(app).get(`/v1/@${ns}/${id}/versions/0.2.0/download`).expect(200);
+  const dl = await request(app)
+    .get(apiPath(`/@${ns}/${id}/versions/0.2.0/download`))
+    .expect(200);
   assert.deepEqual(Buffer.from(dl.text, 'utf8'), replaced);
 });
 
@@ -179,7 +193,7 @@ async function publishFixture(ns, id, token, fixtureDir, sourceFiles, version = 
       }
     }
     return await request(app)
-      .post(`/v1/@${ns}/${id}/versions`)
+      .post(apiPath(`/@${ns}/${id}/versions`))
       .set(bearer(token))
       .set('Content-Type', 'application/gzip')
       .send(await tarballFromDir(dir))

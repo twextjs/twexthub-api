@@ -15,7 +15,6 @@ Here is a configuration that uses every key:
 ```yaml
 port: 3000
 dataDir: ./data
-apiRoot: /v1
 publicBaseUrl: http://localhost:3000
 requireHttps: false
 trustProxy: false
@@ -102,7 +101,7 @@ Not every key has an environment variable: `database.connectTimeoutSeconds`, `da
 
 - `port`: Port the HTTP server listens on. Defaults to `3000`. `TWEXTHUB_PORT`.
 - `dataDir`: Directory holding everything the instance stores on disk — compiled blobs, retained project sources, build temporary files, and the generated download-address key. Relative paths resolve against the working directory. Defaults to `./data`. `TWEXTHUB_DATA_DIR`. It has to be persistent storage; see [Data Persistence](./deploy.md#-data-persistence).
-- `apiRoot`: URL prefix every route is served under. Leading and trailing slashes are ignored, so `/v1` and `v1` are the same thing; an empty string serves the API at the root. Defaults to `/v1`. `TWEXTHUB_API_ROOT`.
+- `apiRoot`: URL prefix every route is served under. Leading and trailing slashes are ignored, so `/v1` and `v1` are the same thing; an empty string serves the API at the root. Defaults to the `defaults.apiRoot` value in `product.yml` (`/v2`). `TWEXTHUB_API_ROOT`.
 - `publicBaseUrl`: Absolute URL of the instance, used to build download, source, and profile image links in responses. Defaults to `http://localhost:3000`. `TWEXTHUB_PUBLIC_BASE_URL`.
 - `requireHttps`: Reject plain HTTP requests with a `403`. Turn it on when the instance is served over TLS. Defaults to `false`. `TWEXTHUB_REQUIRE_HTTPS`.
 - `trustProxy`: Handed to Express as its [trust proxy](https://expressjs.com/en/guide/behind-proxies.html) setting. Set it when the API runs behind a reverse proxy, or the rate limits will count the proxy's address instead of each client's. Defaults to `false`. `TWEXTHUB_TRUST_PROXY`.

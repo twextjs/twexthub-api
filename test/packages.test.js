@@ -4,13 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
 import {
-  boot,
-  resetDb,
-  bearer,
-  uniqNs,
-  signupAndAccept,
-  publishProject,
+  apiPath,
   approveVersion,
+  bearer,
+  boot,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -39,7 +40,7 @@ test('first publish -> pending; list empty until approved', async () => {
   assert.equal(r.status, 201);
   assert.equal(r.body.status, 'pending');
 
-  const list = await request(app).get('/v1/extensions');
+  const list = await request(app).get(apiPath('/extensions'));
   assert.equal(list.status, 200);
   assert.equal(list.body.data.length, 0);
 });
@@ -47,7 +48,7 @@ test('first publish -> pending; list empty until approved', async () => {
 test('unauthenticated publish is 401', async () => {
   const ns = uniqNs();
   await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
+    .post(apiPath(`/@${ns}/hello/versions`))
     .set('Content-Type', 'application/gzip')
     .send(Buffer.from('not-a-real-publish'))
     .expect(401);
@@ -66,7 +67,9 @@ test('version must be strictly greater semver than published', async () => {
   const post = (v, status = 201) =>
     publishProject(app, ownerNs, 'hello', ownerToken, { version: v }, status);
   const approve = async () => {
-    const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+    const queue = await request(app)
+      .get(apiPath('/versions?status=pending'))
+      .set(bearer(adminToken));
     await approveVersion(app, adminToken, ownerNs, 'hello', queue.body.data[0].version);
   };
 
@@ -83,14 +86,14 @@ test('admin approves pending; subsequent publishes auto-published', async () => 
   const first = await publishProject(app, ownerNs, 'hello', ownerToken);
   assert.equal(first.body.status, 'pending');
 
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+  const queue = await request(app).get(apiPath('/versions?status=pending')).set(bearer(adminToken));
   assert.equal(queue.body.data.length, 1);
   const version = queue.body.data[0].version;
 
   const approve = await approveVersion(app, adminToken, ownerNs, 'hello', version);
   assert.equal(approve.body.status, 'published');
 
-  const list = await request(app).get('/v1/extensions');
+  const list = await request(app).get(apiPath('/extensions'));
   assert.equal(list.body.data.length, 1);
   assert.equal(list.body.data[0].version, '1.0.0');
 
@@ -104,9 +107,14 @@ test('latest resolves by SemVer across a yank/re-publish sequence', async () => 
 
   const post = (v, code, status = 201) =>
     publishProject(app, ownerNs, 'hello', ownerToken, { version: v, code }, status);
-  const latest = () => request(app).get(`/v1/@${ownerNs}/hello/versions/latest`).expect(200);
+  const latest = () =>
+    request(app)
+      .get(apiPath(`/@${ownerNs}/hello/versions/latest`))
+      .expect(200);
   const approveFirst = async () => {
-    const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+    const queue = await request(app)
+      .get(apiPath('/versions?status=pending'))
+      .set(bearer(adminToken));
     await approveVersion(app, adminToken, ownerNs, 'hello', queue.body.data[0].version);
   };
 
@@ -118,14 +126,14 @@ test('latest resolves by SemVer across a yank/re-publish sequence', async () => 
 
   // yank the newest version; latest must fall back to the next-highest published
   await request(app)
-    .delete(`/v1/@${ownerNs}/hello/versions/2.0.0`)
+    .delete(apiPath(`/@${ownerNs}/hello/versions/2.0.0`))
     .set(bearer(ownerToken))
     .expect(204);
   assert.equal((await latest()).body.version, '1.0.0');
 
   // the yanked blob stays downloadable
   const yankedDownload = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/2.0.0/download`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/2.0.0/download`))
     .expect(200);
   assert.match(yankedDownload.text, /console\.log\(2\)/);
 
@@ -138,7 +146,7 @@ test('latest resolves by SemVer across a yank/re-publish sequence', async () => 
   assert.equal((await latest()).body.version, '2.0.1');
 
   // extensions listing must not surface yanked versions
-  const listing = await request(app).get('/v1/extensions').expect(200);
+  const listing = await request(app).get(apiPath('/extensions')).expect(200);
   assert.equal(listing.body.data.length, 1);
   assert.equal(listing.body.data[0].version, '2.0.1');
 });
@@ -149,7 +157,7 @@ test('non-admin cannot review', async () => {
   await publishProject(app, ns, 'hello', token);
   const normNs = uniqNs();
   const nb = await signupAndAccept(app, normNs);
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(nb.token));
+  const queue = await request(app).get(apiPath('/versions?status=pending')).set(bearer(nb.token));
   assert.equal(queue.status, 403);
 });
 
@@ -158,10 +166,10 @@ test('download serves compiled output with javascript content type', async () =>
   await publishProject(app, ownerNs, 'hello', ownerToken, {
     code: 'console.log("DOWNLOAD_SPECIAL");',
   });
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+  const queue = await request(app).get(apiPath('/versions?status=pending')).set(bearer(adminToken));
   await approveVersion(app, adminToken, ownerNs, 'hello', queue.body.data[0].version);
 
-  const dl = await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`);
+  const dl = await request(app).get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`));
   assert.equal(dl.status, 200);
   assert.match(dl.headers['content-type'], /javascript/);
   assert.match(dl.text, /DOWNLOAD_SPECIAL/);
@@ -174,7 +182,7 @@ test('admin can download a pending version source for review', async () => {
   });
 
   const dl = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
     .set(bearer(adminToken));
   assert.equal(dl.status, 200);
   assert.match(dl.headers['content-type'], /javascript/);
@@ -188,35 +196,39 @@ test('pending version source is gated to owners and admins', async () => {
   });
 
   // The compiled blob stays hidden until approval: anonymous 404, owner 404.
-  const anonymousDownload = await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`);
+  const anonymousDownload = await request(app).get(
+    apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`),
+  );
   assert.equal(anonymousDownload.status, 404);
 
   const ownerDownload = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
     .set(bearer(ownerToken));
   assert.equal(ownerDownload.status, 404);
 
   // The source tarball is review-grade material: anonymous 401, the owner can
   // fetch their own, and an unrelated authenticated user gets a 404.
-  const anonymousSource = await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`);
+  const anonymousSource = await request(app).get(
+    apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`),
+  );
   assert.equal(anonymousSource.status, 401);
 
   const otherNs = uniqNs();
   const other = await signupAndAccept(app, otherNs);
   const otherSource = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(other.token));
   assert.equal(otherSource.status, 404);
 
   const ownerSource = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(ownerToken));
   assert.equal(ownerSource.status, 200);
   assert.match(ownerSource.headers['content-type'], /gzip/);
   assert.ok(ownerSource.body.length > 0);
 
   const adminSource = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(adminToken));
   assert.equal(adminSource.status, 200);
 });
@@ -228,7 +240,7 @@ test('reading version source needs the read:source scope', async () => {
   });
 
   const created = await request(app)
-    .post('/v1/tokens')
+    .post(apiPath('/tokens'))
     .set(bearer(adminToken))
     .send({ name: 'ci', scopes: ['publish'] })
     .expect(201);
@@ -236,24 +248,24 @@ test('reading version source needs the read:source scope', async () => {
   // The admin role alone is not what reads source, and neither is being able to
   // download a pending build.
   const dl = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
     .set(bearer(created.body.token));
   assert.equal(dl.status, 404);
 
   const src = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(created.body.token));
   assert.equal(src.status, 403);
   assert.match(src.body.detail, /missing the required "read:source" scope/);
 
   // With the scope the same account reads it, and a pending version with it.
   const granted = await request(app)
-    .post('/v1/tokens')
+    .post(apiPath('/tokens'))
     .set(bearer(adminToken))
     .send({ name: 'srcbot', scopes: ['read:source'] })
     .expect(201);
   const ok = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(granted.body.token))
     .expect(200);
   assert.match(ok.headers['content-type'], /gzip/);
@@ -262,12 +274,12 @@ test('reading version source needs the read:source scope', async () => {
   // extension stays invisible to it.
   const stranger = await signupAndAccept(app, uniqNs());
   const strangerToken = await request(app)
-    .post('/v1/tokens')
+    .post(apiPath('/tokens'))
     .set(bearer(stranger.token))
     .send({ name: 'nosy', scopes: ['read:source'] })
     .expect(201);
   const denied = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/source`))
     .set(bearer(strangerToken.body.token));
   assert.equal(denied.status, 404);
 });
@@ -275,7 +287,7 @@ test('reading version source needs the read:source scope', async () => {
 test('published versions expose digest and integrity, served from /blobs/:digest', async () => {
   const { adminToken, ownerToken, ownerNs } = await makeAdminAndOwner();
   await publishProject(app, ownerNs, 'hello', ownerToken, { code: 'const DIGESTY = 42;' });
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(adminToken));
+  const queue = await request(app).get(apiPath('/versions?status=pending')).set(bearer(adminToken));
   const approved = await approveVersion(
     app,
     adminToken,
@@ -287,11 +299,13 @@ test('published versions expose digest and integrity, served from /blobs/:digest
   assert.match(approved.body.dist.integrity, /^sha512-[A-Za-z0-9+/=]+$/);
 
   const compiled = (
-    await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`).expect(200)
+    await request(app)
+      .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
+      .expect(200)
   ).text;
 
   const byDigest = await request(app)
-    .get(`/v1/blobs/${approved.body.dist.digest.slice(7)}`)
+    .get(apiPath(`/blobs/${approved.body.dist.digest.slice(7)}`))
     .expect(200);
   assert.equal(byDigest.text, compiled);
   assert.match(byDigest.headers['cache-control'], /immutable/);
@@ -330,11 +344,19 @@ test('a version awaiting moderation is not served by digest', async () => {
 
   // Knowing the digest is not authorization: an unreviewed version's compiled
   // output stays with the moderation queue.
-  await request(app).get(`/v1/blobs/${row.blob_digest}`).expect(404);
+  await request(app)
+    .get(apiPath(`/blobs/${row.blob_digest}`))
+    .expect(404);
   // Not to the owner either: the download route refuses them the same way.
-  await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(ownerToken)).expect(404);
+  await request(app)
+    .get(apiPath(`/blobs/${row.blob_digest}`))
+    .set(bearer(ownerToken))
+    .expect(404);
   // The moderation queue is where an unapproved version is meant to be read.
-  await request(app).get(`/v1/blobs/${row.blob_digest}`).set(bearer(adminToken)).expect(200);
+  await request(app)
+    .get(apiPath(`/blobs/${row.blob_digest}`))
+    .set(bearer(adminToken))
+    .expect(200);
 });
 
 test('a version points at itself, its extension, its author and its bytes', async () => {
@@ -342,14 +364,14 @@ test('a version points at itself, its extension, its author and its bytes', asyn
   await publishProject(app, ownerNs, 'hello', ownerToken);
 
   const queued = await request(app)
-    .get('/v1/versions?status=pending')
+    .get(apiPath('/versions?status=pending'))
     .set(bearer(adminToken))
     .expect(200);
   const pending = queued.body.data[0];
   assert.equal(pending.status, 'pending');
-  assert.equal(pending._links.self, `/v1/@${ownerNs}/hello/versions/${pending.version}`);
-  assert.equal(pending._links.extension, `/v1/@${ownerNs}/hello`);
-  assert.equal(pending._links.author, `/v1/users/${ownerNs}`);
+  assert.equal(pending._links.self, apiPath(`/@${ownerNs}/hello/versions/${pending.version}`));
+  assert.equal(pending._links.extension, apiPath(`/@${ownerNs}/hello`));
+  assert.equal(pending._links.author, apiPath(`/users/${ownerNs}`));
   // Nothing has been approved, so there are no bytes to point at yet.
   assert.equal(pending._links.download, undefined);
   // The source is there, though, and that is what a moderator reads.
@@ -361,10 +383,10 @@ test('a version points at itself, its extension, its author and its bytes', asyn
 
   await approveVersion(app, adminToken, ownerNs, 'hello', pending.version);
   const got = await request(app)
-    .get(`/v1/@${ownerNs}/hello/versions/${pending.version}`)
+    .get(apiPath(`/@${ownerNs}/hello/versions/${pending.version}`))
     .expect(200);
   assert.equal(got.body._links.download, got.body.dist.downloadUrl);
-  assert.equal(got.body._links.self, `/v1/@${ownerNs}/hello/versions/${pending.version}`);
+  assert.equal(got.body._links.self, apiPath(`/@${ownerNs}/hello/versions/${pending.version}`));
 
   // Every link a version carries has to be a page that answers, or following it
   // is a 404 the client has to guess the meaning of.

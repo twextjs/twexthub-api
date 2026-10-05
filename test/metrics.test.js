@@ -1,7 +1,15 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  apiPath,
+  bearer,
+  boot,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
+} from './helpers.mjs';
 import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
@@ -19,7 +27,7 @@ after(async () => {
 async function publishAs(ns, nsToken, adminToken, id, version, code) {
   await publishProject(app, ns, id, nsToken, { version, code });
   await request(app)
-    .patch(`/v1/@${ns}/${id}/versions/${version}`)
+    .patch(apiPath(`/@${ns}/${id}/versions/${version}`))
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
@@ -46,8 +54,12 @@ test('downloads are counted, surfaced, and feed trending', async () => {
     code: '// gizmo',
   });
 
-  await request(app).get(`/v1/@${ownerNs}/hello/versions/latest/download`).expect(200);
-  await request(app).get(`/v1/@${ownerNs}/hello/versions/latest/download`).expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/latest/download`))
+    .expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/latest/download`))
+    .expect(200);
 
   await sql.unsafe(`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash, created_at)
@@ -73,17 +85,19 @@ test('downloads are counted, surfaced, and feed trending', async () => {
   `;
   assert.ok(Number(bucket.total_downloads) >= 2);
 
-  const detail = await request(app).get(`/v1/@${ownerNs}/hello`).expect(200);
+  const detail = await request(app)
+    .get(apiPath(`/@${ownerNs}/hello`))
+    .expect(200);
   assert.ok(Number(detail.body.downloads) >= 2);
 
   // widget (3 days ago) makes trending; gizmo (8 days) does not
-  const trending = await request(app).get('/v1/extensions/trending').expect(200);
+  const trending = await request(app).get(apiPath('/extensions/trending')).expect(200);
   const entries = trending.body.data.map((e) => `${e.namespace}/${e.id}`);
   const trendingId = (id) => entries.find((key) => key.endsWith('/' + id));
   assert.ok(trendingId('widget'), `widget missing from ${entries.join(', ')}`);
   assert.ok(!trendingId('gizmo'), 'gizmo should not trend');
 
-  const stats = await request(app).get('/v1/stats').expect(200);
+  const stats = await request(app).get(apiPath('/stats')).expect(200);
   assert.ok(Number(stats.body.downloads) >= 2);
 });
 
@@ -104,7 +118,7 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
   await aggregateDay(sixDaysAgo);
   await aggregateDay(sevenDaysAgo);
 
-  const trending = await request(app).get('/v1/extensions/trending').expect(200);
+  const trending = await request(app).get(apiPath('/extensions/trending')).expect(200);
   const ids = trending.body.data.map((entry) => entry.id);
   assert.ok(ids.includes('recent'));
   assert.ok(!ids.includes('old'));
@@ -126,15 +140,19 @@ test('trending selects a deprecated version when a newer version was yanked', as
     VALUES (${ownerNs}, 'hello', CURRENT_DATE, 3)
   `;
 
-  const trending = await request(app).get('/v1/extensions/trending').expect(200);
+  const trending = await request(app).get(apiPath('/extensions/trending')).expect(200);
   assert.equal(trending.body.data.length, 1);
   assert.equal(trending.body.data[0].version, '1.0.0');
 });
 
 test('a download records a keyed hash of the address, never the address', async () => {
   const { ownerNs } = await makePublished();
-  await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`).expect(200);
-  await request(app).get(`/v1/@${ownerNs}/hello/versions/1.0.0/download`).expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
+    .expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
+    .expect(200);
 
   const readEvents = () => sql`
     SELECT ip_hash FROM download_events

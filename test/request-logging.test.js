@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { makeConfig } from './helpers.mjs';
+import { apiPath, makeConfig } from './helpers.mjs';
 import { createApp } from '../src/app.js';
 import { createDb, ensureDataDirs } from '../src/db.js';
 
@@ -16,8 +16,8 @@ test('logging.requests emits one JSON line per request', async () => {
   console.log = (...args) => lines.push(args);
 
   try {
-    await request(app).get('/v1/meta').expect(200);
-    await request(app).get('/v1/definitely-not-here').expect(404);
+    await request(app).get(apiPath('/meta')).expect(200);
+    await request(app).get(apiPath('/definitely-not-here')).expect(404);
   } finally {
     console.log = original;
   }
@@ -29,12 +29,12 @@ test('logging.requests emits one JSON line per request', async () => {
   const ok = parsed.filter((entry) => entry.msg === 'request');
   assert.equal(ok.length, 2, `expected two request logs, got ${JSON.stringify(parsed)}`);
 
-  const matched = ok.find((entry) => entry.route === '/v1/meta');
+  const matched = ok.find((entry) => entry.route === apiPath('/meta'));
   assert.ok(matched, 'matched route is labeled by pattern, including the apiRoot');
   assert.equal(matched.method, 'GET');
   assert.equal(matched.status, 200);
   assert.equal(typeof matched.durationMs, 'number');
-  assert.match(matched.path, /^\/v1\/meta$/);
+  assert.match(matched.path, new RegExp(`^${apiPath('/meta')}$`));
 
   const unmatched = ok.find((entry) => entry.route === 'unmatched');
   assert.ok(unmatched, 'unmatched paths still get a line');

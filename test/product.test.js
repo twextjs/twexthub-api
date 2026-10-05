@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import request from 'supertest';
 import { product } from '../src/product.js';
 import { DEFAULTS } from '../src/config.js';
-import { boot } from './helpers.mjs';
+import { apiPath, boot } from './helpers.mjs';
 
 let app;
 before(async () => {
@@ -32,8 +32,8 @@ test('config DEFAULTS.apiRoot is sourced from product.yml', () => {
   assert.equal(DEFAULTS.apiRoot, product.defaults.apiRoot);
 });
 
-test('GET /v1/meta returns product metadata', async () => {
-  const r = await request(app).get('/v1/meta');
+test(`GET ${apiPath('/meta')} returns product metadata`, async () => {
+  const r = await request(app).get(apiPath('/meta'));
   assert.equal(r.status, 200);
   assert.equal(r.body.name, product.name);
   assert.equal(r.body.version, product.version);

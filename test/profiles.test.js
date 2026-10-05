@@ -2,14 +2,15 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
+  FIXTURE_PASSWORD,
+  acceptTerms,
+  apiPath,
+  bearer,
   boot,
   resetDb,
-  bearer,
-  uniqNs,
-  acceptTerms,
-  signupAndAccept,
   signup,
-  FIXTURE_PASSWORD,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -27,7 +28,7 @@ test('profile fields round-trip through PATCH and the public user', async () => 
   const ns = user.namespace;
 
   const patched = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(token))
     .send({
       bio: 'I make Twexts.',
@@ -44,7 +45,9 @@ test('profile fields round-trip through PATCH and the public user', async () => 
   assert.equal(patched.body.bannerUrl, 'https://cdn.example.com/b.png');
 
   // The public view exposes them too.
-  const pub = await request(app).get(`/v1/users/${ns}`).expect(200);
+  const pub = await request(app)
+    .get(apiPath(`/users/${ns}`))
+    .expect(200);
   assert.equal(pub.body.bio, 'I make Twexts.');
   assert.equal(pub.body.github, 'octocat');
 });
@@ -54,7 +57,7 @@ test('profile validation rejects bad URLs, long bios, and malformed github names
   const ns = user.namespace;
 
   const bad = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(token))
     .send({
       bio: 'x'.repeat(281),
@@ -66,7 +69,7 @@ test('profile validation rejects bad URLs, long bios, and malformed github names
   assert.deepEqual(fields, ['bio', 'github', 'website']);
 
   const longUrl = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(token))
     .send({ avatarUrl: `https://example.com/${'a'.repeat(400)}` });
   assert.equal(longUrl.status, 422);
@@ -76,12 +79,12 @@ test('profile fields can be cleared with null', async () => {
   const { user, token } = await signupAndAccept(app, uniqNs());
   const ns = user.namespace;
   await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(token))
     .send({ bio: 'hello', website: 'https://example.com' })
     .expect(200);
   const cleared = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(token))
     .send({ bio: null, website: null })
     .expect(200);
@@ -93,16 +96,16 @@ test('avatar serves a deterministic identicon and honors avatar_url', async () =
   const a = await signupAndAccept(app, 'identicon-a');
   const b = await signupAndAccept(app, 'identicon-b');
 
-  const first = await request(app).get(`/v1/users/identicon-a/avatar`).expect(200);
+  const first = await request(app).get(apiPath(`/users/identicon-a/avatar`)).expect(200);
   assert.match(first.headers['content-type'], /image\/svg\+xml/);
   const art = first.text ?? first.body.toString('utf8');
   assert.match(art, /<svg /);
   assert.match(art, /<rect/);
 
-  const again = await request(app).get(`/v1/users/identicon-a/avatar`).expect(200);
+  const again = await request(app).get(apiPath(`/users/identicon-a/avatar`)).expect(200);
   assert.equal(again.text ?? again.body.toString('utf8'), art, 'same namespace, same identicon');
 
-  const other = await request(app).get(`/v1/users/identicon-b/avatar`).expect(200);
+  const other = await request(app).get(apiPath(`/users/identicon-b/avatar`)).expect(200);
   const otherArt = other.text ?? other.body.toString('utf8');
   assert.notEqual(otherArt, art, 'different namespaces get different art');
 
@@ -112,11 +115,11 @@ test('avatar serves a deterministic identicon and honors avatar_url', async () =
   // A user with an avatar_url redirects to it.
   const { user, token } = await signupAndAccept(app, uniqNs());
   await request(app)
-    .patch(`/v1/users/${user.namespace}`)
+    .patch(apiPath(`/users/${user.namespace}`))
     .set(bearer(token))
     .send({ avatarUrl: 'https://cdn.example.com/me.png' })
     .expect(200);
-  const res = await request(app).get(`/v1/users/${user.namespace}/avatar`);
+  const res = await request(app).get(apiPath(`/users/${user.namespace}/avatar`));
   assert.equal(res.status, 302);
   assert.equal(res.headers.location, 'https://cdn.example.com/me.png');
 });
@@ -129,7 +132,7 @@ test('password-only change still skips the terms gate', async () => {
   const r = await signup(app, uniqNs());
   assert.equal(r.status, 201);
   const patched = await request(app)
-    .patch(`/v1/users/${r.body.user.namespace}`)
+    .patch(apiPath(`/users/${r.body.user.namespace}`))
     .set(bearer(r.body.token))
     .send({ password: 'newpassword1', currentPassword: FIXTURE_PASSWORD });
   assert.equal(patched.status, 200);
@@ -167,7 +170,7 @@ test('a password change does not carry a profile or role edit past the terms gat
     const fresh = await signup(app, uniqNs());
     assert.equal(fresh.status, 201);
     const patched = await request(app)
-      .patch(`/v1/users/${fresh.body.user.namespace}`)
+      .patch(apiPath(`/users/${fresh.body.user.namespace}`))
       .set(bearer(fresh.body.token))
       .send(body);
     assert.equal(patched.status, 403, `${field} should stay behind the terms gate`);
@@ -176,7 +179,7 @@ test('a password change does not carry a profile or role edit past the terms gat
   // Accepting the terms is itself exempt from the gate, but only on its own:
   // riding it in with a profile edit would be the same smuggling.
   const acceptancePlusEdit = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(r.body.token))
     .send({ termsAcceptedVersion: 1, bio: 'sneaky' });
   assert.equal(acceptancePlusEdit.status, 403);
@@ -184,7 +187,7 @@ test('a password change does not carry a profile or role edit past the terms gat
   // The control: bio on its own is refused too, so the 403s above are the gate
   // and not a validation error.
   const bioOnly = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(r.body.token))
     .send({ bio: 'sneaky' });
   assert.equal(bioOnly.status, 403);
@@ -192,7 +195,7 @@ test('a password change does not carry a profile or role edit past the terms gat
   // Once the terms are accepted, the same combined update goes through.
   await acceptTerms(app, ns, r.body.token);
   const allowed = await request(app)
-    .patch(`/v1/users/${ns}`)
+    .patch(apiPath(`/users/${ns}`))
     .set(bearer(r.body.token))
     .send({ password: 'newpassword1', currentPassword: FIXTURE_PASSWORD, bio: 'fine now' });
   assert.equal(allowed.status, 200);

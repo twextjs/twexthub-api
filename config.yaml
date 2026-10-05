@@ -1,6 +1,5 @@
 port: 3000
 dataDir: ./data
-apiRoot: /v1
 publicBaseUrl: http://localhost:3000
 requireHttps: false
 database:

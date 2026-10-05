@@ -90,13 +90,13 @@ The first account to sign up on a fresh database becomes the admin, which is wor
 | `src/transfer.js`                      | Extension transfers between namespaces: the tables that move and the notifications that go with them.                                                |
 | `src/profile.js`, `src/image-sniff.js` | The profile field rules shared by accounts and organizations, and the signature checks on uploaded images.                                           |
 | `migrations/`                          | Numbered SQL files, applied in order and recorded in `schema_migrations`.                                                                            |
-| `openapi/v1.yml`                       | The OpenAPI description of the API surface.                                                                                                          |
+| `openapi/v1.yml`, `openapi/v2.yml`     | The OpenAPI description of the API surface, one file per major version. `v2.yml` describes the surface this branch serves.                           |
 | `test/`, `test-fixtures/`              | The test suite and the Twext projects it publishes end to end.                                                                                       |
 | `scripts/test-db.mjs`                  | Creates the test database in the container, idempotently.                                                                                            |
 | `product.yml`                          | The name, version, tagline, and defaults (config filename, API root). The version here must match `package.json`; a test enforces it.                |
 | `docs/`                                | The documentation in this directory.                                                                                                                 |
 
-`product.yml` deserves a note: `/v1/meta` reports its `name`, `version`, and `tagline`, the server prints its name and version on boot, and `defaults` supplies the config filename and the API root. Bumping the version means touching both it and `package.json`.
+`product.yml` deserves a note: `/v2/meta` reports its `name`, `version`, and `tagline`, the server prints its name and version on boot, and `defaults` supplies the config filename and the API root. Bumping the version means touching both it and `package.json`.
 
 ## 🧪 Tests
 
@@ -127,7 +127,7 @@ Releases are cut by pushing a tag. The CD workflow runs on pushes to `main` and 
 To cut a release, bump the version in two places, then tag:
 
 1. `version` in `package.json` — what `npm` reports for the checkout.
-2. `version` in `product.yml` — the version `/v1/meta` reports and the server prints on boot.
+2. `version` in `product.yml` — the version `/v2/meta` reports and the server prints on boot.
 
 ```bash
 git tag v1.2.0

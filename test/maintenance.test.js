@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import request from 'supertest';
-import { boot, resetDb, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  apiPath,
+  bearer,
+  boot,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
+} from './helpers.mjs';
 import { gcBlobs, makeMaintenanceJob, scrubBlobs, getIntegrityErrors } from '../src/maintenance.js';
 import { createDb, reconcileOnBoot } from '../src/db.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex } from '../src/blobs.js';
@@ -23,7 +31,7 @@ async function publishAndApprove(adminToken, owner, id, code = `// ${id}`) {
   const ns = owner.user.namespace;
   await publishProject(app, ns, id, owner.token, { code });
   await request(app)
-    .patch(`/v1/@${ns}/${id}/versions/1.0.0`)
+    .patch(apiPath(`/@${ns}/${id}/versions/1.0.0`))
     .set(bearer(adminToken))
     .send({ status: 'approved' })
     .expect(200);
@@ -179,7 +187,7 @@ test('scrub reports missing and corrupted blobs and updates the error gauge', as
 
   // The scrub only reports; the download endpoint and rows are untouched.
   const dl = await request(app)
-    .get(`/v1/@${owner.user.namespace}/watched/versions/1.0.0/download`)
+    .get(apiPath(`/@${owner.user.namespace}/watched/versions/1.0.0/download`))
     .expect(404);
   assert.equal(dl.status, 404);
 });
@@ -224,7 +232,9 @@ test('boot reconciliation decides the status from the namespace account', async 
   assert.ok(row.published_at, 'a promoted version gets a published_at');
 
   // The promotion is only real if the row is serviceable afterwards.
-  const download = await request(app).get(`/v1/@${ns}/crashed/versions/1.0.0/download`).expect(200);
+  const download = await request(app)
+    .get(apiPath(`/@${ns}/crashed/versions/1.0.0/download`))
+    .expect(200);
   assert.equal(download.text, staging.content);
   fs.rmSync(staging.abs);
 });
@@ -289,7 +299,9 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   assert.equal(Number(after.blob_size), content.length);
   assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed after commit');
   // The digest is only useful if the copy landed where the download looks.
-  const download = await request(app).get(`/v1/@${ns}/ancient/versions/1.0.0/download`).expect(200);
+  const download = await request(app)
+    .get(apiPath(`/@${ns}/ancient/versions/1.0.0/download`))
+    .expect(200);
   assert.equal(download.text, content);
 });
 
@@ -329,7 +341,7 @@ test('two instances reconciling the same legacy blob do not race each other', as
   assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
   assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed exactly once');
   const download = await request(app)
-    .get(`/v1/@${ns}/contested/versions/1.0.0/download`)
+    .get(apiPath(`/@${ns}/contested/versions/1.0.0/download`))
     .expect(200);
   assert.equal(download.text, content);
 });

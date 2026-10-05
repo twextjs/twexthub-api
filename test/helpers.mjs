@@ -8,6 +8,18 @@ import postgres from 'postgres';
 import { bootstrap } from '../src/server.js';
 import { createTarballBuffer } from '../src/tarball.js';
 import { DEFAULTS } from '../src/config.js';
+import { normalizeApiRoot } from '../src/util.js';
+
+// Every test builds its URL from the API root the product actually ships with
+// (product.yml -> defaults.apiRoot) instead of restating a literal, so moving
+// the API to /v2 is a one-line change in product.yml instead of a sweep over
+// the suite.
+const configuredRoot = normalizeApiRoot(DEFAULTS.apiRoot);
+const apiRootPrefix = configuredRoot ? `/${configuredRoot}` : '';
+
+export function apiPath(suffix = '') {
+  return `${apiRootPrefix}${suffix}`;
+}
 
 export const TEST_DATABASE_URL =
   process.env.TWEXTHUB_TEST_DATABASE_URL ??
@@ -58,7 +70,6 @@ export function makeConfig(overrides = {}) {
   const config = mergeOverrides(structuredClone(DEFAULTS), {
     port: 0,
     dataDir,
-    apiRoot: '/v1',
     publicBaseUrl: 'http://hub.test:8080',
     requireHttps: false,
     trustProxy: false,
@@ -218,13 +229,13 @@ export function bearer(token) {
 export const FIXTURE_PASSWORD = 'correct-horse-battery-staple';
 
 export async function signup(app, namespace, password = FIXTURE_PASSWORD, displayName = namespace) {
-  return request(app).post('/v1/users').send({ namespace, password, displayName });
+  return request(app).post(apiPath('/users')).send({ namespace, password, displayName });
 }
 
 export async function acceptTerms(app, namespace, token) {
-  const terms = await request(app).get('/v1/terms').expect(200);
+  const terms = await request(app).get(apiPath('/terms')).expect(200);
   const accepted = await request(app)
-    .patch(`/v1/users/${namespace}`)
+    .patch(apiPath(`/users/${namespace}`))
     .set(bearer(token))
     .send({ termsAcceptedVersion: String(terms.body.version) });
   assert.equal(accepted.status, 200, `terms accept failed: ${JSON.stringify(accepted.body)}`);
@@ -242,7 +253,7 @@ export const signupAccept = signupAndAccept;
 
 export async function approveVersion(app, adminToken, ns, id, version) {
   const r = await request(app)
-    .patch(`/v1/@${ns}/${id}/versions/${version}`)
+    .patch(apiPath(`/@${ns}/${id}/versions/${version}`))
     .set(bearer(adminToken))
     .send({ status: 'approved' });
   assert.equal(r.status, 200, `approve failed: ${JSON.stringify(r.body)}`);
@@ -342,7 +353,7 @@ export async function tarballFromDir(dir) {
 export async function publishProject(app, ns, id, token, opts = {}, status = 201) {
   const buffer = await projectTarball({ id, ...opts });
   return request(app)
-    .post(`/v1/@${ns}/${id}/versions`)
+    .post(apiPath(`/@${ns}/${id}/versions`))
     .set(bearer(token))
     .set('Content-Type', 'application/gzip')
     .expect(status)

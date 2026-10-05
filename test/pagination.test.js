@@ -2,16 +2,17 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
-  boot,
-  resetDb,
+  FIXTURE_PASSWORD,
+  apiPath,
+  approveVersion,
   bearer,
-  uniqNs,
+  boot,
+  followPages,
+  publishProject,
+  resetDb,
   signup,
   signupAndAccept,
-  publishProject,
-  approveVersion,
-  followPages,
-  FIXTURE_PASSWORD,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -65,8 +66,8 @@ async function seedPublished(ids) {
 test('a list that fits in one page offers no neighbours', async () => {
   await signupAndAccept(app, uniqNs());
 
-  const r = await request(app).get('/v1/extensions').expect(200);
-  assert.deepEqual(r.body._links, { self: '/v1/extensions', next: null, prev: null });
+  const r = await request(app).get(apiPath('/extensions')).expect(200);
+  assert.deepEqual(r.body._links, { self: apiPath('/extensions'), next: null, prev: null });
   assert.equal(r.body.pagination, undefined, 'the old cursor block is gone');
 });
 
@@ -74,25 +75,27 @@ test('a list points back at itself, not at the cursor it was given', async () =>
   const { token } = await signupAndAccept(app, uniqNs());
   for (let i = 0; i < 3; i += 1) {
     await request(app)
-      .post('/v1/sessions')
+      .post(apiPath('/sessions'))
       .send({
-        namespace: (await request(app).get('/v1/me').set(bearer(token))).body.namespace,
+        namespace: (await request(app).get(apiPath('/me')).set(bearer(token))).body.namespace,
         password: FIXTURE_PASSWORD,
       })
       .expect(201);
   }
 
-  const head = await request(app).get('/v1/sessions?limit=2').set(bearer(token)).expect(200);
-  assert.equal(head.body._links.self, '/v1/sessions?limit=2');
+  const head = await request(app).get(apiPath('/sessions?limit=2')).set(bearer(token)).expect(200);
+  assert.equal(head.body._links.self, apiPath('/sessions?limit=2'));
   assert.equal(head.body._links.prev, null);
 
   const second = await request(app).get(head.body._links.next).set(bearer(token)).expect(200);
   // self is the page as it was requested, cursor and all.
   assert.equal(
     second.body._links.self,
-    `/v1/sessions?limit=2&cursor=${new URL(second.body._links.self, 'http://x').searchParams.get('cursor')}`,
+    apiPath(
+      `/sessions?limit=2&cursor=${new URL(second.body._links.self, 'http://x').searchParams.get('cursor')}`,
+    ),
   );
-  assert.match(second.body._links.self, /^\/v1\/sessions\?limit=2&cursor=/);
+  assert.match(second.body._links.self, new RegExp(`^${apiPath('/sessions')}\\?limit=2&cursor=`));
   assert.equal(second.body._links.next, null);
 });
 
@@ -100,7 +103,7 @@ test('a filter survives the next and prev links', async () => {
   const admin = await seedPending(3);
 
   const queue = await request(app)
-    .get('/v1/versions?status=pending&limit=2')
+    .get(apiPath('/versions?status=pending&limit=2'))
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(queue.body.data.length, 2);
@@ -123,7 +126,7 @@ test('walking back retraces the walk forward', async () => {
 
   const { rows: forward, pages } = await followPages(
     app,
-    '/v1/versions?status=pending&limit=2',
+    apiPath('/versions?status=pending&limit=2'),
     bearer(admin.token),
   );
   const ids = forward.map((v) => v.id);
@@ -150,7 +153,7 @@ test('a page reached backwards points forward at where it came from', async () =
   const admin = await seedPending(3);
   const list = (url) => request(app).get(url).set(bearer(admin.token)).expect(200);
 
-  const first = await list('/v1/versions?status=pending&limit=2');
+  const first = await list(apiPath('/versions?status=pending&limit=2'));
   const second = await list(first.body._links.next);
   const backToFirst = await list(second.body._links.prev);
   assert.deepEqual(
@@ -165,12 +168,14 @@ test('a page reached backwards points forward at where it came from', async () =
 // nothing at all because ids are unique.
 test('an id-keyed list pages both ways', async () => {
   const { token } = await signupAndAccept(app, uniqNs());
-  const ns = (await request(app).get('/v1/me').set(bearer(token))).body.namespace;
+  const ns = (await request(app).get(apiPath('/me')).set(bearer(token))).body.namespace;
   for (let i = 0; i < 4; i += 1) {
-    await request(app).post('/v1/sessions').send({ namespace: ns, password: FIXTURE_PASSWORD });
+    await request(app)
+      .post(apiPath('/sessions'))
+      .send({ namespace: ns, password: FIXTURE_PASSWORD });
   }
 
-  const { rows, pages } = await followPages(app, '/v1/sessions?limit=2', bearer(token));
+  const { rows, pages } = await followPages(app, apiPath('/sessions?limit=2'), bearer(token));
   const ids = rows.map((s) => s.id).sort();
   assert.equal(new Set(ids).size, 5, 'four logins plus the one signup session');
   assert.equal(pages.length, 3);
@@ -188,7 +193,7 @@ test('an id-keyed list pages both ways', async () => {
 test('paging arguments are validated like any other', async () => {
   await signupAndAccept(app, uniqNs());
   for (const query of [{ dir: 'sideways' }, { dir: '' }, { cursor: 'not-a-cursor' }]) {
-    const r = await request(app).get('/v1/extensions').query(query);
+    const r = await request(app).get(apiPath('/extensions')).query(query);
     assert.equal(r.status, 400, `${JSON.stringify(query)} should be rejected`);
     assert.equal(r.body.title, 'Bad Request');
   }
@@ -200,7 +205,7 @@ test('paging arguments are validated like any other', async () => {
 test('a sort that reads forwards pages backwards correctly too', async () => {
   await seedPublished(['alpha', 'bravo', 'charlie', 'delta']);
 
-  const { rows, pages } = await followPages(app, '/v1/extensions?sort=name&limit=1');
+  const { rows, pages } = await followPages(app, apiPath('/extensions?sort=name&limit=1'));
   assert.deepEqual(
     rows.map((e) => e.id),
     ['alpha', 'bravo', 'charlie', 'delta'],
@@ -233,7 +238,7 @@ test('an offset-paged list closes the same loop', async () => {
   }
 
   const list = (url) => request(app).get(url).expect(200);
-  const first = await list(`/v1/@${user.namespace}/ranger/versions?limit=3`);
+  const first = await list(apiPath(`/@${user.namespace}/ranger/versions?limit=3`));
   assert.deepEqual(
     first.body.data.map((v) => v.version),
     ['2.0.0', '1.9.9', '1.2.0'],
@@ -258,7 +263,7 @@ test('signup order and paging are independent of the caller', async () => {
   const second = await signup(app, uniqNs());
   const third = await signup(app, uniqNs());
 
-  const { rows, pages } = await followPages(app, '/v1/users?limit=2');
+  const { rows, pages } = await followPages(app, apiPath('/users?limit=2'));
   assert.deepEqual(
     rows.map((u) => u.namespace),
     [third.body.user.namespace, second.body.user.namespace, first.body.user.namespace],
