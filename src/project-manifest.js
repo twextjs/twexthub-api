@@ -81,9 +81,10 @@ export function manifestFromProject(projectConfig, pathId) {
         typeof projectConfig.description === 'string' ? projectConfig.description : '',
       ),
       author: typeof projectConfig.author === 'string' ? projectConfig.author : null,
-      // Boolean() would turn the string "false" into true, so only an explicit
-      // true is recorded; everything else stays null and means "not declared".
-      isUnsandboxed: ext.isUnsandboxed === true ? true : null,
+      // Tri-state on purpose: Boolean() would turn the string "false" into
+      // true, and collapsing an explicit false into null would lose the
+      // difference between "declares itself sandboxed" and "says nothing".
+      isUnsandboxed: typeof ext.isUnsandboxed === 'boolean' ? ext.isUnsandboxed : null,
       color1: typeof ext.color1 === 'string' ? ext.color1 : null,
       color2: typeof ext.color2 === 'string' ? ext.color2 : null,
       color3: typeof ext.color3 === 'string' ? ext.color3 : null,
