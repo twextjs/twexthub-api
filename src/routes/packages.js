@@ -7,7 +7,6 @@ import semver from 'semver';
 import YAML from 'yaml';
 import {
   assertAdmin,
-  canSee as canSeeExtension,
   isAdmin,
   isExtensionOwner as isExtensionOwnerRow,
   isOrganizationOwner,
@@ -17,7 +16,6 @@ import {
 } from '../auth.js';
 import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
 import {
-  asString,
   buildSearchText,
   compareSemver,
   isValidExtensionId,
@@ -86,8 +84,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return isOrganizationOwner(sql, user, namespace);
   }
 
-  const canSee = (user, row) => canSeeExtension(sql, user, row);
-
   async function loadNamespaceAccount(namespace) {
     const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
     return owner;
@@ -101,45 +97,38 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     return row;
   }
 
-  // Most recent non-rejected row, enough to decide visibility without pulling
-  // the whole version set. A direct status probe would miss extensions whose
-  // only row was rejected.
-  async function loadVisibility(namespace, id) {
+  // Whether the address has ever held a version. The owner rows outlive a
+  // deleted extension on purpose, so an empty owner list is not on its own
+  // evidence that there is nothing at the address.
+  async function extensionExists(namespace, id) {
     const [row] = await sql`
-      SELECT namespace, extension_id, visibility FROM versions
+      SELECT 1 FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id} AND status <> 'rejected'
-      ORDER BY id DESC
       LIMIT 1
     `;
-    return row;
+    return Boolean(row);
   }
 
-  // `latest` is the only resolve that has to pick a row before anyone checks
-  // it, so it is resolved against what the caller can see: a private 2.0.0
-  // above a public 1.0.0 must not make `latest` 404 for an anonymous caller.
-  async function loadLatestPublished(namespace, id, user) {
+  // `latest` picks the highest published version, falling back to the deprecated
+  // ones when nothing is still published.
+  async function loadLatestPublished(namespace, id) {
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
         AND status IN ('published', 'deprecated')
     `;
     if (rows.length === 0) return null;
-    const visible = [];
-    for (const row of rows) {
-      if (await canSee(user ?? null, row)) visible.push(row);
-    }
-    if (visible.length === 0) return null;
-    const published = visible.filter((row) => row.status === 'published');
-    const pool = published.length > 0 ? published : visible;
+    const published = rows.filter((row) => row.status === 'published');
+    const pool = published.length > 0 ? published : rows;
     const ceiling = maxVersionBySemver(pool.map((row) => row.version));
     return pool.find((row) => row.version === ceiling);
   }
 
-  async function resolveVersion(params, user) {
+  async function resolveVersion(params) {
     const { namespace, id, version } = params;
     const row =
       version === 'latest'
-        ? await loadLatestPublished(namespace, id, user)
+        ? await loadLatestPublished(namespace, id)
         : await loadVersion(namespace, id, version);
     if (row) return row;
     if (!/^[a-zA-Z0-9-]{1,30}$/.test(version)) throw notFound();
@@ -153,19 +142,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
 
   // An address that has been transferred away answers with the address that
   // replaced it, so a pinned `@old/id` keeps resolving.
-  //
-  // The redirect is only sent to a caller who would have been allowed to read
-  // the extension at its new address. Answering everybody would turn the old
-  // address into a directory of which private extensions moved and where to, and
-  // a caller with no business there has to get the same 404 they got before the
-  // move -- so the destination's visibility is checked, and the redirect is not
-  // a way around it.
   async function redirectIfMoved(req, res, suffix = '') {
     const { namespace, id } = req.params;
     const moved = await redirectFor(sql, namespace, id);
     if (!moved) return false;
-    const visibility = await loadVisibility(moved.namespace, moved.id);
-    if (!visibility || !(await canSee(req.auth?.user ?? null, visibility))) throw notFound();
     const query = req.originalUrl.includes('?')
       ? `?${req.originalUrl.slice(req.originalUrl.indexOf('?') + 1)}`
       : '';
@@ -192,9 +172,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // `dir` on the request is meaningless here and ignored.
     const offset = cursor ? cursor.o - 1 : 0;
 
-    // No extension-level gate here: a namespace whose newest version is private
-    // can still have public versions, and the per-row check below is the
-    // stricter one — it reads the visibility of the versions actually returned.
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -208,23 +185,16 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           (range === undefined ||
             semver.satisfies(entry.coerced, range.trim(), { includePrerelease: true })),
       );
-    // A range can land on versions the caller cannot see, so the list is built
-    // from the ones they can: a private one is skipped rather than handed over,
-    // and an older public one in range still appears.
-    const readable = [];
-    for (const entry of matches) {
-      if (await canSee(req.auth?.user, entry.row)) readable.push(entry);
-    }
     // SemVer order is not something Postgres can sort, and a dist-tag or a
     // build-metadata string would sort wrong as text, so the ordering happens
     // here over the versions already filtered.
-    readable.sort((a, b) => semver.rcompare(a.coerced, b.coerced));
+    matches.sort((a, b) => semver.rcompare(a.coerced, b.coerced));
 
     res.json(
-      offsetPage(req, readable.slice(offset, offset + limit), {
+      offsetPage(req, matches.slice(offset, offset + limit), {
         limit,
         offset,
-        total: readable.length,
+        total: matches.length,
         serialize: (entry) => versionToObject(entry.row, config),
       }),
     );
@@ -254,13 +224,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         throw fieldErrors([{ field: 'id', message: 'Invalid extension id.' }]);
       }
       if (!isValidNamespace(namespace)) throw notFound();
-
-      // asString rejects arrays/objects smuggled through a crafted query
-      // string, so only a real string can reach the visibility check below.
-      const visibility = asString(req.query.visibility) ?? 'public';
-      if (visibility !== 'public' && visibility !== 'private') {
-        throw fieldErrors([{ field: 'visibility', message: 'Must be "public" or "private".' }]);
-      }
 
       // The JSON parser is skipped for this path, but nothing stops a crafted
       // request from landing here with a body of another type — a parsed
@@ -381,7 +344,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         code: compiled,
         sourceBuffer: tarball,
         buildLog,
-        visibility,
         stagedBy: req.auth.user,
       });
       if (row.status === 'published') {
@@ -443,8 +405,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, '/tags')) return;
-    const visibility = await loadVisibility(namespace, id);
-    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
     const rows = await sql`
       SELECT tag, version FROM dist_tags
       WHERE namespace = ${namespace} AND extension_id = ${id}
@@ -512,7 +472,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
 
   router.get('/@:namespace/:id/versions/:version', async (req, res) => {
     if (await redirectIfMoved(req, res, `/versions/${req.params.version}`)) return;
-    const row = await resolveVersion(req.params, req.auth?.user ?? null);
+    const row = await resolveVersion(req.params);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     if (!isVisible) {
@@ -522,7 +482,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       // admin role and `admin` scope together. The owner still sees their own.
       if (!isOwner && !isAdmin(req.auth)) throw notFound();
     }
-    if (isVisible && !(await canSee(req.auth?.user, row))) throw notFound();
     res.json(versionToObject(row, config));
   });
 
@@ -693,7 +652,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.delete('/@:namespace/:id/versions/:version', yankChain, async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const row = await resolveVersion(req.params, req.auth?.user ?? null);
+    const row = await resolveVersion(req.params);
     if (row.status !== 'published' && row.status !== 'deprecated') throw notFound();
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('You can only yank your own extensions.');
@@ -717,11 +676,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, `/versions/${req.params.version}/download`)) return;
-    const row = await resolveVersion(req.params, req.auth?.user ?? null);
+    const row = await resolveVersion(req.params);
     const isPublished =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
     if (!isPublished && !(row.status === 'pending' && isAdmin(req.auth))) throw notFound();
-    if (isPublished && !(await canSee(req.auth?.user, row))) throw notFound();
     const abs = row.blob_digest
       ? blobPathFor(config.dataDir, row.blob_digest)
       : path.join(config.dataDir, row.blob_path);
@@ -755,7 +713,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!req.auth.scopes.includes('read:source')) {
         throw forbidden('This token is missing the required "read:source" scope.');
       }
-      const row = await resolveVersion(req.params, req.auth?.user ?? null);
+      const row = await resolveVersion(req.params);
       if (!row.source_path || !row.source_digest) {
         throw notFound('Source is unavailable for this version.');
       }
@@ -770,8 +728,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.get('/@:namespace/:id/owners', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const visibility = await loadVisibility(namespace, id);
-    if (!visibility || !(await canSee(req.auth?.user, visibility))) throw notFound();
+    if (!(await extensionExists(namespace, id))) throw notFound();
     const rows = await sql`
       SELECT u.namespace, u.display_name, u.role, u.kind, u.created_at, o.added_at
       FROM extension_owners o
@@ -1079,109 +1036,6 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.status(204).end();
   });
 
-  // Access grants for private extensions. Only meaningful on private
-  // extensions, but recorded either way so a later flip to private keeps
-  // grants intact.
-  router.put('/@:namespace/:id/access/:granteeNamespace', ownerChain, async (req, res) => {
-    const { namespace: targetNamespace, id, granteeNamespace: grantee } = req.params;
-    if (
-      !isValidNamespace(targetNamespace) ||
-      !isValidNamespace(grantee) ||
-      !isValidExtensionId(id)
-    ) {
-      throw notFound();
-    }
-    if (
-      req.auth.user.namespace !== targetNamespace &&
-      req.auth.user.role !== 'admin' &&
-      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
-    ) {
-      throw forbidden('Only an owner or an admin can grant access.');
-    }
-    const [existing] = await sql`
-      SELECT 1 FROM versions
-      WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
-    `;
-    if (!existing) throw notFound();
-    const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;
-    if (!granteeUser) throw notFound('No such account to grant.');
-    if (granteeUser.namespace === targetNamespace) {
-      throw fieldErrors([
-        { field: 'namespace', message: 'The namespace account always has access.' },
-      ]);
-    }
-    await sql.begin(async (tx) => {
-      await tx`
-        INSERT INTO extension_access (user_id, namespace, extension_id, granted_by)
-        VALUES (${granteeUser.id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
-        ON CONFLICT (user_id, namespace, extension_id) DO NOTHING
-      `;
-      await audit(
-        tx,
-        req.auth.user,
-        'access.grant',
-        { namespace: targetNamespace, id },
-        { granted: granteeUser.namespace },
-      );
-    });
-    res.status(204).end();
-  });
-
-  router.delete('/@:namespace/:id/access/:granteeNamespace', ownerChain, async (req, res) => {
-    const { namespace: targetNamespace, id, granteeNamespace: grantee } = req.params;
-    if (
-      !isValidNamespace(targetNamespace) ||
-      !isValidNamespace(grantee) ||
-      !isValidExtensionId(id)
-    ) {
-      throw notFound();
-    }
-    if (
-      req.auth.user.namespace !== targetNamespace &&
-      req.auth.user.role !== 'admin' &&
-      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
-    ) {
-      throw forbidden('Only an owner or an admin can revoke access.');
-    }
-    const [granteeUser] = await sql`SELECT * FROM users WHERE namespace = ${grantee}`;
-    if (!granteeUser) throw notFound('No such account.');
-    const [revoked] = await sql.begin(async (tx) => {
-      const [r] = await tx`
-        DELETE FROM extension_access
-        WHERE user_id = ${granteeUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
-        RETURNING 1
-      `;
-      if (r) {
-        await audit(
-          tx,
-          req.auth.user,
-          'access.revoke',
-          { namespace: targetNamespace, id },
-          { revoked: granteeUser.namespace },
-        );
-      }
-      return [r].filter(Boolean);
-    });
-    if (!revoked) throw notFound('That account has no access grant.');
-    res.status(204).end();
-  });
-
-  router.get('/@:namespace/:id/access', publishChain, async (req, res) => {
-    const { namespace, id } = req.params;
-    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
-      throw forbidden('Only an owner or an admin can list access grants.');
-    }
-    const rows = await sql`
-      SELECT u.namespace, u.display_name, a.created_at
-      FROM extension_access a
-      JOIN users u ON u.id = a.user_id
-      WHERE a.namespace = ${namespace} AND a.extension_id = ${id}
-      ORDER BY a.created_at
-    `;
-    res.json({ data: rows });
-  });
-
   // Offering an extension to another namespace. Two steps, like an owner grant
   // and for the same reason: the recipient is the one whose name ends up on the
   // address and whose quota pays for it, so it is the one that agrees. Until it
@@ -1304,18 +1158,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         created_at DESC
     `;
     if (rows.length === 0) throw notFound();
-    // Visibility is per version, so one public version does not make a private
-    // sibling readable: the response lists only the versions this caller may
-    // see, and the headline is drawn from those.
-    const visible = [];
-    for (const row of [...rows].sort((a, b) => compareSemver(b.version, a.version))) {
-      if (await canSee(req.auth?.user, row)) visible.push(row);
-    }
-    if (visible.length === 0) throw notFound();
-    const top = visible.find((row) => row.status === 'published') ?? visible[0];
+    const versions = [...rows].sort((a, b) => compareSemver(b.version, a.version));
+    const top = versions.find((row) => row.status === 'published') ?? versions[0];
     const summary = extensionDetailFromRow(
       top,
-      visible.map((row) => versionToObject(row, config)),
+      versions.map((row) => versionToObject(row, config)),
     );
     summary.downloads = await totalDownloads(sql, namespace, id);
     res.json(summary);
@@ -1339,7 +1186,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           throw forbidden('You can only delete your own extensions.');
         }
         rows = await reserved`
-          SELECT blob_digest, blob_path, status, blob_size, visibility, source_digest, source_size
+          SELECT blob_digest, blob_path, status, blob_size, source_digest, source_size
           FROM versions
           WHERE namespace = ${namespace} AND extension_id = ${id}
         `;
@@ -1425,7 +1272,7 @@ async function publishVersion(
   sql,
   config,
   owner,
-  { id, manifest, code, sourceBuffer, buildLog, visibility, stagedBy },
+  { id, manifest, code, sourceBuffer, buildLog, stagedBy },
 ) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
@@ -1486,14 +1333,13 @@ async function publishVersion(
         INSERT INTO versions (
           owner_id, namespace, extension_id, version, status,
           name, license, description, author, color1, color2, color3,
-          blob_path, blob_digest, blob_size, blob_sha512, search_text, visibility,
+          blob_path, blob_digest, blob_size, blob_sha512, search_text,
           source_size, build_log
         ) VALUES (
           ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
           ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText},
-          ${visibility === 'private' ? 'private' : 'public'},
           ${sourceBuffer.length}, ${buildLog}
         )
         RETURNING *
@@ -1566,7 +1412,6 @@ async function publishVersion(
         { namespace: owner.namespace, id, version: staged.version },
         {
           status: finalStatus,
-          visibility,
           bytes: codeBuffer.length,
           sourceBytes: sourceBuffer.length,
         },

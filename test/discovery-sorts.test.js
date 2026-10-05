@@ -386,9 +386,9 @@ test('badge colour is derived per package, stays put, and stays readable', async
   const owner = await sql`SELECT owner_id FROM versions WHERE namespace = ${ns} LIMIT 1`;
   for (const name of names) {
     await sql`INSERT INTO versions (owner_id, namespace, extension_id, version, status, name,
-                                   license, description, blob_path, visibility, published_at)
+                                   license, description, blob_path, published_at)
                VALUES (${owner[0].owner_id}, ${ns}, ${name}, '1.0.0', 'published', ${name},
-                       'MIT', '', ${`badge/${name}.tgz`}, 'public', now())`;
+                       'MIT', '', ${`badge/${name}.tgz`}, now())`;
   }
   const colours = new Set();
   for (const name of names) {

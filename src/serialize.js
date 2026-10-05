@@ -137,7 +137,7 @@ function versionLinks(config, row) {
     links.download = downloadUrl(config, row.namespace, row.extension_id, row.version);
   }
   // Only a version the server still holds the source tarball for can be asked
-  // for one, and a private or rejected one is not even asked.
+  // for one.
   if (row.source_path)
     links.source = sourceUrl(config, row.namespace, row.extension_id, row.version);
   return links;
@@ -152,7 +152,6 @@ export function versionToObject(row, config) {
     name: row.name,
     license: row.license,
     description: row.description,
-    visibility: row.visibility ?? 'public',
     createdAt: row.created_at.toISOString(),
   };
   if (row.author) out.author = row.author;

@@ -1,8 +1,8 @@
 -- An owner grant is two steps: the namespace account invites, the invitee
 -- accepts. A separate table rather than a status column on extension_owners, so
--- that "is an owner" keeps a single meaning everywhere it is asked. The three
--- checks that answer it (the publish path, canSee, the listing filter) are
--- security-relevant and a pending row that one of them forgot to exclude would
+-- that "is an owner" keeps a single meaning everywhere it is asked. The checks
+-- that answer it (the publish path, the owner routes) are security-relevant and
+-- a pending row that one of them forgot to exclude would
 -- be a grant nobody accepted. An invite is not an owner row at all, so there is
 -- nothing for them to exclude.
 --

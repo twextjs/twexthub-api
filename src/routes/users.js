@@ -99,8 +99,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       return userToObject(row, config);
     }
     // An organization has no role and accepts no terms; whoever runs it is named
-    // on its owner list, and a private extension in its namespace is a thing
-    // its owners can see rather than a thing this row is.
+    // on its owner list.
     const { role: _role, termsAcceptedVersion: _terms, ...rest } = userToObject(row, config);
     return rest;
   }

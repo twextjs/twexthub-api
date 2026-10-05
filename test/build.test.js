@@ -188,7 +188,7 @@ test('source tarballs over the byte cap are refused with 413', async () => {
   }
 });
 
-test('an invalid or corrupt gzip payload is a 422, and a bad visibility a 422', async () => {
+test('an invalid or corrupt gzip payload is a 422', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
 
@@ -198,16 +198,6 @@ test('an invalid or corrupt gzip payload is a 422, and a bad visibility a 422', 
     .set('Content-Type', 'application/gzip')
     .send(Buffer.from('this is not a gzip archive at all, just bytes'));
   assert.equal(corrupt.status, 422);
-
-  const { projectTarball } = await import('./helpers.mjs');
-  const tarball = await projectTarball({ id: 'hello', version: '1.0.0' });
-  const vis = await request(app)
-    .post(`/v1/@${ns}/hello/versions?visibility=secret`)
-    .set(bearer(owner.token))
-    .set('Content-Type', 'application/gzip')
-    .send(tarball);
-  assert.equal(vis.status, 422);
-  assert.equal(vis.body.errors[0].field, 'visibility');
 });
 
 test('identical sources produce identical compiled blobs and share a source file', async () => {

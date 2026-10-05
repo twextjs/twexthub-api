@@ -213,21 +213,18 @@ describe('the old address redirects', () => {
     assert.equal(followed.body.namespace, other.user.namespace);
   });
 
-  test('a redirect does not disclose a private extension', async () => {
-    const { ns, owner } = await publishedExtension('secret', { visibility: 'private' });
+  test('a redirect points at the address the extension moved to', async () => {
+    const { ns, owner } = await publishedExtension('secret');
     const other = await signupAndAccept(app, uniqNs());
-    const stranger = await signupAndAccept(app, uniqNs());
     await offer(ns, 'secret', other.user.namespace, owner.token).expect(201);
     await accept(ns, 'secret', other.user.namespace, other.token);
 
-    // The new owner can see where it went.
     const mine = await request(app).get(`/v1/@${ns}/secret`).set(bearer(other.token)).expect(301);
     assert.equal(mine.headers.location, `/v1/@${other.user.namespace}/secret`);
 
-    // Somebody with no business there gets the same 404 they got before the
-    // move, rather than a pointer to where it went.
-    await request(app).get(`/v1/@${ns}/secret`).set(bearer(stranger.token)).expect(404);
-    await request(app).get(`/v1/@${ns}/secret`).expect(404);
+    // Following it lands on the extension.
+    const followed = await request(app).get(mine.headers.location).expect(200);
+    assert.equal(followed.body.namespace, other.user.namespace);
   });
 
   test('a second transfer collapses onto the final address', async () => {
@@ -390,11 +387,10 @@ describe('what the move carries', () => {
     assert.deepEqual(await versions(ns, 'hello'), ['1.0.0']);
   });
 
-  test('tags, owners, access grants, webhooks, history and the quota charge', async () => {
+  test('tags, owners, webhooks, history and the quota charge', async () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());
     const coOwner = await signupAndAccept(app, uniqNs());
-    const grantee = await signupAndAccept(app, uniqNs());
 
     await request(app)
       .put(`/v1/@${ns}/hello/tags/stable`)
@@ -409,10 +405,6 @@ describe('what the move carries', () => {
       .post(`/v1/@${ns}/hello/owners/${coOwner.user.namespace}/accept`)
       .set(bearer(coOwner.token))
       .expect(200);
-    await request(app)
-      .put(`/v1/@${ns}/hello/access/${grantee.user.namespace}`)
-      .set(bearer(owner.token))
-      .expect(204);
     await request(app)
       .post(`/v1/@${ns}/hello/webhooks`)
       .set(bearer(owner.token))
@@ -458,10 +450,6 @@ describe('what the move carries', () => {
       (row) => row.namespace,
     );
     assert.ok(owners.includes(coOwner.user.namespace));
-    const access = (
-      await request(app).get(`/v1/@${to}/hello/access`).set(bearer(other.token)).expect(200)
-    ).body.data.map((row) => row.namespace);
-    assert.deepEqual(access, [grantee.user.namespace]);
     const hooks = (
       await request(app).get(`/v1/@${to}/hello/webhooks`).set(bearer(other.token)).expect(200)
     ).body.data;

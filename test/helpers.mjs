@@ -337,17 +337,14 @@ export async function tarballFromDir(dir) {
   return createTarballBuffer(dir, await listTarballFiles(dir, dir));
 }
 
-// Publishes the default project as `@ns/id` with the given project opts. When
-// opts.visibility is set it is passed as a query parameter. Returns the
-// response (asserting `status`, default 201).
+// Publishes the default project as `@ns/id` with the given project opts. Returns
+// the response (asserting `status`, default 201).
 export async function publishProject(app, ns, id, token, opts = {}, status = 201) {
-  const { visibility, ...project } = opts;
-  const buffer = await projectTarball({ id, ...project });
-  const req = request(app)
+  const buffer = await projectTarball({ id, ...opts });
+  return request(app)
     .post(`/v1/@${ns}/${id}/versions`)
     .set(bearer(token))
-    .set('Content-Type', 'application/gzip');
-  if (visibility) req.query({ visibility });
-  req.expect(status);
-  return req.send(buffer);
+    .set('Content-Type', 'application/gzip')
+    .expect(status)
+    .send(buffer);
 }
