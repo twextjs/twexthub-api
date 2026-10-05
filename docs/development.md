@@ -130,8 +130,8 @@ To cut a release, bump the version in two places, then tag:
 2. `version` in `product.yml` — the version `/v2/meta` reports and the server prints on boot.
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 Leaving one behind the other gives an instance that reports a version it isn't — a test fails if they disagree, so CI catches it before the tag exists.

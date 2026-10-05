@@ -658,7 +658,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       LIMIT 50
     `;
     const base = config.publicBaseUrl.replace(/\/$/, '');
-    const root = normalizeApiRoot(config.apiRoot);
+    const apiRoot = normalizeApiRoot(config.apiRoot);
+    const root = apiRoot ? `/${apiRoot}` : '';
     const entries = rows
       .map(
         (row) => `  <entry>

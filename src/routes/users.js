@@ -236,7 +236,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       if (!wellFormed || String(termsAcceptedVersion) !== String(currentTermsVersion)) {
         errors.push({
           field: 'termsAcceptedVersion',
-          message: `Must be the current terms version ${currentTermsVersion}. Read GET ${mount('terms')} to see it.`,
+          message: `Must be the current terms version ${currentTermsVersion}. Read GET ${mount('/terms')} to see it.`,
         });
       }
     }
