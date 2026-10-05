@@ -268,8 +268,10 @@ function scalar(value) {
 
 // Builds a minimal but valid twext project and returns its gzipped tarball.
 // opts maps to twext.yml fields: id, name, version, description, author,
-// license, color1/color2/color3, blockType, blockText, entryPoint. The `code`
-// option is embedded verbatim as the body of the project's single handler.
+// license, color1/color2/color3, isUnsandboxed, blockType, blockText,
+// entryPoint. isUnsandboxed is omitted unless the caller passes it, so tests
+// can tell "undeclared" from an explicit false. The `code` option is embedded
+// verbatim as the body of the project's single handler.
 export async function projectTarball(opts = {}) {
   const id = opts.id ?? 'hello';
   const version = opts.version ?? '1.0.0';
@@ -298,6 +300,17 @@ export async function projectTarball(opts = {}) {
       `  color1: ${scalar(opts.color1 ?? '#ff8800')}`,
       `  color2: ${scalar(opts.color2 ?? '#ffffff')}`,
       `  color3: ${scalar(opts.color3 ?? '#000000')}`,
+      ...(opts.isUnsandboxed === undefined
+        ? []
+        : [
+            `  isUnsandboxed: ${
+              // A string is quoted so a test can present "true" as the invalid
+              // string the manifest validation has to reject.
+              typeof opts.isUnsandboxed === 'string'
+                ? JSON.stringify(opts.isUnsandboxed)
+                : opts.isUnsandboxed
+            }`,
+          ]),
       `blocks:`,
       `  - opcode: ${scalar(opcode)}`,
       `    blockType: ${scalar(blockType)}`,
