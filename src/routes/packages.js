@@ -1339,12 +1339,13 @@ async function publishVersion(
         INSERT INTO versions (
           owner_id, namespace, extension_id, version, status,
           name, license, description, author, color1, color2, color3,
-          blob_path, blob_digest, blob_size, blob_sha512, search_text,
+          is_unsandboxed, blob_path, blob_digest, blob_size, blob_sha512, search_text,
           source_size, build_log
         ) VALUES (
           ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
           ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
           ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
+          ${manifest.isUnsandboxed ?? null},
           ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText},
           ${sourceBuffer.length}, ${buildLog}
         )

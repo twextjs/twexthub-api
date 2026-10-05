@@ -2815,6 +2815,9 @@ components:
         license: { type: string, description: SPDX identifier. }
         description: { type: string }
         author: { type: string }
+        isUnsandboxed:
+          type: ['boolean', 'null']
+          description: Verbatim `extension.isUnsandboxed`; null when undeclared.
         color1: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
         color2: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
         color3: { type: string, pattern: '^#[0-9a-fA-F]{6}$' }
@@ -2841,6 +2844,11 @@ components:
             color1: { type: string }
             color2: { type: string }
             color3: { type: string }
+            isUnsandboxed:
+              type: ['boolean', 'null']
+              description: >
+                Whether twext.yml declared `extension.isUnsandboxed: true`. `null` means the
+                project did not declare the field.
             versions:
               type: array
               items: { $ref: '#/components/schemas/VersionInfo' }

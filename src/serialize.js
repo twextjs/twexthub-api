@@ -201,6 +201,7 @@ export function extensionDetailFromRow(row, versions) {
     ...extensionSummaryFromRow(row),
     author: row.author ?? '',
     license: row.license,
+    isUnsandboxed: row.is_unsandboxed ?? null,
     color1: row.color1 ?? null,
     color2: row.color2 ?? null,
     color3: row.color3 ?? null,

@@ -43,6 +43,12 @@ export function manifestFromProject(projectConfig, pathId) {
   if (projectConfig.author !== undefined && typeof projectConfig.author !== 'string') {
     errors.push({ field: 'author', message: 'Must be a string when provided.' });
   }
+  if (ext.isUnsandboxed !== undefined && typeof ext.isUnsandboxed !== 'boolean') {
+    errors.push({
+      field: 'extension.isUnsandboxed',
+      message: 'Must be a boolean when provided.',
+    });
+  }
   for (const color of ['color1', 'color2', 'color3']) {
     if (
       ext[color] !== undefined &&
@@ -75,6 +81,10 @@ export function manifestFromProject(projectConfig, pathId) {
         typeof projectConfig.description === 'string' ? projectConfig.description : '',
       ),
       author: typeof projectConfig.author === 'string' ? projectConfig.author : null,
+      // Tri-state on purpose: Boolean() would turn the string "false" into
+      // true, and collapsing an explicit false into null would lose the
+      // difference between "declares itself sandboxed" and "says nothing".
+      isUnsandboxed: typeof ext.isUnsandboxed === 'boolean' ? ext.isUnsandboxed : null,
       color1: typeof ext.color1 === 'string' ? ext.color1 : null,
       color2: typeof ext.color2 === 'string' ? ext.color2 : null,
       color3: typeof ext.color3 === 'string' ? ext.color3 : null,

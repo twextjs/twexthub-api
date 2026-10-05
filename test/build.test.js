@@ -119,6 +119,23 @@ test('derived manifest validation rejects bad metadata', async () => {
   assert.match(v.body.errors[0].field, /version/i);
 });
 
+test('extension.isUnsandboxed must be a boolean when provided', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  const { projectTarball } = await import('./helpers.mjs');
+
+  // A quoted "true" is a string, not a boolean. Coercing it would let a
+  // project silently claim it is unsandboxed.
+  const stringy = await projectTarball({ id: 'hello', version: '1.0.0', isUnsandboxed: 'true' });
+  const res = await request(app)
+    .post(apiPath(`/@${ns}/hello/versions`))
+    .set(bearer(owner.token))
+    .set('Content-Type', 'application/gzip')
+    .send(stringy);
+  assert.equal(res.status, 422);
+  assert.equal(res.body.errors[0].field, 'extension.isUnsandboxed');
+});
+
 test('legacy JSON publishes are rejected with 415, and missing twext.yml with 422', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
