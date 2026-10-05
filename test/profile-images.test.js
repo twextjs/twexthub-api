@@ -7,7 +7,7 @@ import sharp from 'sharp';
 import { blobPathFor } from '../src/blobs.js';
 import { gcBlobs } from '../src/maintenance.js';
 import { sniffImageType, supportedImageTypes } from '../src/image-sniff.js';
-import { boot, bearer, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
+import { apiPath, bearer, boot, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
 
 // Real images rather than signature bytes on their own: an upload is decoded
 // before it is stored, so a fixture the decoder rejects would exercise the
@@ -66,7 +66,7 @@ async function account() {
 
 const put = (ns, kind, body, type) =>
   request(app)
-    .put(`/v1/users/${ns}/${kind}`)
+    .put(apiPath(`/users/${ns}/${kind}`))
     .set(bearer(tokens.get(ns)))
     .set('Content-Type', type)
     .send(body);
@@ -84,7 +84,7 @@ const versioned = async (ns, kind) => {
   const column = kind === 'avatar' ? 'avatar_blob_digest' : 'banner_blob_digest';
   const [row] = await sql`SELECT ${sql(column)} AS digest FROM users WHERE namespace = ${ns}`;
   assert.ok(row.digest, `expected ${ns} to have a ${kind} upload`);
-  return `${config.publicBaseUrl}/v1/users/${ns}/${kind}?v=${row.digest.slice(0, 16)}`;
+  return `${config.publicBaseUrl}${apiPath(`/users/${ns}/${kind}`)}?v=${row.digest.slice(0, 16)}`;
 };
 
 describe('sniffImageType', () => {
@@ -141,7 +141,7 @@ describe('uploading a profile image', () => {
   test('keeps an external reference, which the upload then shadows', async () => {
     const ns = await account();
     await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/old.png' })
       .expect(200);
@@ -154,7 +154,7 @@ describe('uploading a profile image', () => {
     assert.ok(row.avatar_blob_digest);
     // The upload is what a visitor is shown, not the linked file.
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
-    const served = await request(app).get(`/v1/users/${ns}/avatar`);
+    const served = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(served.status, 200);
     assert.equal(served.headers['content-type'], 'image/png');
   });
@@ -352,7 +352,7 @@ describe('upload authorization', () => {
   test('requires a session', async () => {
     const ns = await account();
     const res = await request(app)
-      .put(`/v1/users/${ns}/avatar`)
+      .put(apiPath(`/users/${ns}/avatar`))
       .set('Content-Type', 'image/png')
       .send(pngBytes());
     assert.equal(res.status, 401);
@@ -368,7 +368,7 @@ describe('upload authorization', () => {
 
     const owner = await account();
     const res = await request(app)
-      .put(`/v1/users/${owner}/avatar`)
+      .put(apiPath(`/users/${owner}/avatar`))
       .set(bearer(adminRes.token))
       .set('Content-Type', 'image/png')
       .send(pngBytes());
@@ -382,7 +382,7 @@ describe('serving profile images', () => {
     const bytes = pngBytes();
     await put(ns, 'avatar', bytes, 'image/png');
 
-    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(res.status, 200);
     assert.match(res.headers['content-type'], /image\/png/);
     assert.equal(Buffer.compare(res.body, bytes), 0);
@@ -394,7 +394,7 @@ describe('serving profile images', () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
 
-    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(res.status, 200);
     assert.equal(res.headers['x-content-type-options'], 'nosniff');
   });
@@ -413,12 +413,14 @@ describe('serving profile images', () => {
   test('makes the bare path revalidate, and answers a match with 304', async () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
-    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(res.headers['cache-control'], 'public, max-age=0, must-revalidate');
     const etag = res.headers.etag;
     assert.match(etag, /^"[0-9a-f]{64}"$/);
 
-    const revalidated = await request(app).get(`/v1/users/${ns}/avatar`).set('If-None-Match', etag);
+    const revalidated = await request(app)
+      .get(apiPath(`/users/${ns}/avatar`))
+      .set('If-None-Match', etag);
     assert.equal(revalidated.status, 304);
   });
 
@@ -435,7 +437,7 @@ describe('serving profile images', () => {
     const stale = new URL(upload.body.avatarUrl).searchParams.get('v');
     await put(ns, 'avatar', pngBytes(2), 'image/png');
 
-    const res = await request(app).get(`/v1/users/${ns}/avatar?v=${stale}`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar?v=${stale}`));
     assert.equal(res.status, 302);
     assert.notEqual(
       new URL(res.headers.location, config.publicBaseUrl).searchParams.get('v'),
@@ -449,34 +451,34 @@ describe('serving profile images', () => {
   test('serves a replacement under the same URL', async () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(1), 'image/png');
-    const first = await request(app).get(`/v1/users/${ns}/avatar`);
+    const first = await request(app).get(apiPath(`/users/${ns}/avatar`));
     await put(ns, 'avatar', pngBytes(2), 'image/png');
-    const second = await request(app).get(`/v1/users/${ns}/avatar`);
+    const second = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.notEqual(Buffer.compare(first.body, second.body), 0);
   });
 
   test('still redirects to an external reference when no upload exists', async () => {
     const ns = await account();
     await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ bannerUrl: 'https://cdn.example/banner.png' })
       .expect(200);
-    const res = await request(app).get(`/v1/users/${ns}/banner`);
+    const res = await request(app).get(apiPath(`/users/${ns}/banner`));
     assert.equal(res.status, 302);
     assert.equal(res.headers.location, 'https://cdn.example/banner.png');
   });
 
   test('falls back to the identicon when an avatar has neither', async () => {
     const ns = await account();
-    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(res.status, 200);
     assert.match(res.headers['content-type'], /svg/);
   });
 
   test('404s a banner that was never set', async () => {
     const ns = await account();
-    const res = await request(app).get(`/v1/users/${ns}/banner`);
+    const res = await request(app).get(apiPath(`/users/${ns}/banner`));
     assert.equal(res.status, 404);
   });
 
@@ -486,13 +488,13 @@ describe('serving profile images', () => {
     const [row] = await avatarDigest(ns);
     await rm(blobPathFor(config.dataDir, row.avatar_blob_digest), { force: true });
 
-    const res = await request(app).get(`/v1/users/${ns}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${ns}/avatar`));
     assert.equal(res.status, 200);
     assert.match(res.headers['content-type'], /svg/);
   });
 
   test('404s an unknown namespace', async () => {
-    const res = await request(app).get('/v1/users/nope-nope/avatar');
+    const res = await request(app).get(apiPath('/users/nope-nope/avatar'));
     assert.equal(res.status, 404);
   });
 });
@@ -505,7 +507,7 @@ describe('removing a profile image', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
     const res = await request(app)
-      .delete(`/v1/users/${ns}/avatar`)
+      .delete(apiPath(`/users/${ns}/avatar`))
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, null);
@@ -515,13 +517,13 @@ describe('removing a profile image', () => {
   test('leaves an external reference in place behind the upload', async () => {
     const ns = await account();
     await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/a.png' })
       .expect(200);
 
     const res = await request(app)
-      .delete(`/v1/users/${ns}/avatar`)
+      .delete(apiPath(`/users/${ns}/avatar`))
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, 'https://cdn.example/a.png');
@@ -531,7 +533,7 @@ describe('removing a profile image', () => {
     const owner = await account();
     const other = await account();
     const res = await request(app)
-      .delete(`/v1/users/${owner}/avatar`)
+      .delete(apiPath(`/users/${owner}/avatar`))
       .set(bearer(tokens.get(other)));
     assert.equal(res.status, 403);
   });
@@ -564,12 +566,12 @@ describe('removing a profile image', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
     await request(app)
-      .delete(`/v1/users/${ns}/avatar`)
+      .delete(apiPath(`/users/${ns}/avatar`))
       .set(bearer(tokens.get(ns)))
       .expect(200);
 
     assert.ok(existsSync(stored));
-    const served = await request(app).get(`/v1/users/${ns}/banner`);
+    const served = await request(app).get(apiPath(`/users/${ns}/banner`));
     assert.equal(served.status, 200);
     assert.equal(Buffer.compare(served.body, shared), 0);
   });
@@ -588,7 +590,7 @@ describe('removing a profile image', () => {
     const replacement = await put(ns, 'avatar', pngBytes(7), 'image/png');
     assert.equal(replacement.status, 200);
     assert.ok(existsSync(stored));
-    const served = await request(app).get(`/v1/users/${ns}/banner`);
+    const served = await request(app).get(apiPath(`/users/${ns}/banner`));
     assert.equal(Buffer.compare(served.body, shared), 0);
   });
 
@@ -603,7 +605,7 @@ describe('removing a profile image', () => {
 
     const del = (kind) =>
       request(app)
-        .delete(`/v1/users/${ns}/${kind}`)
+        .delete(apiPath(`/users/${ns}/${kind}`))
         .set(bearer(tokens.get(ns)))
         .expect(200);
     await del('avatar');
@@ -631,7 +633,7 @@ describe('swapping one image source for another', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
     const res = await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/new.png' })
       .expect(200);
@@ -645,14 +647,14 @@ describe('swapping one image source for another', () => {
   test('falls back to the URL once the upload is removed', async () => {
     const ns = await account();
     await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ avatarUrl: 'https://cdn.example/fallback.png' })
       .expect(200);
     await put(ns, 'avatar', pngBytes(), 'image/png');
 
     const res = await request(app)
-      .delete(`/v1/users/${ns}/avatar`)
+      .delete(apiPath(`/users/${ns}/avatar`))
       .set(bearer(tokens.get(ns)));
 
     assert.equal(res.status, 200);
@@ -669,13 +671,13 @@ describe('swapping one image source for another', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
     await request(app)
-      .patch(`/v1/users/${a}`)
+      .patch(apiPath(`/users/${a}`))
       .set(bearer(tokens.get(a)))
       .send({ avatarUrl: 'https://cdn.example/x.png' })
       .expect(200);
     // b still serves the identical bytes, so a's cleanup must not unlink them.
     assert.ok(existsSync(stored));
-    const res = await request(app).get(`/v1/users/${b}/avatar`);
+    const res = await request(app).get(apiPath(`/users/${b}/avatar`));
     assert.equal(res.status, 200);
   });
 });
@@ -716,7 +718,7 @@ describe('blob collection', () => {
     const [row] = await avatarDigest(ns);
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
     await request(app)
-      .delete(`/v1/users/${ns}/avatar`)
+      .delete(apiPath(`/users/${ns}/avatar`))
       .set(bearer(tokens.get(ns)))
       .expect(200);
 
@@ -730,7 +732,7 @@ describe('blob collection', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
 
     await request(app)
-      .delete(`/v1/users/${ns}`)
+      .delete(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .expect(204);
     assert.ok(!existsSync(stored));
@@ -741,7 +743,7 @@ describe('visibility', () => {
   test('reports the upload to a stranger, since profile images are public', async () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
-    const res = await request(app).get(`/v1/users/${ns}`);
+    const res = await request(app).get(apiPath(`/users/${ns}`));
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
   });
@@ -750,7 +752,7 @@ describe('visibility', () => {
     const ns = await account();
     await put(ns, 'avatar', pngBytes(), 'image/png');
     const res = await request(app)
-      .get('/v1/me')
+      .get(apiPath('/me'))
       .set(bearer(tokens.get(ns)));
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
@@ -759,13 +761,13 @@ describe('visibility', () => {
   test('carries the other profile fields the auth payload used to drop', async () => {
     const ns = await account();
     await request(app)
-      .patch(`/v1/users/${ns}`)
+      .patch(apiPath(`/users/${ns}`))
       .set(bearer(tokens.get(ns)))
       .send({ bio: 'Hello there', website: 'https://kane.dev', github: 'kane' })
       .expect(200);
 
     const res = await request(app)
-      .get('/v1/me')
+      .get(apiPath('/me'))
       .set(bearer(tokens.get(ns)));
     assert.equal(res.body.bio, 'Hello there');
     assert.equal(res.body.website, 'https://kane.dev');

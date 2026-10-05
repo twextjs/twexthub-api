@@ -5,13 +5,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  boot,
-  resetDb,
+  apiPath,
   bearer,
-  uniqNs,
-  signupAndAccept,
-  publishProject,
+  boot,
   listTarballFiles,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 import { compileProject, compilerEnv } from '../src/compiler.js';
 
@@ -40,7 +41,9 @@ test('a successful build surfaces buildLog and sourceUrl on the pending version'
   assert.match(pub.body.sourceUrl, /\/versions\/1\.0\.0\/source$/);
 
   // The moderation queue carries the build log and a source URL for review.
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(admin.token));
+  const queue = await request(app)
+    .get(apiPath('/versions?status=pending'))
+    .set(bearer(admin.token));
   assert.equal(queue.status, 200);
   assert.equal(queue.body.data.length, 1);
   const [entry] = queue.body.data;
@@ -50,7 +53,7 @@ test('a successful build surfaces buildLog and sourceUrl on the pending version'
 
   // Owner can collect their source tarball for local rebuilds.
   const src = await request(app)
-    .get(`/v1/@${ns}/hello/versions/1.0.0/source`)
+    .get(apiPath(`/@${ns}/hello/versions/1.0.0/source`))
     .set(bearer(owner.token))
     .expect(200);
   assert.match(src.headers['content-type'], /gzip/);
@@ -74,7 +77,7 @@ test('a failing build rejects the publish with buildLog and buildError', async (
   });
 
   const res = await request(app)
-    .post(`/v1/@${ns}/broken/versions`)
+    .post(apiPath(`/@${ns}/broken/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(tarball);
@@ -85,7 +88,9 @@ test('a failing build rejects the publish with buildLog and buildError', async (
   assert.match(res.body.detail, /exited with code|failed|error/i);
 
   // Nothing was staged.
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(admin.token));
+  const queue = await request(app)
+    .get(apiPath('/versions?status=pending'))
+    .set(bearer(admin.token));
   assert.equal(queue.body.data.length, 0);
 });
 
@@ -97,7 +102,7 @@ test('derived manifest validation rejects bad metadata', async () => {
   // twext.yml extension.id must match the route id.
   const mismatched = await projectTarball({ id: 'other', version: '1.0.0' });
   const bad = await request(app)
-    .post(`/v1/@${ns}/expected/versions`)
+    .post(apiPath(`/@${ns}/expected/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(mismatched);
@@ -106,7 +111,7 @@ test('derived manifest validation rejects bad metadata', async () => {
 
   const badVersion = await projectTarball({ id: 'hello', version: 'not-semver' });
   const v = await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
+    .post(apiPath(`/@${ns}/hello/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(badVersion);
@@ -119,7 +124,7 @@ test('legacy JSON publishes are rejected with 415, and missing twext.yml with 42
   const ns = owner.user.namespace;
 
   const legacy = await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
+    .post(apiPath(`/@${ns}/hello/versions`))
     .set(bearer(owner.token))
     .send({ manifest: { id: 'hello', version: '1.0.0', license: 'MIT' }, code: 'x' });
   assert.equal(legacy.status, 415);
@@ -137,7 +142,7 @@ test('legacy JSON publishes are rejected with 415, and missing twext.yml with 42
     await writeFile(join(dir, 'src', 'index.js'), 'export const blocks = {};');
     const tarball = await createTarballBuffer(dir, ['package.json', 'src/index.js']);
     const res = await request(app)
-      .post(`/v1/@${ns}/hello/versions`)
+      .post(apiPath(`/@${ns}/hello/versions`))
       .set(bearer(owner.token))
       .set('Content-Type', 'application/gzip')
       .send(tarball);
@@ -177,7 +182,7 @@ test('source tarballs over the byte cap are refused with 413', async () => {
     const tarball = await createTarballBuffer(dir, await listTarballFiles(dir, dir));
     assert.ok(tarball.length > 1024 * 1024, 'tarball exceeds the cap');
     const res = await request(app)
-      .post(`/v1/@${ns}/big/versions`)
+      .post(apiPath(`/@${ns}/big/versions`))
       .set(bearer(owner.token))
       .set('Content-Type', 'application/gzip')
       .send(tarball);
@@ -193,7 +198,7 @@ test('an invalid or corrupt gzip payload is a 422', async () => {
   const ns = owner.user.namespace;
 
   const corrupt = await request(app)
-    .post(`/v1/@${ns}/hello/versions`)
+    .post(apiPath(`/@${ns}/hello/versions`))
     .set(bearer(owner.token))
     .set('Content-Type', 'application/gzip')
     .send(Buffer.from('this is not a gzip archive at all, just bytes'));
@@ -209,9 +214,11 @@ test('identical sources produce identical compiled blobs and share a source file
     version: '1.0.0',
     code: 'const ECHO = true;',
   });
-  const queue = await request(app).get('/v1/versions?status=pending').set(bearer(admin.token));
+  const queue = await request(app)
+    .get(apiPath('/versions?status=pending'))
+    .set(bearer(admin.token));
   await request(app)
-    .patch(`/v1/@${ns}/echo/versions/${queue.body.data[0].version}`)
+    .patch(apiPath(`/@${ns}/echo/versions/${queue.body.data[0].version}`))
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
@@ -224,8 +231,12 @@ test('identical sources produce identical compiled blobs and share a source file
   });
   assert.equal(second.body.status, 'published');
 
-  const firstDetail = await request(app).get(`/v1/@${ns}/echo/versions/1.0.0`).expect(200);
-  const secondDetail = await request(app).get(`/v1/@${ns}/echo/versions/2.0.0`).expect(200);
+  const firstDetail = await request(app)
+    .get(apiPath(`/@${ns}/echo/versions/1.0.0`))
+    .expect(200);
+  const secondDetail = await request(app)
+    .get(apiPath(`/@${ns}/echo/versions/2.0.0`))
+    .expect(200);
   assert.match(firstDetail.body.dist.digest, /^sha256:/);
   assert.equal(firstDetail.body.dist.digest, secondDetail.body.dist.digest);
 });

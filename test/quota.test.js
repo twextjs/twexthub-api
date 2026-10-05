@@ -2,13 +2,14 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
-  boot,
-  resetDb,
+  apiPath,
   bearer,
-  uniqNs,
-  signupAndAccept,
-  publishProject,
+  boot,
   projectTarball,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -47,7 +48,7 @@ test('blob size caps and the account quota are enforced on publish', async () =>
   const first = await publishProject(app, ns, 'batch', owner.token);
   assert.equal(first.status, 201);
   await request(app)
-    .patch(`/v1/@${ns}/batch/versions/1.0.0`)
+    .patch(apiPath(`/@${ns}/batch/versions/1.0.0`))
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
@@ -78,16 +79,16 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
 
   await publishProject(app, ns, 'seed', owner.token);
   await request(app)
-    .patch(`/v1/@${ns}/seed/versions/1.0.0`)
+    .patch(apiPath(`/@${ns}/seed/versions/1.0.0`))
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
   await request(app)
-    .put(`/v1/@${ns}/seed/owners/${coowner.user.namespace}`)
+    .put(apiPath(`/@${ns}/seed/owners/${coowner.user.namespace}`))
     .set(bearer(owner.token))
     .expect(204);
   await request(app)
-    .post(`/v1/@${ns}/seed/owners/${coowner.user.namespace}/accept`)
+    .post(apiPath(`/@${ns}/seed/owners/${coowner.user.namespace}/accept`))
     .set(bearer(coowner.token))
     .expect(200);
 
@@ -101,7 +102,7 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
   const publish = async (id, version, token) => {
     const buffer = await projectTarball({ id, version, code: '// alpha' });
     return request(app)
-      .post(`/v1/@${ns}/${id}/versions`)
+      .post(apiPath(`/@${ns}/${id}/versions`))
       .set(bearer(token))
       .set('Content-Type', 'application/gzip')
       .send(buffer);
@@ -124,31 +125,31 @@ test('admins can read and tune per-account quota, and only admins view the audit
 
   // Quota defaults to the configured value, then tracks every publish byte.
   const initial = await request(app)
-    .get(`/v1/admin/users/${ns}/quota`)
+    .get(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(initial.body.maxBlobBytes, null);
 
   await publishProject(app, ns, 'secret', owner.token, { code: '// secret' });
   const afterPublish = await request(app)
-    .get(`/v1/admin/users/${ns}/quota`)
+    .get(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .expect(200);
   assert.ok(Number(afterPublish.body.blobBytes) > 0, 'publish bytes are tracked');
 
   // A per-account override replaces the default; non-admins cannot set it.
   await request(app)
-    .patch(`/v1/admin/users/${ns}/quota`)
+    .patch(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(peer.token))
     .send({ maxBlobBytes: 999 })
     .expect(403);
   await request(app)
-    .patch(`/v1/admin/users/${ns}/quota`)
+    .patch(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .send({ maxBlobBytes: 999 })
     .expect(200);
   const tuned = await request(app)
-    .get(`/v1/admin/users/${ns}/quota`)
+    .get(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(tuned.body.maxBlobBytes, 999);
@@ -156,19 +157,22 @@ test('admins can read and tune per-account quota, and only admins view the audit
   // Audit the whole flow: publish, owner invite, quota change, role change.
   const roleTarget = await signupAndAccept(app, uniqNs());
   await request(app)
-    .put(`/v1/@${ns}/secret/owners/${peer.user.namespace}`)
+    .put(apiPath(`/@${ns}/secret/owners/${peer.user.namespace}`))
     .set(bearer(owner.token))
     .expect(204);
   await request(app)
-    .patch(`/v1/users/${roleTarget.user.namespace}`)
+    .patch(apiPath(`/users/${roleTarget.user.namespace}`))
     .set(bearer(admin.token))
     .send({ role: 'admin' })
     .expect(200);
 
-  const asPeer = await request(app).get('/v1/admin/audit').set(bearer(peer.token));
+  const asPeer = await request(app).get(apiPath('/admin/audit')).set(bearer(peer.token));
   assert.equal(asPeer.status, 403);
 
-  const audit = await request(app).get('/v1/admin/audit').set(bearer(admin.token)).expect(200);
+  const audit = await request(app)
+    .get(apiPath('/admin/audit'))
+    .set(bearer(admin.token))
+    .expect(200);
   const actions = audit.body.data.map((entry) => entry.action);
   for (const expected of ['version.publish', 'owner.invite', 'quota.set', 'role.change']) {
     assert.ok(actions.includes(expected), `expected audit action ${expected}, got ${actions}`);
@@ -182,7 +186,7 @@ test('admins can read and tune per-account quota, and only admins view the audit
 
   // Pagination follows its own links without repeating rows.
   const page1 = await request(app)
-    .get('/v1/admin/audit?limit=2')
+    .get(apiPath('/admin/audit?limit=2'))
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(page1.body.data.length, 2);
@@ -200,14 +204,17 @@ test('deleting the extension refunds the account quota including source bytes', 
 
   await publishProject(app, ns, 'temp', owner.token, { code: '// temp' });
   const charged = await request(app)
-    .get(`/v1/admin/users/${ns}/quota`)
+    .get(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .expect(200);
   assert.ok(Number(charged.body.blobBytes) > 0);
 
-  await request(app).delete(`/v1/@${ns}/temp`).set(bearer(owner.token)).expect(204);
+  await request(app)
+    .delete(apiPath(`/@${ns}/temp`))
+    .set(bearer(owner.token))
+    .expect(204);
   const refunded = await request(app)
-    .get(`/v1/admin/users/${ns}/quota`)
+    .get(apiPath(`/admin/users/${ns}/quota`))
     .set(bearer(admin.token))
     .expect(200);
   assert.equal(Number(refunded.body.blobBytes), 0);

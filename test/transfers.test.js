@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import request from 'supertest';
 import { acceptTransfer, loadNamespaceAccount } from '../src/transfer.js';
 import {
+  apiPath,
   approveVersion,
   bearer,
   boot,
@@ -27,7 +28,7 @@ async function makeOrg() {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = uniqNs();
   await request(app)
-    .post('/v1/orgs')
+    .post(apiPath('/orgs'))
     .set(bearer(owner.token))
     .send({ namespace: ns, displayName: 'Acme Inc' })
     .expect(201);
@@ -36,7 +37,7 @@ async function makeOrg() {
 
 async function addOrgOwner(org, who) {
   await request(app)
-    .put(`/v1/orgs/${org.ns}/owners/${who.user.namespace}`)
+    .put(apiPath(`/orgs/${org.ns}/owners/${who.user.namespace}`))
     .set(bearer(org.owner.token))
     .expect(204);
 }
@@ -56,24 +57,34 @@ async function publishedExtension(id = 'hello', opts = {}) {
 }
 
 const offer = (from, id, to, token) =>
-  request(app).post(`/v1/@${from}/${id}/transfers`).set(bearer(token)).send({ to });
+  request(app)
+    .post(apiPath(`/@${from}/${id}/transfers`))
+    .set(bearer(token))
+    .send({ to });
 
 const accept = (from, id, to, token) =>
-  request(app).post(`/v1/@${from}/${id}/transfers/${to}/accept`).set(bearer(token)).expect(200);
+  request(app)
+    .post(apiPath(`/@${from}/${id}/transfers/${to}/accept`))
+    .set(bearer(token))
+    .expect(200);
 
 const notifications = async (token) =>
-  (await request(app).get('/v1/notifications').set(bearer(token)).expect(200)).body.data;
+  (await request(app).get(apiPath('/notifications')).set(bearer(token)).expect(200)).body.data;
 
 const versions = async (ns, id) =>
-  (await request(app).get(`/v1/@${ns}/${id}/versions`).expect(200)).body.data.map(
-    (row) => row.version,
-  );
+  (
+    await request(app)
+      .get(apiPath(`/@${ns}/${id}/versions`))
+      .expect(200)
+  ).body.data.map((row) => row.version);
 
 // An address that has been moved answers 301, so a test that wants to know what
 // lives there has to expect that rather than a body.
 const versionsMoved = async (ns, id, to) => {
-  const r = await request(app).get(`/v1/@${ns}/${id}/versions`).expect(301);
-  assert.equal(r.headers.location, `/v1/@${to}/${id}/versions`);
+  const r = await request(app)
+    .get(apiPath(`/@${ns}/${id}/versions`))
+    .expect(301);
+  assert.equal(r.headers.location, apiPath(`/@${to}/${id}/versions`));
   return versions(to, id);
 };
 
@@ -108,7 +119,7 @@ describe('the recipient decides', () => {
 
     for (const token of [owner.token, stranger.token]) {
       await request(app)
-        .post(`/v1/@${ns}/hello/transfers/${other.user.namespace}/accept`)
+        .post(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}/accept`))
         .set(bearer(token))
         .expect(403);
     }
@@ -122,7 +133,10 @@ describe('the recipient decides', () => {
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
 
     const pending = (token) =>
-      request(app).get(`/v1/@${ns}/hello/transfers`).set(bearer(token)).expect(200);
+      request(app)
+        .get(apiPath(`/@${ns}/hello/transfers`))
+        .set(bearer(token))
+        .expect(200);
 
     const seen = (await pending(other.token).then((r) => r.body.data)).map((row) => row.to);
     assert.deepEqual(seen, [other.user.namespace]);
@@ -136,7 +150,7 @@ describe('the recipient decides', () => {
     assert.match(notes[0].message, /was offered to/);
 
     await request(app)
-      .delete(`/v1/@${ns}/hello/transfers/${other.user.namespace}`)
+      .delete(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
 
@@ -146,7 +160,7 @@ describe('the recipient decides', () => {
     );
     assert.ok((await notifications(other.token)).some((row) => /withdrawn/.test(row.message)));
     await request(app)
-      .post(`/v1/@${ns}/hello/transfers/${other.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}/accept`))
       .set(bearer(other.token))
       .expect(404);
   });
@@ -155,11 +169,11 @@ describe('the recipient decides', () => {
     const { ns, owner } = await publishedExtension();
     const coOwner = await signupAndAccept(app, uniqNs());
     await request(app)
-      .put(`/v1/@${ns}/hello/owners/${coOwner.user.namespace}`)
+      .put(apiPath(`/@${ns}/hello/owners/${coOwner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${coOwner.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${coOwner.user.namespace}/accept`))
       .set(bearer(coOwner.token))
       .expect(200);
 
@@ -189,24 +203,36 @@ describe('the old address redirects', () => {
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
     await accept(ns, 'hello', other.user.namespace, other.token);
 
-    const detail = await request(app).get(`/v1/@${ns}/hello`).expect(301);
-    assert.equal(detail.headers.location, `/v1/@${other.user.namespace}/hello`);
+    const detail = await request(app)
+      .get(apiPath(`/@${ns}/hello`))
+      .expect(301);
+    assert.equal(detail.headers.location, apiPath(`/@${other.user.namespace}/hello`));
 
-    const version = await request(app).get(`/v1/@${ns}/hello/versions/1.0.0`).expect(301);
-    assert.equal(version.headers.location, `/v1/@${other.user.namespace}/hello/versions/1.0.0`);
+    const version = await request(app)
+      .get(apiPath(`/@${ns}/hello/versions/1.0.0`))
+      .expect(301);
+    assert.equal(
+      version.headers.location,
+      apiPath(`/@${other.user.namespace}/hello/versions/1.0.0`),
+    );
 
     const download = await request(app)
-      .get(`/v1/@${ns}/hello/versions/latest/download`)
+      .get(apiPath(`/@${ns}/hello/versions/latest/download`))
       .expect(301);
     assert.equal(
       download.headers.location,
-      `/v1/@${other.user.namespace}/hello/versions/latest/download`,
+      apiPath(`/@${other.user.namespace}/hello/versions/latest/download`),
     );
 
     // A cursor is part of the URL, not the body, so dropping it would quietly
     // reset somebody's page to the first one.
-    const paged = await request(app).get(`/v1/@${ns}/hello/versions?limit=5`).expect(301);
-    assert.equal(paged.headers.location, `/v1/@${other.user.namespace}/hello/versions?limit=5`);
+    const paged = await request(app)
+      .get(apiPath(`/@${ns}/hello/versions?limit=5`))
+      .expect(301);
+    assert.equal(
+      paged.headers.location,
+      apiPath(`/@${other.user.namespace}/hello/versions?limit=5`),
+    );
 
     // Following it lands on the extension.
     const followed = await request(app).get(detail.headers.location).expect(200);
@@ -219,8 +245,11 @@ describe('the old address redirects', () => {
     await offer(ns, 'secret', other.user.namespace, owner.token).expect(201);
     await accept(ns, 'secret', other.user.namespace, other.token);
 
-    const mine = await request(app).get(`/v1/@${ns}/secret`).set(bearer(other.token)).expect(301);
-    assert.equal(mine.headers.location, `/v1/@${other.user.namespace}/secret`);
+    const mine = await request(app)
+      .get(apiPath(`/@${ns}/secret`))
+      .set(bearer(other.token))
+      .expect(301);
+    assert.equal(mine.headers.location, apiPath(`/@${other.user.namespace}/secret`));
 
     // Following it lands on the extension.
     const followed = await request(app).get(mine.headers.location).expect(200);
@@ -239,8 +268,10 @@ describe('the old address redirects', () => {
 
     // The first address points at the last one, not at the middle hop, so
     // resolving is a single lookup and no chain can be walked into a cycle.
-    const hop = await request(app).get(`/v1/@${ns}/hello`).expect(301);
-    assert.equal(hop.headers.location, `/v1/@${third.user.namespace}/hello`);
+    const hop = await request(app)
+      .get(apiPath(`/@${ns}/hello`))
+      .expect(301);
+    assert.equal(hop.headers.location, apiPath(`/@${third.user.namespace}/hello`));
     assert.equal((await request(app).get(hop.headers.location)).status, 200);
 
     const [{ hops }] = await sql`
@@ -300,7 +331,7 @@ describe('what the move refuses', () => {
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
     await sql`UPDATE users SET max_blob_bytes = ${size.bytes - 1} WHERE namespace = ${other.user.namespace}`;
     await request(app)
-      .post(`/v1/@${ns}/hello/transfers/${other.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}/accept`))
       .set(bearer(other.token))
       .expect(409);
 
@@ -346,11 +377,14 @@ describe('what the move carries', () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
-    await request(app).delete(`/v1/@${ns}/hello`).set(bearer(owner.token)).expect(204);
+    await request(app)
+      .delete(apiPath(`/@${ns}/hello`))
+      .set(bearer(owner.token))
+      .expect(204);
     await publishProject(app, ns, 'hello', owner.token, { version: '2.0.0' });
 
     await request(app)
-      .post(`/v1/@${ns}/hello/transfers/${other.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}/accept`))
       .set(bearer(other.token))
       .expect(404);
     assert.deepEqual(await versions(ns, 'hello'), ['2.0.0']);
@@ -393,24 +427,26 @@ describe('what the move carries', () => {
     const coOwner = await signupAndAccept(app, uniqNs());
 
     await request(app)
-      .put(`/v1/@${ns}/hello/tags/stable`)
+      .put(apiPath(`/@${ns}/hello/tags/stable`))
       .set(bearer(owner.token))
       .send({ version: '1.0.0' })
       .expect(204);
     await request(app)
-      .put(`/v1/@${ns}/hello/owners/${coOwner.user.namespace}`)
+      .put(apiPath(`/@${ns}/hello/owners/${coOwner.user.namespace}`))
       .set(bearer(owner.token))
       .expect(204);
     await request(app)
-      .post(`/v1/@${ns}/hello/owners/${coOwner.user.namespace}/accept`)
+      .post(apiPath(`/@${ns}/hello/owners/${coOwner.user.namespace}/accept`))
       .set(bearer(coOwner.token))
       .expect(200);
     await request(app)
-      .post(`/v1/@${ns}/hello/webhooks`)
+      .post(apiPath(`/@${ns}/hello/webhooks`))
       .set(bearer(owner.token))
       .send({ url: 'https://example.com/twext-hook', events: ['version.published'] })
       .expect(201);
-    await request(app).get(`/v1/@${ns}/hello/versions/latest/download`).expect(200);
+    await request(app)
+      .get(apiPath(`/@${ns}/hello/versions/latest/download`))
+      .expect(200);
     // Seeded rather than waited for: in production the rollup is filled by a
     // scheduled job, and the raw event above is what a download actually wrote.
     await sql`
@@ -443,15 +479,27 @@ describe('what the move carries', () => {
 
     // Everything that was attached to the extension is still attached to it,
     // which is the whole difference between a move and a republish.
-    assert.deepEqual((await request(app).get(`/v1/@${to}/hello/tags`).expect(200)).body, {
-      stable: '1.0.0',
-    });
-    const owners = (await request(app).get(`/v1/@${to}/hello/owners`).expect(200)).body.data.map(
-      (row) => row.namespace,
+    assert.deepEqual(
+      (
+        await request(app)
+          .get(apiPath(`/@${to}/hello/tags`))
+          .expect(200)
+      ).body,
+      {
+        stable: '1.0.0',
+      },
     );
+    const owners = (
+      await request(app)
+        .get(apiPath(`/@${to}/hello/owners`))
+        .expect(200)
+    ).body.data.map((row) => row.namespace);
     assert.ok(owners.includes(coOwner.user.namespace));
     const hooks = (
-      await request(app).get(`/v1/@${to}/hello/webhooks`).set(bearer(other.token)).expect(200)
+      await request(app)
+        .get(apiPath(`/@${to}/hello/webhooks`))
+        .set(bearer(other.token))
+        .expect(200)
     ).body.data;
     assert.equal(hooks.length, 1);
 
@@ -462,7 +510,13 @@ describe('what the move carries', () => {
     assert.equal(await rolled(ns), 0);
     assert.equal(await rolled(to), 7);
     assert.equal(
-      Number((await request(app).get(`/v1/@${to}/hello`).expect(200)).body.downloads),
+      Number(
+        (
+          await request(app)
+            .get(apiPath(`/@${to}/hello`))
+            .expect(200)
+        ).body.downloads,
+      ),
       7,
     );
 
@@ -479,18 +533,22 @@ describe('what the move carries', () => {
     const other = await signupAndAccept(app, uniqNs());
 
     await request(app)
-      .patch(`/v1/users/${other.user.namespace}`)
+      .patch(apiPath(`/users/${other.user.namespace}`))
       .set(bearer(other.token))
       .send({ displayName: 'Receiver Name' })
       .expect(200);
 
-    const before = await request(app).get(`/v1/@${ns}/hello`).expect(200);
+    const before = await request(app)
+      .get(apiPath(`/@${ns}/hello`))
+      .expect(200);
     assert.equal(before.body.author, 'Sender Name');
 
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
     await accept(ns, 'hello', other.user.namespace, other.token);
 
-    const after = await request(app).get(`/v1/@${other.user.namespace}/hello`).expect(200);
+    const after = await request(app)
+      .get(apiPath(`/@${other.user.namespace}/hello`))
+      .expect(200);
     assert.equal(after.body.author, 'Receiver Name');
   });
 
@@ -558,7 +616,7 @@ describe('what the move carries', () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());
     await request(app)
-      .post(`/v1/@${ns}/hello/webhooks`)
+      .post(apiPath(`/@${ns}/hello/webhooks`))
       .set(bearer(owner.token))
       .send({ url: 'https://example.com/twext-hook', events: ['extension.transferred'] })
       .expect(201);

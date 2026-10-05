@@ -2,7 +2,13 @@ import { Router } from 'express';
 import { requireAdmin } from '../auth.js';
 import { decodeCursor, keysetPage, pageLinks, parseDir, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
-import { asString, foldText, isValidExtensionId, isValidNamespace } from '../util.js';
+import {
+  asString,
+  foldText,
+  isValidExtensionId,
+  isValidNamespace,
+  normalizeApiRoot,
+} from '../util.js';
 import { trendingExtensions, totalDownloads } from '../metrics.js';
 import { product } from '../product.js';
 import {
@@ -652,7 +658,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       LIMIT 50
     `;
     const base = config.publicBaseUrl.replace(/\/$/, '');
-    const root = config.apiRoot ? `/${config.apiRoot}` : '';
+    const apiRoot = normalizeApiRoot(config.apiRoot);
+    const root = apiRoot ? `/${apiRoot}` : '';
     const entries = rows
       .map(
         (row) => `  <entry>

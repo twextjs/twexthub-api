@@ -1,7 +1,14 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { makeConfig, bearer, uniqNs, signupAndAccept, publishProject } from './helpers.mjs';
+import {
+  apiPath,
+  bearer,
+  makeConfig,
+  publishProject,
+  signupAndAccept,
+  uniqNs,
+} from './helpers.mjs';
 import { createApp } from '../src/app.js';
 import { createDb, ensureDataDirs } from '../src/db.js';
 
@@ -76,7 +83,7 @@ test('the publish bucket is counted per account and rejects past the cap', async
   // the server did the work.
   const publish = () =>
     request(tightApp)
-      .post(`/v1/@${ns}/widget/versions`)
+      .post(apiPath(`/@${ns}/widget/versions`))
       .set(bearer(owner.token))
       .set('Content-Type', 'application/gzip')
       .send(Buffer.alloc(0));
@@ -90,7 +97,7 @@ test('the publish bucket is counted per account and rejects past the cap', async
   // A different account has its own bucket.
   const peer = await signupAndAccept(tightApp, uniqNs());
   await request(tightApp)
-    .post(`/v1/@${peer.user.namespace}/widget/versions`)
+    .post(apiPath(`/@${peer.user.namespace}/widget/versions`))
     .set(bearer(peer.token))
     .set('Content-Type', 'application/gzip')
     .send(Buffer.alloc(0))
@@ -103,20 +110,24 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
   const ns = owner.user.namespace;
   await publishProject(tightApp, ns, 'hello', owner.token, { code: '// dl' });
   await request(tightApp)
-    .patch(`/v1/@${ns}/hello/versions/1.0.0`)
+    .patch(apiPath(`/@${ns}/hello/versions/1.0.0`))
     .set(bearer(admin.token))
     .send({ status: 'approved' })
     .expect(200);
 
-  await request(tightApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
-  const second = await request(tightApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`);
+  await request(tightApp)
+    .get(apiPath(`/@${ns}/hello/versions/1.0.0/download`))
+    .expect(200);
+  const second = await request(tightApp).get(apiPath(`/@${ns}/hello/versions/1.0.0/download`));
   assert.equal(second.status, 429);
 
   // With the bucket disabled, repeated hits sail through and nothing is counted:
   // a null limit has to beat the 240-per-window default to be meaningful.
   await sql`DELETE FROM rate_limit_entries WHERE bucket LIKE 'download:%'`;
   for (let i = 0; i < 3; i += 1) {
-    await request(looseApp).get(`/v1/@${ns}/hello/versions/1.0.0/download`).expect(200);
+    await request(looseApp)
+      .get(apiPath(`/@${ns}/hello/versions/1.0.0/download`))
+      .expect(200);
   }
   const disabled = await sql`
     SELECT 1 FROM rate_limit_entries WHERE bucket LIKE 'download:%'
@@ -127,19 +138,21 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
 test('signup and login limits still work alongside the new buckets', async () => {
   const ns = uniqNs();
   for (let i = 0; i < 5; i += 1) {
-    await request(tightApp).post('/v1/sessions').send({ namespace: ns, password: 'wrong-pass' });
+    await request(tightApp)
+      .post(apiPath('/sessions'))
+      .send({ namespace: ns, password: 'wrong-pass' });
   }
   const sixth = await request(tightApp)
-    .post('/v1/sessions')
+    .post(apiPath('/sessions'))
     .send({ namespace: ns, password: 'wrong-pass' });
   assert.equal(sixth.status, 429);
 });
 
 test('the coarse limiter is mounted behind the request telemetry', async () => {
   const forwarded = { 'X-Forwarded-For': '203.0.113.7' };
-  await request(coarseApp).get('/v1/meta').set(forwarded).expect(200);
-  await request(coarseApp).get('/v1/meta').set(forwarded).expect(200);
-  await request(coarseApp).get('/v1/meta').set(forwarded).expect(429);
+  await request(coarseApp).get(apiPath('/meta')).set(forwarded).expect(200);
+  await request(coarseApp).get(apiPath('/meta')).set(forwarded).expect(200);
+  await request(coarseApp).get(apiPath('/meta')).set(forwarded).expect(429);
 
   const counters = coarseTelemetry.render().join('\n');
   assert.ok(counters.includes('status="429"'), 'the 429 is missing from the counters');

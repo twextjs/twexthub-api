@@ -2,13 +2,14 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
-  boot,
-  resetDb,
+  apiPath,
   bearer,
-  uniqNs,
-  signupAndAccept,
-  publishProject,
+  boot,
   followPages,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -36,12 +37,12 @@ async function seedExtensions() {
       ...extra,
     });
     const queue = await request(app)
-      .get('/v1/versions?status=pending')
+      .get(apiPath('/versions?status=pending'))
       .set(bearer(admin.token))
       .expect(200);
     const entry = queue.body.data.find((v) => v.namespace === ns && v.id === id);
     await request(app)
-      .patch(`/v1/@${ns}/${id}/versions/${entry.version}`)
+      .patch(apiPath(`/@${ns}/${id}/versions/${entry.version}`))
       .set(bearer(admin.token))
       .send({ status: 'approved' })
       .expect(200);
@@ -78,7 +79,7 @@ test('sort=downloads orders by cumulative downloads', async () => {
   const { aggregateDayLoader } = await import('../src/metrics.js');
   await aggregateDayLoader(sql)(new Date());
 
-  const r = await request(app).get('/v1/extensions?sort=downloads').expect(200);
+  const r = await request(app).get(apiPath('/extensions?sort=downloads')).expect(200);
   const ids = r.body.data.filter((e) => e.namespace === ns).map((e) => e.id);
   assert.deepEqual(ids, ['zoo', 'minterm', 'alpaca']);
   const zoo = r.body.data.find((e) => e.id === 'zoo');
@@ -88,12 +89,12 @@ test('sort=downloads orders by cumulative downloads', async () => {
 test('sort=name is alphabetical, sort=updated favors newest publication', async () => {
   const { ns } = await seedExtensions();
 
-  const byName = await request(app).get('/v1/extensions?sort=name').expect(200);
+  const byName = await request(app).get(apiPath('/extensions?sort=name')).expect(200);
   const nameIds = byName.body.data.filter((e) => e.namespace === ns).map((e) => e.id);
   assert.deepEqual(nameIds, ['alpaca', 'minterm', 'zoo']);
 
   // minterm was published first (pending approval), zoo last
-  const byUpdated = await request(app).get('/v1/extensions?sort=updated').expect(200);
+  const byUpdated = await request(app).get(apiPath('/extensions?sort=updated')).expect(200);
   const updatedIds = byUpdated.body.data.filter((e) => e.namespace === ns).map((e) => e.id);
   assert.deepEqual(updatedIds, ['zoo', 'alpaca', 'minterm']);
 });
@@ -101,29 +102,29 @@ test('sort=name is alphabetical, sort=updated favors newest publication', async 
 test('license filter narrows results and combines with search', async () => {
   await seedExtensions();
 
-  const apache = await request(app).get('/v1/extensions?license=Apache-2.0').expect(200);
+  const apache = await request(app).get(apiPath('/extensions?license=Apache-2.0')).expect(200);
   assert.equal(apache.body.data.length, 1);
   assert.equal(apache.body.data[0].id, 'minterm');
   assert.equal(apache.body.data[0].license, undefined); // summaries carry no license field
 
-  const mit = await request(app).get('/v1/search?query=desc&license=MIT').expect(200);
+  const mit = await request(app).get(apiPath('/search?query=desc&license=MIT')).expect(200);
   assert.ok(mit.body.data.length >= 2);
   assert.ok(!mit.body.data.some((e) => e.id === 'minterm'));
 
-  const both = await request(app).get('/v1/search?query=zoo&license=MIT').expect(200);
+  const both = await request(app).get(apiPath('/search?query=zoo&license=MIT')).expect(200);
   assert.equal(both.body.data.length, 1);
   assert.equal(both.body.data[0].id, 'zoo');
 });
 
 test('unknown sort values are rejected with 400', async () => {
-  const r = await request(app).get('/v1/extensions?sort=popular');
+  const r = await request(app).get(apiPath('/extensions?sort=popular'));
   assert.equal(r.status, 400);
 });
 
 test('paginating with sort=name walks every page', async () => {
   await seedExtensions();
 
-  const { rows } = await followPages(app, '/v1/extensions?sort=name&limit=2');
+  const { rows } = await followPages(app, apiPath('/extensions?sort=name&limit=2'));
   const seen = rows.map((e) => `${e.namespace}/${e.id}`);
   assert.ok(seen.length > 2, 'expected more than one page');
   assert.equal(new Set(seen).size, seen.length, 'no duplicates across pages');
@@ -136,7 +137,7 @@ test('paginating with sort=downloads walks every page', async () => {
   const { aggregateDayLoader } = await import('../src/metrics.js');
   await aggregateDayLoader(sql)(new Date());
 
-  const { rows } = await followPages(app, '/v1/extensions?sort=downloads&limit=2');
+  const { rows } = await followPages(app, apiPath('/extensions?sort=downloads&limit=2'));
   assert.deepEqual(
     rows.map((e) => e.id),
     ['zoo', 'minterm', 'alpaca'],
@@ -148,7 +149,7 @@ test('paginating a tied sort key keeps every row', async () => {
   // and the (namespace, id) tiebreaker alone orders the result.
   const { ns } = await seedExtensions();
 
-  const { rows } = await followPages(app, '/v1/extensions?sort=downloads&limit=1');
+  const { rows } = await followPages(app, apiPath('/extensions?sort=downloads&limit=1'));
   const seen = rows.filter((e) => e.namespace === ns).map((e) => e.id);
   assert.deepEqual(seen, ['alpaca', 'minterm', 'zoo']);
 });
@@ -173,13 +174,13 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
 
   // The left pill names the fact and the right pill is a bare value, so the unit
   // lives in the label and there is no pluralisation to get wrong.
-  const version = await get(`/v1/badge/@${ns}/zoo/version`);
+  const version = await get(apiPath(`/badge/@${ns}/zoo/version`));
   assert.deepEqual(texts(version), ['version', 'v1.0.0']);
 
-  const downloads = await get(`/v1/badge/@${ns}/zoo/downloads`);
+  const downloads = await get(apiPath(`/badge/@${ns}/zoo/downloads`));
   assert.deepEqual(texts(downloads), ['downloads', '1']);
 
-  const license = await get(`/v1/badge/@${ns}/zoo/license`);
+  const license = await get(apiPath(`/badge/@${ns}/zoo/license`));
   assert.deepEqual(texts(license), ['license', 'MIT']);
 
   // This is the point of the split: the combined badge is the sum of the three
@@ -189,7 +190,7 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
   // word "downloads" are most of what makes it long.
   await sql`UPDATE extension_daily_downloads SET total_downloads = 48213
             WHERE namespace = ${ns} AND extension_id = 'zoo'`;
-  const combined = await get(`/v1/badge/@${ns}/zoo`);
+  const combined = await get(apiPath(`/badge/@${ns}/zoo`));
   const combinedWidth = svgWidth(combined);
   for (const [name, markup] of [
     ['version', version],
@@ -211,14 +212,16 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
   assert.equal(fillOf(combined), fill, 'combined badge is a different colour');
 
   // The label is still overridable, and defaults to the fact rather than the id.
-  const relabelled = await get(`/v1/badge/@${ns}/zoo/license?label=${encodeURIComponent('terms')}`);
+  const relabelled = await get(
+    apiPath(`/badge/@${ns}/zoo/license?label=${encodeURIComponent('terms')}`),
+  );
   assert.deepEqual(texts(relabelled), ['terms', 'MIT']);
 
   // An unknown trailing segment is a 404, not a silent fallback to the combined
   // badge: answering a different question than the one asked is worse than 404.
-  const unknown = await request(app).get(`/v1/badge/@${ns}/zoo/maintainer`);
+  const unknown = await request(app).get(apiPath(`/badge/@${ns}/zoo/maintainer`));
   assert.equal(unknown.status, 404);
-  const unknownPkg = await request(app).get(`/v1/badge/@${ns}/nonexistent/version`);
+  const unknownPkg = await request(app).get(apiPath(`/badge/@${ns}/nonexistent/version`));
   assert.equal(unknownPkg.status, 404);
 });
 
@@ -228,7 +231,9 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   const { aggregateDayLoader } = await import('../src/metrics.js');
   await aggregateDayLoader(sql)(new Date());
 
-  const r = await request(app).get(`/v1/badge/@${ns}/zoo`).expect(200);
+  const r = await request(app)
+    .get(apiPath(`/badge/@${ns}/zoo`))
+    .expect(200);
   assert.match(r.headers['content-type'], /image\/svg\+xml/);
   const svg = r.text ?? r.body.toString('utf8');
   assert.match(svg, /<svg /);
@@ -248,7 +253,7 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   // in the markup is given a negative width.
   const longLabel = 'a-really-quite-long-extension-name';
   const wide = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent(longLabel)}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent(longLabel)}`))
     .expect(200);
   const wideSvg = wide.text ?? wide.body.toString('utf8');
   assert.ok(
@@ -265,10 +270,10 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   const pillWidth = (markup) =>
     Number(markup.match(/<rect width="([\d.]+)" height="20" fill="#555"/)[1]);
   const wideGlyphs = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('WWWWMMMM')}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent('WWWWMMMM')}`))
     .expect(200);
   const narrow = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('iiii')}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent('iiii')}`))
     .expect(200);
   const widePill = pillWidth(wideGlyphs.text ?? wideGlyphs.body.toString('utf8'));
   const narrowPill = pillWidth(narrow.text ?? narrow.body.toString('utf8'));
@@ -277,7 +282,7 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   // A one-character label still has to sit inside a real gutter, so the
   // padding cannot quietly decay to zero.
   const tiny = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('i')}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent('i')}`))
     .expect(200);
   assert.ok(
     pillWidth(tiny.text ?? tiny.body.toString('utf8')) >= 16,
@@ -288,7 +293,7 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   // ?label= still has to stop somewhere rather than ask for a huge SVG. The cap
   // is on the label pill; the right-hand pill holds the server's own text.
   const huge = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('W'.repeat(4000))}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent('W'.repeat(4000))}`))
     .expect(200);
   const hugeSvg = huge.text ?? huge.body.toString('utf8');
   const hugePill = pillWidth(hugeSvg);
@@ -300,7 +305,7 @@ test('badge renders an SVG with version, downloads, and license', async () => {
   // pill, so they get the em instead. Five of them need 55px of text, and the
   // 16px gutter has to be there on top of that.
   const cjk = await request(app)
-    .get(`/v1/badge/@${ns}/zoo?label=${encodeURIComponent('扩展工具包')}`)
+    .get(apiPath(`/badge/@${ns}/zoo?label=${encodeURIComponent('扩展工具包')}`))
     .expect(200);
   const cjkPill = pillWidth(cjk.text ?? cjk.body.toString('utf8'));
   assert.ok(
@@ -308,7 +313,7 @@ test('badge renders an SVG with version, downloads, and license', async () => {
     `five full-width glyphs need 55px plus the gutter, got ${cjkPill}`,
   );
 
-  const missing = await request(app).get(`/v1/badge/@${ns}/nonexistent`);
+  const missing = await request(app).get(apiPath(`/badge/@${ns}/nonexistent`));
   assert.equal(missing.status, 404);
 });
 
@@ -339,18 +344,35 @@ test('badge colour is derived per package, stays put, and stays readable', async
     return (high + 0.05) / (low + 0.05);
   };
 
-  const zoo = body(await request(app).get(`/v1/badge/@${ns}/zoo`).expect(200));
-  const alpaca = body(await request(app).get(`/v1/badge/@${ns}/alpaca`).expect(200));
+  const zoo = body(
+    await request(app)
+      .get(apiPath(`/badge/@${ns}/zoo`))
+      .expect(200),
+  );
+  const alpaca = body(
+    await request(app)
+      .get(apiPath(`/badge/@${ns}/alpaca`))
+      .expect(200),
+  );
 
   // Same package, twice: identical bytes. A badge is cached publicly for five
   // minutes, so a per-request colour would make the cached and fresh responses
   // disagree.
-  assert.equal(zoo, body(await request(app).get(`/v1/badge/@${ns}/zoo`).expect(200)));
+  assert.equal(
+    zoo,
+    body(
+      await request(app)
+        .get(apiPath(`/badge/@${ns}/zoo`))
+        .expect(200),
+    ),
+  );
 
   // The label is caller-supplied, so the colour must not be seeded from it --
   // otherwise anyone could repaint anyone's badge with a query string.
   const relabelled = body(
-    await request(app).get(`/v1/badge/@${ns}/zoo?label=something-else`).expect(200),
+    await request(app)
+      .get(apiPath(`/badge/@${ns}/zoo?label=something-else`))
+      .expect(200),
   );
   assert.equal(paint(relabelled).background, paint(zoo).background, 'colour follows ?label=');
 
@@ -392,7 +414,11 @@ test('badge colour is derived per package, stays put, and stays readable', async
   }
   const colours = new Set();
   for (const name of names) {
-    const markup = body(await request(app).get(`/v1/badge/@${ns}/${name}`).expect(200));
+    const markup = body(
+      await request(app)
+        .get(apiPath(`/badge/@${ns}/${name}`))
+        .expect(200),
+    );
     assert.match(markup, /MIT/, `${name} is a different licence colour`);
     const { background, foreground } = paint(markup);
     const ratio = contrast(background, foreground);
@@ -408,7 +434,7 @@ test('badge colour is derived per package, stays put, and stays readable', async
 test('feed.atom lists the latest publishes as entries', async () => {
   const { ns } = await seedExtensions();
 
-  const r = await request(app).get('/v1/feed.atom').expect(200);
+  const r = await request(app).get(apiPath('/feed.atom')).expect(200);
   assert.match(r.headers['content-type'], /application\/atom\+xml/);
   const xml = r.text ?? r.body.toString('utf8');
   assert.match(xml, /<feed xmlns="http:\/\/www\.w3\.org\/2005\/Atom">/);

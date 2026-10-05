@@ -56,7 +56,7 @@ The [configuration reference](./configure.md) has every key you can set in the T
 - `TWEXTHUB_PUBLIC_BASE_URL`: the public URL of the instance.
 - `TWEXTHUB_TRUST_PROXY`: set when the API is running behind a reverse proxy. [See Express' trust proxy values](https://expressjs.com/en/guide/behind-proxies/).
 - `TWEXTHUB_REQUIRE_HTTPS`: reject HTTP requests.
-- `TWEXTHUB_API_ROOT`: the URL prefix all routes are served under (default is `/v1`).
+- `TWEXTHUB_API_ROOT`: the URL prefix all routes are served under (default is the `defaults.apiRoot` in `product.yml`, currently `/v2`).
 
 ## ℹ️ The Build Sandbox
 

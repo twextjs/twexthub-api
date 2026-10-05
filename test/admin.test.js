@@ -2,13 +2,14 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import {
-  boot,
-  resetDb,
-  bearer,
-  uniqNs,
   acceptTerms,
-  signupAndAccept,
+  apiPath,
+  bearer,
+  boot,
   publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
 } from './helpers.mjs';
 
 let app;
@@ -25,7 +26,7 @@ test('admin can update terms and privacy; version bumps', async () => {
   const admin = await signupAndAccept(app, uniqNs());
 
   const terms = await request(app)
-    .patch('/v1/admin/terms')
+    .patch(apiPath('/admin/terms'))
     .set(bearer(admin.token))
     .send({ body: 'New terms v2.' })
     .expect(200);
@@ -35,13 +36,13 @@ test('admin can update terms and privacy; version bumps', async () => {
   await acceptTerms(app, admin.user.namespace, admin.token);
 
   const privacy = await request(app)
-    .patch('/v1/admin/privacy')
+    .patch(apiPath('/admin/privacy'))
     .set(bearer(admin.token))
     .send({ body: 'New privacy v2.' })
     .expect(200);
   assert.equal(privacy.body.version, 2);
 
-  const pub = await request(app).get('/v1/terms').expect(200);
+  const pub = await request(app).get(apiPath('/terms')).expect(200);
   assert.equal(pub.body.version, 2);
 });
 
@@ -51,7 +52,7 @@ test('bumping terms forces re-acceptance for other users', async () => {
   const ns = owner.namespace;
 
   await request(app)
-    .patch('/v1/admin/terms')
+    .patch(apiPath('/admin/terms'))
     .set(bearer(admin.token))
     .send({ body: 'Terms v2.' })
     .expect(200);
@@ -69,6 +70,9 @@ test('non-admin cannot update legal documents', async () => {
   const _admin = await signupAndAccept(app, uniqNs());
   const { token } = await signupAndAccept(app, uniqNs());
 
-  const r = await request(app).patch('/v1/admin/terms').set(bearer(token)).send({ body: 'Nope.' });
+  const r = await request(app)
+    .patch(apiPath('/admin/terms'))
+    .set(bearer(token))
+    .send({ body: 'Nope.' });
   assert.equal(r.status, 403);
 });

@@ -8,7 +8,7 @@ import { normalizeApiRoot } from './util.js';
 // same way downloadUrl is, for the same reason: the web client is usually served
 // from a different origin than the API, often behind a path the instance cannot
 // see, so a relative path here is resolved against the web origin and points at
-// nothing. A hardcoded "/v1" would also break a deployment that mounts the API
+// nothing. A hardcoded root would also break a deployment that mounts the API
 // elsewhere.
 // The published URL carries the digest so that the URL names the exact bytes.
 // Without it the path is the same before and after a re-upload, which makes a

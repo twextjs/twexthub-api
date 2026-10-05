@@ -21,6 +21,7 @@ import {
   isValidExtensionId,
   isValidNamespace,
   maxVersionBySemver,
+  normalizeApiRoot,
   normalizeSemver,
 } from '../util.js';
 import { extensionDetailFromRow, sourceUrl, versionToObject } from '../serialize.js';
@@ -65,6 +66,11 @@ import { decodeCursor, offsetPage, parseLimit } from '../pagination.js';
 
 export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
+  const root = normalizeApiRoot(config.apiRoot);
+  // normalizeApiRoot strips the surrounding slashes, so the prefix is rebuilt
+  // here: a Location header needs exactly one leading slash or the client
+  // resolves it against the wrong origin.
+  const mount = (path) => `${root ? `/${root}` : ''}${path}`;
   const webhooks = makeWebhooks({ sql });
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
@@ -149,7 +155,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const query = req.originalUrl.includes('?')
       ? `?${req.originalUrl.slice(req.originalUrl.indexOf('?') + 1)}`
       : '';
-    res.redirect(301, `/v1/@${moved.namespace}/${moved.id}${suffix}${query}`);
+    res.redirect(301, mount(`/@${moved.namespace}/${moved.id}${suffix}${query}`));
     return true;
   }
 

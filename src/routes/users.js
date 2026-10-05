@@ -17,6 +17,10 @@ import { makeProfileImageRouter } from './profile-images.js';
 import { audit } from '../audit.js';
 
 export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
+  const root = normalizeApiRoot(config.apiRoot);
+  // normalizeApiRoot strips the surrounding slashes, so the prefix is rebuilt
+  // here: every path handed back to a client needs exactly one leading slash.
+  const mount = (path) => `${root ? `/${root}` : ''}${path}`;
   const router = Router();
 
   // An account's own settings are a grantable capability, so a token can hold
@@ -79,9 +83,8 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       throw error;
     }
 
-    const root = normalizeApiRoot(config.apiRoot);
     res
-      .location(`${root ? `/${root}` : ''}/users/${user.namespace}`)
+      .location(mount(`/users/${user.namespace}`))
       .status(201)
       .json({
         user: userToObject(user, config),
@@ -233,7 +236,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
       if (!wellFormed || String(termsAcceptedVersion) !== String(currentTermsVersion)) {
         errors.push({
           field: 'termsAcceptedVersion',
-          message: `Must be the current terms version ${currentTermsVersion}. Read GET /v1/terms to see it.`,
+          message: `Must be the current terms version ${currentTermsVersion}. Read GET ${mount('/terms')} to see it.`,
         });
       }
     }

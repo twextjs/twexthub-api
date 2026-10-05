@@ -10,7 +10,7 @@ import {
   editableSettings,
   EDITABLE_SETTINGS,
 } from '../src/server-config.js';
-import { boot, bearer, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
+import { apiPath, bearer, boot, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
 
 let app;
 let sql;
@@ -358,27 +358,30 @@ describe('editable settings', () => {
 
 describe('GET /admin/config', () => {
   test('refuses an unauthenticated caller', async () => {
-    await request(app).get('/v1/admin/config').expect(401);
+    await request(app).get(apiPath('/admin/config')).expect(401);
   });
 
   test('refuses an account that is not an admin', async () => {
     const account = await ordinary();
-    await request(app).get('/v1/admin/config').set(bearer(account.token)).expect(403);
+    await request(app).get(apiPath('/admin/config')).set(bearer(account.token)).expect(403);
   });
 
   test('refuses an automation token', async () => {
     const account = await admin();
     const res = await request(app)
-      .post('/v1/tokens')
+      .post(apiPath('/tokens'))
       .set(bearer(account.token))
       .send({ name: 'ci', scopes: ['publish'] })
       .expect(201);
-    await request(app).get('/v1/admin/config').set(bearer(res.body.token)).expect(403);
+    await request(app).get(apiPath('/admin/config')).set(bearer(res.body.token)).expect(403);
   });
 
   test('reports the settings and whether the file can hold a change', async () => {
     const account = await admin();
-    const res = await request(app).get('/v1/admin/config').set(bearer(account.token)).expect(200);
+    const res = await request(app)
+      .get(apiPath('/admin/config'))
+      .set(bearer(account.token))
+      .expect(200);
     assert.equal(typeof res.body.editable, 'boolean');
     assert.equal(res.body.configPath, configFile);
     assert.ok(Array.isArray(res.body.settings));
@@ -393,7 +396,7 @@ describe('PUT /admin/config', () => {
   test('refuses an account that is not an admin', async () => {
     const account = await ordinary();
     await request(app)
-      .put('/v1/admin/config')
+      .put(apiPath('/admin/config'))
       .set(bearer(account.token))
       .send({ settings: { 'pagination.maxLimit': 60 } })
       .expect(403);
@@ -402,7 +405,7 @@ describe('PUT /admin/config', () => {
   test('writes the setting to the file and reports the change', async () => {
     const account = await admin();
     const res = await request(app)
-      .put('/v1/admin/config')
+      .put(apiPath('/admin/config'))
       .set(bearer(account.token))
       .send({ settings: { 'pagination.maxLimit': 60 } })
       .expect(200);
@@ -413,7 +416,7 @@ describe('PUT /admin/config', () => {
   test('refuses a setting the interface does not offer, by name', async () => {
     const account = await admin();
     const res = await request(app)
-      .put('/v1/admin/config')
+      .put(apiPath('/admin/config'))
       .set(bearer(account.token))
       .send({ settings: { 'database.url': 'postgres://elsewhere/db' } })
       .expect(422);
@@ -424,7 +427,7 @@ describe('PUT /admin/config', () => {
   test('rejects a body that is not a settings object', async () => {
     const account = await admin();
     await request(app)
-      .put('/v1/admin/config')
+      .put(apiPath('/admin/config'))
       .set(bearer(account.token))
       .send({ settings: 'pagination.maxLimit=60' })
       .expect(422);
@@ -433,7 +436,7 @@ describe('PUT /admin/config', () => {
   test('writes an audit row naming the settings that changed', async () => {
     const account = await admin();
     await request(app)
-      .put('/v1/admin/config')
+      .put(apiPath('/admin/config'))
       .set(bearer(account.token))
       .send({ settings: { 'pagination.maxLimit': 60 } })
       .expect(200);
