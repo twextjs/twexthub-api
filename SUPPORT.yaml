@@ -2,6 +2,7 @@
 
 lines:
   - version: '2.x'
-    stage: indev
-  - version: '1.x'
     stage: as
+  - version: '1.x'
+    stage: ls
+    eol: 2027-01-01
