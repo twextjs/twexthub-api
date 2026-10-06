@@ -1,5 +1,8 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/lifelinejs/lifeline/devel/schema/support.schema.json
 
 lines:
+  - version: '2.x'
+    stage: as
   - version: '1.x'
-    stage: indev
+    stage: ls
+    eol: 2027-01-01
