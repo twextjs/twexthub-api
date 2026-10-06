@@ -1,6 +1,6 @@
 {
   "name": "@twextjs/twexthub-api",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "A lightweight registry of Twext-compiled extensions (\"Twexts\") for use in TurboWarp",
   "homepage": "https://github.com/twextjs/twexthub#readme",
