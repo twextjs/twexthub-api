@@ -60,7 +60,7 @@ import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js'
 import { manifestFromProject } from '../project-manifest.js';
 import { extractTarballBuffer } from '../tarball.js';
 import { compileProject } from '../compiler.js';
-import { minifyCode } from '../minify.js';
+import { minifyCode, MINIFY_INPUT_MAX_BYTES } from '../minify.js';
 import { totalDownloads, hashDownloadAddress } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
@@ -326,20 +326,24 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           throw new HttpError(500, { detail: 'Compiler returned no compiled output.' });
         }
         const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
-        if (compiled.length > maxBlob) {
-          throw new HttpError(413, {
-            title: 'Payload Too Large',
-            detail: `Compiled output is ${compiled.length} bytes; the limit is ${maxBlob}.`,
-          });
-        }
         // A trusted account skips review, so its build is minified here; a
         // version that has to be reviewed is minified when an admin approves
-        // it. Either way the stored size and digest describe the bytes served.
-        if (owner.has_published && config.compiler?.minify !== false) {
-          const shrunk = await minifyCode(compiled, { maxBytes: maxBlob });
-          if (shrunk.ok) compiled = shrunk.code;
-        }
+        // it. The storage check below runs on the bytes that will actually be
+        // kept, so a build that minifies under the limit passes even when the
+        // raw compiler output is larger. The minifier's own input cap is
+        // separate: it only bounds the parse, not what is allowed to be stored.
+        const shrunk =
+          owner.has_published && config.compiler?.minify !== false
+            ? await minifyCode(compiled, { maxBytes: MINIFY_INPUT_MAX_BYTES })
+            : null;
+        if (shrunk?.ok) compiled = shrunk.code;
         const codeBytes = compiled.length;
+        if (codeBytes > maxBlob) {
+          throw new HttpError(413, {
+            title: 'Payload Too Large',
+            detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
+          });
+        }
         const quota =
           owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
         const charge = codeBytes + tarball.length;

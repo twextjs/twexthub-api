@@ -6,9 +6,9 @@ import { minify } from 'terser';
 // dispatches to. Function and class names are kept too, since an extension can
 // read them back. The pass is capped so a publish cannot hand the server an
 // arbitrarily large parse; callers fall back to the original bytes on failure.
-const DEFAULT_MAX_BYTES = 4 * 1024 * 1024;
+export const MINIFY_INPUT_MAX_BYTES = 4 * 1024 * 1024;
 
-export async function minifyCode(buffer, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+export async function minifyCode(buffer, { maxBytes = MINIFY_INPUT_MAX_BYTES } = {}) {
   if (buffer.length > maxBytes) {
     return {
       ok: false,
