@@ -685,7 +685,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // minified one, so sweep the old file. A sibling version sharing the
     // original bytes keeps it (see removeBlobIfUnused).
     if (shrunk && row.blob_digest) {
-      await removeBlobIfUnused(sql, config, row.blob_digest, null);
+      try {
+        await removeBlobIfUnused(sql, config, row.blob_digest, null);
+      } catch {
+        // The approval is committed. A leftover unminified blob is harmless.
+      }
     }
     void webhooks.scheduleFor(namespace, id, 'version.published', {
       version: updated.version,
