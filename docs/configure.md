@@ -56,6 +56,7 @@ compiler:
   timeoutMs: 30000
   memoryMb: 192
   addressSpaceMb: 1536
+  minify: true
 
 logging:
   requests: false
@@ -152,6 +153,7 @@ Every publish is compiled on the server, in a child process with filesystem, mem
 - `timeoutMs`: Wall-clock limit for one build; the process is killed when it passes. Defaults to `30000`. `TWEXTHUB_COMPILER_TIMEOUT_MS`.
 - `memoryMb`: V8 heap cap for the build, in megabytes. Defaults to `192`. `TWEXTHUB_COMPILER_MEMORY_MB`.
 - `addressSpaceMb`: Address-space limit (`ulimit -v`) for the build, in megabytes. Defaults to `1536`. `TWEXTHUB_COMPILER_ADDRESS_SPACE_MB`.
+- `minify`: Minify compiled extension output with Terser before it is served. A pending version is minified when it is approved; a trusted account's version is minified at publish. The stored digest, size, and integrity hash describe the minified bytes. Defaults to `true`. `TWEXTHUB_COMPILER_MINIFY`.
 
 ## 🌍 CORS and Logging
 

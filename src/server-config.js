@@ -115,6 +115,13 @@ export const EDITABLE_SETTINGS = [
     label: 'Compiler address space (MB)',
   },
   {
+    key: 'compiler.minify',
+    type: 'boolean',
+    restartRequired: false,
+    label: 'Minify compiled extensions',
+    help: 'Applies to versions approved or published after the change.',
+  },
+  {
     key: 'logging.requests',
     type: 'boolean',
     restartRequired: true,
