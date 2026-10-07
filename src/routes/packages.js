@@ -54,11 +54,13 @@ import {
   sha256Hex,
   sha512Base64,
   storeBlob,
+  storeBlobBuffer,
 } from '../blobs.js';
 import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js';
 import { manifestFromProject } from '../project-manifest.js';
 import { extractTarballBuffer } from '../tarball.js';
 import { compileProject } from '../compiler.js';
+import { minifyCode } from '../minify.js';
 import { totalDownloads, hashDownloadAddress } from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
@@ -323,14 +325,21 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         if (!(compiled instanceof Buffer)) {
           throw new HttpError(500, { detail: 'Compiler returned no compiled output.' });
         }
-        const codeBytes = compiled.length;
         const maxBlob = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
-        if (codeBytes > maxBlob) {
+        if (compiled.length > maxBlob) {
           throw new HttpError(413, {
             title: 'Payload Too Large',
-            detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
+            detail: `Compiled output is ${compiled.length} bytes; the limit is ${maxBlob}.`,
           });
         }
+        // A trusted account skips review, so its build is minified here; a
+        // version that has to be reviewed is minified when an admin approves
+        // it. Either way the stored size and digest describe the bytes served.
+        if (owner.has_published && config.compiler?.minify !== false) {
+          const shrunk = await minifyCode(compiled, { maxBytes: maxBlob });
+          if (shrunk.ok) compiled = shrunk.code;
+        }
+        const codeBytes = compiled.length;
         const quota =
           owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
         const charge = codeBytes + tarball.length;
@@ -534,6 +543,28 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.json(versionToObject(updated, config));
   }
 
+  // A version awaiting approval is stored as the compiler produced it, so a
+  // reviewer can read the exact bytes that would be served. Approval is when
+  // they become public; minifying now means the digest and integrity hash the
+  // API reports describe the minified output. A failed pass is not fatal — the
+  // original bytes are still a valid build.
+  async function minifyPendingBlob(row) {
+    if (config.compiler?.minify === false) return null;
+    const abs = row.blob_digest
+      ? blobPathFor(config.dataDir, row.blob_digest)
+      : path.join(config.dataDir, row.blob_path);
+    let original;
+    try {
+      original = await readFile(abs);
+    } catch {
+      return null;
+    }
+    const maxBytes = config.limits?.maxBlobBytes ?? 2 * 1024 * 1024;
+    const shrunk = await minifyCode(original, { maxBytes });
+    if (!shrunk.ok || !shrunk.changed) return null;
+    return { code: shrunk.code };
+  }
+
   // A review is a moderation decision, so it needs the admin role on the
   // account and the `admin` scope on the credential. An automation token held by
   // an admin can review once it is granted that scope; a non-admin cannot get
@@ -592,12 +623,34 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       return res.json(versionToObject(updated, config));
     }
 
+    // Minify before the transaction so the CPU-bound pass does not hold the row
+    // lock. The output is content-addressed, so a concurrent approval that loses
+    // the status race writes the same bytes and is harmless.
+    const shrunk = await minifyPendingBlob(row);
+
     const updated = await sql.begin(async (tx) => {
-      const rows = await tx`
-        UPDATE versions SET status = 'published', published_at = now()
-        WHERE id = ${row.id} AND status = 'pending'
-        RETURNING *
-      `;
+      let stored = null;
+      if (shrunk) {
+        // GC holds the exclusive lock; the promotion shares it until the new
+        // digest commits, so a sweep cannot unlink the bytes being promoted.
+        await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+        stored = await storeBlobBuffer(config.dataDir, shrunk.code);
+      }
+      const rows = stored
+        ? await tx`
+            UPDATE versions
+            SET status = 'published', published_at = now(),
+                blob_path = ${path.join('blobs', stored.digest.slice(0, 2), stored.digest.slice(2))},
+                blob_digest = ${stored.digest}, blob_size = ${stored.size},
+                blob_sha512 = ${stored.sha512}
+            WHERE id = ${row.id} AND status = 'pending'
+            RETURNING *
+          `
+        : await tx`
+            UPDATE versions SET status = 'published', published_at = now()
+            WHERE id = ${row.id} AND status = 'pending'
+            RETURNING *
+          `;
       if (rows[0]) {
         // The gate that decides whether a version needs review reads
         // has_published from the namespace account (finalStatus, and the boot
@@ -605,6 +658,15 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         // than the namespace, so the flag has to be set by namespace here or a
         // co-owner's first approval would leave the namespace in review forever.
         await tx`UPDATE users SET has_published = true WHERE namespace = ${row.namespace}`;
+        // The publish charged the unminified build; a smaller approved blob
+        // hands the difference back to the account's quota.
+        if (stored && Number(row.blob_size) > stored.size) {
+          const refund = Number(row.blob_size) - stored.size;
+          await tx`
+            UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${refund}, 0)
+            WHERE namespace = ${row.namespace}
+          `;
+        }
         await notifyUser(
           tx,
           row.owner_id,
@@ -618,6 +680,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     });
     if (!updated) {
       throw conflict('That version is no longer pending review.');
+    }
+    // The unminified digest is no longer referenced once this row points at the
+    // minified one, so sweep the old file. A sibling version sharing the
+    // original bytes keeps it (see removeBlobIfUnused).
+    if (shrunk && row.blob_digest) {
+      await removeBlobIfUnused(sql, config, row.blob_digest, null);
     }
     void webhooks.scheduleFor(namespace, id, 'version.published', {
       version: updated.version,

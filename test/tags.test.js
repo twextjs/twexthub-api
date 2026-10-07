@@ -28,7 +28,10 @@ async function makeOwnerWithVersions() {
   const outsiderNs = uniqNs();
   const outside = await signupAndAccept(app, outsiderNs);
   async function publish(version) {
-    await publishProject(app, ownerNs, 'hello', ob.token, { version, code: `// v${version}` });
+    await publishProject(app, ownerNs, 'hello', ob.token, {
+      version,
+      code: `return "v${version}";`,
+    });
   }
   await publish('1.0.0');
   await request(app)
