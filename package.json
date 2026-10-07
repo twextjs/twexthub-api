@@ -32,7 +32,7 @@
     "check": "npm run lint && npm run format:check && npm test"
   },
   "dependencies": {
-    "@twextjs/twext": "^1.0.0",
+    "@twextjs/twext": "^2.0.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.7.0",
     "postgres": "^3.4.7",
