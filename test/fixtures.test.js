@@ -17,6 +17,7 @@ import {
   uniqNs,
 } from './helpers.mjs';
 import { compileProject } from '../src/compiler.js';
+import { minifyCode } from '../src/minify.js';
 
 const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'test-fixtures');
 
@@ -104,15 +105,18 @@ test('fixture greeter round-trips byte-for-byte', async () => {
 
   await approveFixture(admin.token, ns, id, version);
 
-  // The server's sandbox build must reproduce the committed artifact exactly.
+  // The server's sandbox build must reproduce the committed artifact exactly,
+  // then approval minifies what clients actually download.
   const dl = await request(app)
     .get(apiPath(`/@${ns}/${id}/versions/${version}/download`))
     .expect(200);
   assert.match(dl.headers['content-type'], /javascript/);
+  const minified = await minifyCode(compiled);
+  assert.equal(minified.ok, true, minified.error ?? 'minify');
   assert.deepEqual(
     Buffer.from(dl.text, 'utf8'),
-    compiled,
-    'downloaded bytes must match the compiled fixture exactly',
+    minified.code,
+    'downloaded bytes must match the minified compiled fixture exactly',
   );
 
   const detail = await request(app)
@@ -145,7 +149,9 @@ test('fixture hello auto-publishes after first approval; source changes are hono
   const firstDownload = await request(app)
     .get(apiPath(`/@${ns}/${id}/versions/${version}/download`))
     .expect(200);
-  assert.deepEqual(Buffer.from(firstDownload.text, 'utf8'), original);
+  const firstMin = await minifyCode(original);
+  assert.equal(firstMin.ok, true, firstMin.error ?? 'minify');
+  assert.deepEqual(Buffer.from(firstDownload.text, 'utf8'), firstMin.code);
 
   // Mutate the greeting in source, publish again: the server compiles the new
   // source and the second build reflects the change.
@@ -169,7 +175,9 @@ test('fixture hello auto-publishes after first approval; source changes are hono
   const dl = await request(app)
     .get(apiPath(`/@${ns}/${id}/versions/0.2.0/download`))
     .expect(200);
-  assert.deepEqual(Buffer.from(dl.text, 'utf8'), replaced);
+  const replacedMin = await minifyCode(replaced);
+  assert.equal(replacedMin.ok, true, replacedMin.error ?? 'minify');
+  assert.deepEqual(Buffer.from(dl.text, 'utf8'), replacedMin.code);
 });
 
 async function publishFixture(ns, id, token, fixtureDir, sourceFiles, version = '0.1.0') {

@@ -21,7 +21,7 @@ after(async () => {
 });
 
 function publish(ns, token, version) {
-  return publishProject(app, ns, 'hello', token, { version, code: `// v${version}` });
+  return publishProject(app, ns, 'hello', token, { version, code: `return "v${version}";` });
 }
 
 function approve(adminToken, ns, version) {

@@ -1,6 +1,6 @@
 {
   "name": "@twextjs/twexthub-api",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "private": true,
   "description": "A lightweight registry of Twext-compiled extensions (\"Twexts\") for use in TurboWarp",
   "homepage": "https://github.com/twextjs/twexthub#readme",
@@ -32,22 +32,23 @@
     "check": "npm run lint && npm run format:check && npm test"
   },
   "dependencies": {
-    "@twextjs/twext": "^1.0.0",
+    "@twextjs/twext": "^2.0.0",
     "express": "^5.1.0",
     "express-rate-limit": "^8.7.0",
     "postgres": "^3.4.7",
     "semver": "^7.7.2",
     "sharp": "^0.35.5",
     "tar": "^7.5.22",
+    "terser": "^5.51.2",
     "yaml": "^2.8.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",
     "@lifelinejs/lifeline": "^0.1.0",
     "doctoc": "^2.5.0",
-    "eslint": "^10.11.0",
+    "eslint": "^10.12.0",
     "globals": "^17.13.0",
     "prettier": "^3.9.9",
-    "supertest": "^7.3.0"
+    "supertest": "^7.3.1"
   }
 }
