@@ -34,7 +34,7 @@
   "dependencies": {
     "@twextjs/twext": "^2.0.0",
     "express": "^5.1.0",
-    "express-rate-limit": "^8.7.0",
+    "express-rate-limit": "^8.7.1",
     "postgres": "^3.4.7",
     "semver": "^7.7.2",
     "sharp": "^0.35.5",
