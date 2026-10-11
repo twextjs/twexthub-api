@@ -1518,6 +1518,11 @@ paths:
         SemVer first, so the first entry is the one a range resolution
         returns. Yanked versions are excluded, and a range that matches
         nothing is an empty list rather than a `404`.
+
+        An owner or an admin may instead name a `status` to read the
+        versions in that state -- most often `pending` for the build awaiting
+        review, or `rejected` for one that was turned down, whose
+        `rejectionReason` then rides along on the version.
       parameters:
         - name: range
           in: query
@@ -1526,6 +1531,14 @@ paths:
             A SemVer range such as `^1.2` or `>=2.0.0 <3`. Omit it for every
             version. A prerelease satisfies a range only when the range names
             one or is `*`.
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [staging, pending, published, rejected, yanked, deprecated]
+          description: >
+            Return only versions in this state. Owner or admin only, because
+            the states outside the default pair are unpublished.
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Dir'
         - $ref: '#/components/parameters/Limit'
@@ -1542,6 +1555,8 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/VersionInfo' }
                   _links: { $ref: '#/components/schemas/PageLinks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
     post:
@@ -2871,6 +2886,9 @@ components:
         deprecation:
           type: ['string', 'null']
           description: Deprecation message; present only while status is `deprecated`.
+        rejectionReason:
+          type: ['string', 'null']
+          description: Why a reviewer turned the version down; present only while status is `rejected`.
         dist:
           type: object
           description: Absent while pending or rejected.

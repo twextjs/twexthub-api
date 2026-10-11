@@ -14,7 +14,7 @@ import {
   requireAuth,
   requireScope,
 } from '../auth.js';
-import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
+import { conflict, forbidden, HttpError, fieldErrors, notFound, unauthorized } from '../errors.js';
 import {
   buildSearchText,
   compareSemver,
@@ -66,6 +66,18 @@ import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit, auditSoon } from '../audit.js';
 import { decodeCursor, offsetPage, parseLimit } from '../pagination.js';
 
+// Every state a version row can hold (the CHECK in 0001_init.sql plus 0007's
+// deprecated). A stranger only ever reads the public pair; the rest are what
+// the list endpoint's status filter opens to the address's owners and admins.
+const VERSION_STATUSES = new Set([
+  'staging',
+  'pending',
+  'published',
+  'rejected',
+  'yanked',
+  'deprecated',
+]);
+
 export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   const router = Router();
   const root = normalizeApiRoot(config.apiRoot);
@@ -87,6 +99,20 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   // owner list of -- makes a co-owner of somebody else's extension.
   async function isExtensionOwner(user, namespace, id) {
     if (user.role === 'admin') return true;
+    if (user.namespace === namespace) return true;
+    if (await isExtensionOwnerRow(sql, user, namespace, id)) return true;
+    return isOrganizationOwner(sql, user, namespace);
+  }
+
+  // Reading an unpublished version is the same authority the single-version
+  // endpoint asks for before it hands back a pending or rejected build: the
+  // owner half is every holder of the address, and the admin half is the role
+  // plus the `admin` scope, because a role on its own is not permission to
+  // walk the moderation queue.
+  async function maySeeUnpublished(req, namespace, id) {
+    if (isAdmin(req.auth)) return true;
+    const user = req.auth?.user;
+    if (!user) return false;
     if (user.namespace === namespace) return true;
     if (await isExtensionOwnerRow(sql, user, namespace, id)) return true;
     return isOrganizationOwner(sql, user, namespace);
@@ -168,9 +194,22 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, '/versions')) return;
-    const { range } = req.query;
+    const { range, status } = req.query;
     if (range !== undefined && (typeof range !== 'string' || !semver.validRange(range.trim()))) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
+    }
+    // The pair a stranger sees. Naming any other status is how an owner or an
+    // admin reads their own moderation state -- most often the build that is
+    // still waiting on review -- so it takes the same authority the
+    // single-version endpoint asks for to hand back an unpublished row.
+    if (status !== undefined) {
+      if (typeof status !== 'string' || !VERSION_STATUSES.has(status)) {
+        throw fieldErrors([{ field: 'status', message: 'Must be a valid version status.' }]);
+      }
+      if (!req.auth) throw unauthorized();
+      if (!(await maySeeUnpublished(req, namespace, id))) {
+        throw forbidden('Only an owner or an admin can filter by status.');
+      }
     }
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { o: 'int' });
@@ -180,10 +219,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // `dir` on the request is meaningless here and ignored.
     const offset = cursor ? cursor.o - 1 : 0;
 
+    const visibility =
+      status === undefined ? sql`status IN ('published', 'deprecated')` : sql`status = ${status}`;
     const rows = await sql`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
-        AND status IN ('published', 'deprecated')
+        AND ${visibility}
     `;
     const matches = rows
       .map((row) => ({ row, coerced: semver.valid(row.version) }))

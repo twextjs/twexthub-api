@@ -159,6 +159,9 @@ export function versionToObject(row, config) {
   if (row.status === 'deprecated') {
     out.deprecation = row.deprecation_message ?? null;
   }
+  if (row.status === 'rejected') {
+    out.rejectionReason = row.rejection_reason ?? null;
+  }
   if (row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated') {
     const dist = {
       downloadUrl: downloadUrl(config, row.namespace, row.extension_id, row.version),
