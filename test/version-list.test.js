@@ -275,6 +275,67 @@ test('an admin can filter any extension by status', async () => {
   );
 });
 
+for (const ownership of ['co-owner', 'organization co-owner', 'organization owner']) {
+  test(`${ownership} can follow unpublished version self links`, async () => {
+    const admin = await signupAndAccept(app, uniqNs());
+    const owner = await signupAndAccept(app, uniqNs());
+    const delegate = await signupAndAccept(app, uniqNs());
+    const outsider = await signupAndAccept(app, uniqNs());
+    let ns = owner.user.namespace;
+    let grant = delegate.user;
+    if (ownership !== 'co-owner') {
+      const org = await request(app)
+        .post(apiPath('/orgs'))
+        .set(bearer(delegate.token))
+        .send({ namespace: uniqNs(), displayName: 'Delegated owners' })
+        .expect(201);
+      grant = org.body;
+      if (ownership === 'organization owner') ns = org.body.namespace;
+    }
+    await publishProject(
+      app,
+      ns,
+      'ranger',
+      ownership === 'organization owner' ? delegate.token : owner.token,
+    );
+    if (ownership === 'organization owner') {
+      // Exercise namespace authority without an extension ownership row.
+      await sql`DELETE FROM extension_owners WHERE namespace = ${ns} AND extension_id = 'ranger'`;
+    } else {
+      await sql`
+        INSERT INTO extension_owners (owner_id, namespace, extension_id)
+        SELECT id, ${ns}, 'ranger' FROM users WHERE namespace = ${grant.namespace}
+      `;
+    }
+
+    for (const status of ['pending', 'rejected']) {
+      if (status === 'rejected') {
+        await request(app)
+          .patch(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+          .set(bearer(admin.token))
+          .send({ status, reason: 'Needs changes.' })
+          .expect(200);
+      }
+      const list = await request(app)
+        .get(apiPath(`/@${ns}/ranger/versions`))
+        .query({ status })
+        .set(bearer(delegate.token))
+        .expect(200);
+      assert.equal(list.body.data.length, 1);
+      const self = list.body.data[0]._links.self;
+      for (const token of [delegate.token, admin.token]) {
+        const one = await request(app).get(self).set(bearer(token)).expect(200);
+        assert.deepEqual(one.body, list.body.data[0]);
+      }
+      if (ns === owner.user.namespace) {
+        await request(app).get(self).set(bearer(owner.token)).expect(200);
+      }
+      await request(app).get(self).expect(404);
+      await request(app).get(self).set(bearer(outsider.token)).expect(404);
+    }
+  });
+}
+
 test('the status filter is owner-and-admin only, and rejects an unknown status', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const other = await signupAndAccept(app, uniqNs());
@@ -316,6 +377,10 @@ test('a status filter needs the admin scope, not just the role', async () => {
     .query({ status: 'pending' })
     .set(bearer(unscoped.body.token))
     .expect(403);
+  await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+    .set(bearer(unscoped.body.token))
+    .expect(404);
 
   const scoped = await request(app)
     .post(apiPath('/tokens'))
@@ -331,4 +396,5 @@ test('a status filter needs the admin scope, not just the role', async () => {
     r.body.data.map((v) => v.version),
     ['1.0.0'],
   );
+  await request(app).get(r.body.data[0]._links.self).set(bearer(scoped.body.token)).expect(200);
 });
