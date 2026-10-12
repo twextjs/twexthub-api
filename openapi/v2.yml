@@ -499,6 +499,80 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /users/{namespace}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: List an account's webhooks
+      operationId: listAccountWebhooks
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. Secrets are never returned here; they
+        are returned once, by the create call.
+      responses:
+        '200':
+          description: The namespace-wide webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Webhook' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create an account webhook
+      operationId: createAccountWebhook
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. A webhook on an account watches every
+        extension in its namespace instead of one `id`, so a publish, yank,
+        deprecation, rejection or owner change under `@{namespace}` reaches it
+        without registering anything per extension. The per-extension webhooks
+        at `/@{namespace}/{id}/webhooks` are a separate collection and are
+        unaffected; the two do not see each other. A namespace that belongs to
+        an organization is a `403`; manage its webhooks at
+        `/orgs/{namespace}/webhooks`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookInput' }
+      responses:
+        '201':
+          description: Created, with the signing secret returned once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /users/{namespace}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - name: webhookId
+        in: path
+        required: true
+        schema: { type: integer }
+    delete:
+      summary: Delete an account webhook
+      operationId: deleteAccountWebhook
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. An id belonging to a per-extension
+        webhook is a `404` here, since the two collections do not overlap.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   /users/{namespace}/avatar:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
@@ -3020,7 +3094,8 @@ components:
             extension.transfer.withdraw, extension.transfer,
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,
-            organization.webhook.create, organization.webhook.delete
+            organization.webhook.create, organization.webhook.delete,
+            account.webhook.create, account.webhook.delete
         target:
           type: object
           properties:

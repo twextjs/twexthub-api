@@ -6,6 +6,7 @@ import request from 'supertest';
 import {
   FIXTURE_PASSWORD,
   apiPath,
+  approveVersion,
   bearer,
   boot,
   publishProject,
@@ -284,4 +285,178 @@ test('an unreviewed version needs the admin scope, not just the role', async () 
     .get(apiPath(`/@${user.namespace}/hello/versions/1.0.0`))
     .set(bearer(scoped.body.token))
     .expect(200);
+});
+
+// Account-level webhooks: the namespace-wide collection an organization gets
+// at /orgs/:ns/webhooks, keyed on a personal namespace, so one URL hears every
+// extension an author publishes instead of a hook per extension id.
+// The sandbox resolver cannot invent a host, and a hook URL is resolved and
+// checked before it is stored, so a created hook has to name a real one.
+const PUBLIC_URL = 'https://example.com/twext-hook';
+
+test('an account hook hears every extension under the namespace', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  const ns = user.namespace;
+
+  const created = await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+  assert.ok(created.body.secret, 'the secret is returned once, at creation');
+  assert.equal(created.body.extension_id, null, 'the hook names no single extension');
+
+  const list = await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .expect(200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].secret, undefined, 'listing never returns the secret');
+  assert.equal(list.body.data[0].url, PUBLIC_URL);
+
+  // The first version in a namespace is held for review and the next one is
+  // published on arrival, so this walks both paths: approval is what fires the
+  // event for the first, the publish itself fires it for the second.
+  for (const id of ['one', 'two']) {
+    const published = await publishProject(app, ns, id, token);
+    if (published.body.status === 'pending') {
+      await approveVersion(app, admin.token, ns, id, published.body.version);
+    }
+  }
+  // Scheduling is fire-and-forget, so give it the tick it takes to insert.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const deliveries = await sql`
+    SELECT d.event, d.payload
+    FROM webhook_deliveries d
+    JOIN webhooks w ON w.id = d.webhook_id
+    WHERE w.namespace = ${ns} AND w.extension_id IS NULL
+    ORDER BY d.id
+  `;
+  assert.deepEqual(deliveries.map((row) => row.payload.id).sort(), ['one', 'two']);
+  for (const row of deliveries) {
+    assert.equal(row.event, 'version.published');
+    assert.equal(row.payload.namespace, ns);
+    assert.match(row.payload.message, new RegExp(`^@${ns}/`));
+  }
+});
+
+test('a hook on one extension is not the account hook', async () => {
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  const ns = user.namespace;
+  const created = await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+  const accountHookId = created.body.id;
+
+  // The per-extension collection is a different scope, so the namespace-wide
+  // hook must not turn up in it...
+  const perExtension = await request(app)
+    .get(apiPath(`/@${ns}/one/webhooks`))
+    .set(bearer(token))
+    .expect(200);
+  assert.deepEqual(perExtension.body.data, []);
+
+  // ...and deleting the id from either collection is refused when it belongs
+  // to the other one.
+  await request(app)
+    .delete(apiPath(`/@${ns}/one/webhooks/${accountHookId}`))
+    .set(bearer(token))
+    .expect(404);
+
+  await request(app)
+    .delete(apiPath(`/users/${ns}/webhooks/${accountHookId}`))
+    .set(bearer(token))
+    .expect(204);
+  await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .expect(200)
+    .expect((r) => assert.deepEqual(r.body.data, []));
+});
+
+test('only the account or an admin manages the hooks', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  const ns = user.namespace;
+  const outsider = await signupAndAccept(app, uniqNs());
+
+  // A stranger is refused on every verb.
+  await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(outsider.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(403);
+  await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(outsider.token))
+    .expect(403);
+
+  // Acting on another account is an administrative act: the admin role is not
+  // enough without the `admin` scope on the credential, just as on the rest of
+  // the account routes. A `manage:account`-only token still serves its own.
+  const roleOnly = await request(app)
+    .post(apiPath('/tokens'))
+    .set(bearer(admin.token))
+    .send({ name: 'role-only', scopes: ['manage:account'] })
+    .expect(201);
+  await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(roleOnly.body.token))
+    .expect(403);
+
+  const selfOnly = await request(app)
+    .post(apiPath('/tokens'))
+    .set(bearer(token))
+    .send({ name: 'self-only', scopes: ['manage:account'] })
+    .expect(201);
+  await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(selfOnly.body.token))
+    .expect(200);
+
+  // An admin session (every scope including `admin`) can act for the account.
+  await request(app)
+    .get(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(admin.token))
+    .expect(200);
+});
+
+test('hook input is validated the same way as an extension hook', async () => {
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  const ns = user.namespace;
+
+  const badEvents = await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .send({ url: PUBLIC_URL, events: ['nope'] });
+  assert.equal(badEvents.status, 422);
+  assert.equal(badEvents.body.errors[0].field, 'events');
+
+  const badUrl = await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .send({ url: 'https://localhost:9911/hook', events: ['version.published'] });
+  assert.equal(badUrl.status, 422);
+  assert.equal(badUrl.body.errors[0].field, 'url');
+});
+
+test('an organization namespace is managed through /orgs, not /users', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const orgNs = uniqNs();
+  await request(app)
+    .post(apiPath('/orgs'))
+    .set(bearer(owner.token))
+    .send({ namespace: orgNs, displayName: 'Acme Inc' })
+    .expect(201);
+
+  const denied = await request(app)
+    .post(apiPath(`/users/${orgNs}/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] });
+  assert.equal(denied.status, 403);
+  assert.match(denied.body.detail, /\/orgs/);
 });

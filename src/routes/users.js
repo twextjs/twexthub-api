@@ -14,6 +14,7 @@ import { sessionToObject, userToObject } from '../serialize.js';
 import { notifyUser, roleChangedMessage, tokensRevokedMessage } from '../notify.js';
 import { createSession, requireObjectBody } from './shared.js';
 import { makeProfileImageRouter } from './profile-images.js';
+import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit } from '../audit.js';
 
 export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
@@ -405,6 +406,61 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
     res.status(204).end();
   });
 
+  // Account-wide webhooks: one hook that hears every version event under this
+  // account's namespace, instead of registering the same URL once per
+  // extension. The per-extension hook at /@namespace/id/webhooks is a separate
+  // collection and is unchanged. An organization is what /orgs manages, so a
+  // namespace that belongs to one is directed there rather than answered here.
+  const webhooks = makeWebhooks({ sql });
+  const accountWebhookChain = [manageAccount, termsGate];
+
+  router.get('/:namespace/webhooks', accountWebhookChain, async (req, res) => {
+    const target = await loadUserForWrite(sql, req);
+    res.json({ data: await webhooks.list(target.namespace, null) });
+  });
+
+  router.post('/:namespace/webhooks', accountWebhookChain, async (req, res) => {
+    const target = await loadUserForWrite(sql, req);
+    requireObjectBody(req);
+    let created;
+    try {
+      created = await webhooks.create(target.namespace, null, req.body);
+    } catch (error) {
+      if (error instanceof WebhookInputError) throw fieldErrors(error.fields);
+      throw error;
+    }
+    await audit(
+      sql,
+      req.auth.user,
+      'account.webhook.create',
+      { namespace: target.namespace },
+      {
+        url: created.url,
+        events: created.events,
+      },
+    );
+    res.status(201).json(created);
+  });
+
+  router.delete('/:namespace/webhooks/:webhookId', accountWebhookChain, async (req, res) => {
+    const target = await loadUserForWrite(sql, req);
+    const id = Number(req.params.webhookId);
+    if (!Number.isInteger(id)) throw notFound();
+    if (!(await webhooks.remove(target.namespace, null, id))) {
+      throw notFound('No such webhook.');
+    }
+    await audit(
+      sql,
+      req.auth.user,
+      'account.webhook.delete',
+      { namespace: target.namespace },
+      {
+        id,
+      },
+    );
+    res.status(204).end();
+  });
+
   return router;
 }
 
@@ -413,4 +469,18 @@ async function loadUserOr404(sql, namespace) {
   const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
   if (!user) throw notFound();
   return user;
+}
+
+// The account-wide write gate: the caller is the account itself, or an admin
+// acting on it. An organization namespace is a 403 that points at /orgs, where
+// its own namespace-wide webhooks live.
+async function loadUserForWrite(sql, req) {
+  const target = await loadUserOr404(sql, req.params.namespace);
+  if (target.kind === 'organization') {
+    throw forbidden(`@${target.namespace} is an organization; manage its webhooks through /orgs.`);
+  }
+  if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
+    throw forbidden('Only the account or an admin can manage its webhooks.');
+  }
+  return target;
 }
