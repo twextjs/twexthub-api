@@ -494,11 +494,14 @@ test('deleting an account removes its webhooks and their deliveries', async () =
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(201);
 
-  // The first version is held for review and the second is published on
-  // arrival, so the second publish schedules a delivery to both hooks without
-  // an admin call in between.
-  await publishProject(app, ns, 'one', token);
-  await publishProject(app, ns, 'one', token, { version: '2.0.0' });
+  // The first version in a namespace is held for review, and approving it is
+  // what fires version.published — both hooks hear the same event.
+  const published = await publishProject(app, ns, 'one', token);
+  if (published.body.status === 'pending') {
+    // This test signs up first, so the account is the admin and its own
+    // session can approve the held version.
+    await approveVersion(app, token, ns, 'one', published.body.version);
+  }
 
   // Scheduling is fire-and-forget, so poll until both hooks carry their
   // delivery rather than sleeping one fixed tick.
