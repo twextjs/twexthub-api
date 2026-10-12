@@ -26,14 +26,21 @@ import { audit } from '../audit.js';
 // Nothing here creates a session: an organization is acted for by its owners
 // with their own credentials, so there is nothing to steal and nothing to
 // revoke apart from the account.
-export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtensions }) {
+export function makeOrgsRouter({
+  sql,
+  config,
+  termsGate,
+  rateLimiter,
+  listExtensions,
+  resolveTarget,
+}) {
   const router = Router();
 
   // One scope answers every organization write below, since they all ask the
   // same question: may this credential act for an organization at all? Whether
   // it may act for *this* one is `loadOrgForWrite`'s job, and it runs after.
   const manageOrgs = requireScope('manage:orgs');
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ sql, resolveTarget });
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const orgPath = (namespace) =>
     `${apiRoot ? `/${apiRoot}` : ''}/orgs/${encodeURIComponent(namespace)}`;

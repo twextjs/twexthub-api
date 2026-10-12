@@ -61,7 +61,14 @@ export function createApp(opts = {}) {
   // unset the route reads the real mount table; a test passes its own so the
   // answer does not depend on where the checkout happens to be running.
   const storageProbe = opts.storageProbe ?? {};
-  const shared = { sql, config, rateLimiter, termsGate, storageProbe };
+  const shared = {
+    sql,
+    config,
+    rateLimiter,
+    termsGate,
+    storageProbe,
+    resolveTarget: opts.resolveTarget,
+  };
 
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const root = apiRoot ? `/${apiRoot}` : '';

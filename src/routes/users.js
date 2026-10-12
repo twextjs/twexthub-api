@@ -17,7 +17,7 @@ import { makeProfileImageRouter } from './profile-images.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
 import { audit } from '../audit.js';
 
-export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
+export function makeUsersRouter({ sql, config, termsGate, rateLimiter, resolveTarget }) {
   const root = normalizeApiRoot(config.apiRoot);
   // normalizeApiRoot strips the surrounding slashes, so the prefix is rebuilt
   // here: every path handed back to a client needs exactly one leading slash.
@@ -411,7 +411,7 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter }) {
   // extension. The per-extension hook at /@namespace/id/webhooks is a separate
   // collection and is unchanged. An organization is what /orgs manages, so a
   // namespace that belongs to one is directed there rather than answered here.
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ sql, resolveTarget });
   const accountWebhookChain = [manageAccount, termsGate];
 
   router.get('/:namespace/webhooks', accountWebhookChain, async (req, res) => {

@@ -15,14 +15,14 @@ import { makeWebhooks } from './webhooks.js';
 // themselves and drive it directly.
 export async function bootstrap(
   config = loadConfig(),
-  { backgroundJobs = true, storageProbe } = {},
+  { backgroundJobs = true, storageProbe, resolveTarget } = {},
 ) {
   ensureDataDirs(config.dataDir);
   const sql = createDb(config);
   try {
     await runMigrations(sql);
     await reconcileOnBoot(sql, config);
-    const { app, rateLimiter, telemetry } = createApp({ config, sql, storageProbe });
+    const { app, rateLimiter, telemetry } = createApp({ config, sql, storageProbe, resolveTarget });
     if (!backgroundJobs) {
       return { app, sql, config, rateLimiter, telemetry };
     }

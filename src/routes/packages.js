@@ -78,14 +78,14 @@ const VERSION_STATUSES = new Set([
   'deprecated',
 ]);
 
-export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
+export function makePackagesRouter({ sql, config, termsGate, rateLimiter, resolveTarget }) {
   const router = Router();
   const root = normalizeApiRoot(config.apiRoot);
   // normalizeApiRoot strips the surrounding slashes, so the prefix is rebuilt
   // here: a Location header needs exactly one leading slash or the client
   // resolves it against the wrong origin.
   const mount = (path) => `${root ? `/${root}` : ''}${path}`;
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ sql, resolveTarget });
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];

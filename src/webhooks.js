@@ -60,7 +60,10 @@ function isPrivateIp(ip) {
 // to. The address is what a delivery connects to: resolving the name and then
 // connecting by name would leave room for a second answer to point somewhere
 // else, so callers carry this one through instead of the name.
-export async function resolvePublicWebhookTarget(rawUrl) {
+//
+// `lookupFn` is the seam a test uses to answer every name with a fixed public
+// address, so URL validation keeps its rules without touching live DNS.
+export async function resolvePublicWebhookTarget(rawUrl, lookupFn = lookup) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -84,7 +87,7 @@ export async function resolvePublicWebhookTarget(rawUrl) {
   }
   let addresses;
   try {
-    addresses = await lookup(host, { all: true });
+    addresses = await lookupFn(host, { all: true });
   } catch {
     throw new Error('Webhook URL host could not be resolved.');
   }
@@ -150,7 +153,11 @@ export class WebhookInputError extends Error {
   }
 }
 
-export function makeWebhooks({ sql }) {
+// `resolveTarget` validates a URL the way `create` must -- throwing on anything
+// a delivery would refuse. It defaults to the real resolver, which performs live
+// DNS; a test injects a deterministic one so creation never depends on the
+// network. The delivery worker keeps its own seam on attemptDelivery.
+export function makeWebhooks({ sql, resolveTarget = assertPublicWebhookUrl }) {
   // One hook per extension, or one for a whole namespace when extensionId is
   // null. `IS NOT DISTINCT FROM` matches null to null, so the per-extension and
   // per-organization queries are the same query with a different argument
@@ -172,7 +179,7 @@ export function makeWebhooks({ sql }) {
     }
     if (errors.length > 0) throw new WebhookInputError(errors);
     try {
-      await assertPublicWebhookUrl(input.url);
+      await resolveTarget(input.url);
     } catch (error) {
       throw new WebhookInputError([{ field: 'url', message: error.message }]);
     }
