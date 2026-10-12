@@ -477,3 +477,55 @@ test('an organization namespace is managed through /orgs, not /users', async () 
   assert.equal(denied.status, 403);
   assert.match(denied.body.detail, /\/orgs/);
 });
+
+test('deleting an account removes its webhooks and their deliveries', async () => {
+  const { user, token } = await signupAndAccept(app, uniqNs());
+  const ns = user.namespace;
+
+  // One hook in each of the two collections that share the namespace.
+  await request(app)
+    .post(apiPath(`/users/${ns}/webhooks`))
+    .set(bearer(token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${ns}/one/webhooks`))
+    .set(bearer(token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+
+  // The first version is held for review and the second is published on
+  // arrival, so the second publish schedules a delivery to both hooks without
+  // an admin call in between.
+  await publishProject(app, ns, 'one', token);
+  await publishProject(app, ns, 'one', token, { version: '2.0.0' });
+
+  // Scheduling is fire-and-forget, so poll until both hooks carry their
+  // delivery rather than sleeping one fixed tick.
+  const hookState = async () => {
+    const [row] = await sql`
+      SELECT
+        (SELECT count(*)::int FROM webhooks WHERE namespace = ${ns}) AS hooks,
+        (SELECT count(*)::int FROM webhook_deliveries d
+           JOIN webhooks w ON w.id = d.webhook_id
+          WHERE w.namespace = ${ns}) AS deliveries
+    `;
+    return row;
+  };
+  const deadline = Date.now() + 2000;
+  let before;
+  while (true) {
+    before = await hookState();
+    if (before.hooks === 2 && before.deliveries === 2) break;
+    assert.ok(Date.now() < deadline, 'two hooks and their two deliveries should land first');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+
+  await request(app)
+    .delete(apiPath(`/users/${ns}`))
+    .set(bearer(token))
+    .expect(204);
+
+  const after = await hookState();
+  assert.deepEqual(after, { hooks: 0, deliveries: 0 });
+});

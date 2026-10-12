@@ -362,6 +362,10 @@ export function makeUsersRouter({ sql, config, termsGate, rateLimiter, resolveTa
         ) removed
         WHERE u.namespace = removed.namespace AND u.id <> ${target.id}
       `;
+      // A webhook is keyed on the namespace text with no user foreign key, so
+      // deleting the user row would leave its per-extension and account-wide
+      // hooks orphaned; take them, and the deliveries they cascade to, with it.
+      await tx`DELETE FROM webhooks WHERE namespace = ${target.namespace}`;
       await tx`DELETE FROM users WHERE id = ${target.id}`;
       return rows;
     });
