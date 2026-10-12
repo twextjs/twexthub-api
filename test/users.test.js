@@ -15,12 +15,21 @@ import {
   uniqNs,
 } from './helpers.mjs';
 import { blobPathFor } from '../src/blobs.js';
+import { resolvePublicWebhookTarget } from '../src/webhooks.js';
+
+// The URL check at create time resolves the host with live DNS, which a sandbox
+// cannot reach. Route the app through the resolver seam with a fixed public
+// answer instead, so a created hook never depends on the network while every
+// other rule (https only, no loopback, no private address) still runs on the
+// production resolver.
+const deterministicResolver = (rawUrl) =>
+  resolvePublicWebhookTarget(rawUrl, async () => [{ address: '93.184.216.34', family: 4 }]);
 
 let app;
 let sql;
 let config;
 before(async () => {
-  ({ app, sql, config } = await boot());
+  ({ app, sql, config } = await boot({}, { resolveTarget: deterministicResolver }));
 });
 beforeEach(resetDb);
 after(async () => {
@@ -290,8 +299,6 @@ test('an unreviewed version needs the admin scope, not just the role', async () 
 // Account-level webhooks: the namespace-wide collection an organization gets
 // at /orgs/:ns/webhooks, keyed on a personal namespace, so one URL hears every
 // extension an author publishes instead of a hook per extension id.
-// The sandbox resolver cannot invent a host, and a hook URL is resolved and
-// checked before it is stored, so a created hook has to name a real one.
 const PUBLIC_URL = 'https://example.com/twext-hook';
 
 test('an account hook hears every extension under the namespace', async () => {
@@ -324,16 +331,26 @@ test('an account hook hears every extension under the namespace', async () => {
       await approveVersion(app, admin.token, ns, id, published.body.version);
     }
   }
-  // Scheduling is fire-and-forget, so give it the tick it takes to insert.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  const deliveries = await sql`
-    SELECT d.event, d.payload
-    FROM webhook_deliveries d
-    JOIN webhooks w ON w.id = d.webhook_id
-    WHERE w.namespace = ${ns} AND w.extension_id IS NULL
-    ORDER BY d.id
-  `;
+  // Scheduling is fire-and-forget, so poll for the two rows the account hook
+  // must hear rather than sleeping one fixed tick.
+  const accountDeliveries = async () => {
+    const rows = await sql`
+      SELECT d.event, d.payload
+      FROM webhook_deliveries d
+      JOIN webhooks w ON w.id = d.webhook_id
+      WHERE w.namespace = ${ns} AND w.extension_id IS NULL
+      ORDER BY d.id
+    `;
+    return rows.length === 2 ? rows : null;
+  };
+  const deadline = Date.now() + 2000;
+  let deliveries;
+  while (true) {
+    deliveries = await accountDeliveries();
+    if (deliveries) break;
+    assert.ok(Date.now() < deadline, 'the account hook should hear both publishes');
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   assert.deepEqual(deliveries.map((row) => row.payload.id).sort(), ['one', 'two']);
   for (const row of deliveries) {
     assert.equal(row.event, 'version.published');
