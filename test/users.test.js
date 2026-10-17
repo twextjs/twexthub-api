@@ -26,14 +26,14 @@ const deterministicResolver = (rawUrl) =>
   resolvePublicWebhookTarget(rawUrl, async () => [{ address: '93.184.216.34', family: 4 }]);
 
 let app;
-let sql;
+let db;
 let config;
 before(async () => {
-  ({ app, sql, config } = await boot({}, { resolveTarget: deterministicResolver }));
+  ({ app, db, config } = await boot({}, { resolveTarget: deterministicResolver }));
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('users list is public and includes created users', async () => {
@@ -146,7 +146,7 @@ test('account deletion still removes sources when blob cleanup fails', async () 
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
   await publishProject(app, ns, 'cleanup', owner.token);
-  const [version] = await sql`
+  const [version] = await db.$queryRaw`
     SELECT blob_digest, source_path FROM versions
     WHERE namespace = ${ns} AND extension_id = 'cleanup'
   `;
@@ -334,7 +334,7 @@ test('an account hook hears every extension under the namespace', async () => {
   // Scheduling is fire-and-forget, so poll for the two rows the account hook
   // must hear rather than sleeping one fixed tick.
   const accountDeliveries = async () => {
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT d.event, d.payload
       FROM webhook_deliveries d
       JOIN webhooks w ON w.id = d.webhook_id
@@ -506,7 +506,7 @@ test('deleting an account removes its webhooks and their deliveries', async () =
   // Scheduling is fire-and-forget, so poll until both hooks carry their
   // delivery rather than sleeping one fixed tick.
   const hookState = async () => {
-    const [row] = await sql`
+    const [row] = await db.$queryRaw`
       SELECT
         (SELECT count(*)::int FROM webhooks WHERE namespace = ${ns}) AS hooks,
         (SELECT count(*)::int FROM webhook_deliveries d
@@ -542,12 +542,15 @@ test('an account hook exposes its delivery log and redelivers', async () => {
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(201);
 
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, status, attempt)
-    VALUES (${created.body.id}, 'version.published', ${sql.json({ id: 'one' })}, '{}', 'sig',
+    VALUES (${created.body.id}, 'version.published', ${{ id: 'one' }}, '{}', 'sig',
             'delivered', 1)
     RETURNING id
   `;
+  // The listing answers with string ids, so the row this is compared against
+  // carries one too.
+  delivery.id = String(delivery.id);
 
   const listed = await request(app)
     .get(apiPath(`/users/${ns}/webhooks/${created.body.id}/deliveries`))

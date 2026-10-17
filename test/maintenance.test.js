@@ -17,14 +17,14 @@ import { createDb, reconcileOnBoot } from '../src/db.js';
 import { blobPathFor, removeBlobIfUnused, sha256Hex } from '../src/blobs.js';
 
 let app;
-let sql;
+let db;
 let config;
 before(async () => {
-  ({ app, sql, config } = await boot());
+  ({ app, db, config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function publishAndApprove(adminToken, owner, id, code = `// ${id}`) {
@@ -42,7 +42,7 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   await publishAndApprove(admin.token, owner, 'keeper', '// keeper bytes');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE extension_id = 'keeper' AND blob_digest IS NOT NULL
   `;
@@ -66,7 +66,7 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   fs.mkdirSync(path.dirname(freshAbs), { recursive: true });
   fs.writeFileSync(freshAbs, 'in flight bytes');
 
-  const removed = await gcBlobs(sql, config.dataDir);
+  const removed = await gcBlobs(db, config.dataDir);
   assert.equal(removed, 1);
   assert.ok(fs.existsSync(liveAbs), 'referenced blob survives');
   assert.ok(!fs.existsSync(orphanAbs), 'stale orphan is gone');
@@ -84,14 +84,14 @@ test('gc keeps an aged blob that a profile image names', async () => {
   const abs = blobPathFor(config.dataDir, digest);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, bytes);
-  await sql`
+  await db.$executeRaw`
     UPDATE users SET avatar_blob_digest = ${digest}, avatar_content_type = 'image/png'
     WHERE namespace = ${ns}
   `;
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
   fs.utimesSync(abs, old, old);
 
-  const removed = await gcBlobs(sql, config.dataDir);
+  const removed = await gcBlobs(db, config.dataDir);
   assert.equal(removed, 0);
   assert.ok(fs.existsSync(abs), 'a profile image still names these bytes');
   // Nothing names these bytes once the next test truncates the users table, so
@@ -109,12 +109,12 @@ test('removeBlobIfUnused reports whether it freed the file', async () => {
   fs.mkdirSync(path.dirname(orphanAbs), { recursive: true });
   fs.writeFileSync(orphanAbs, 'collectable bytes');
 
-  assert.equal(await removeBlobIfUnused(sql, config, orphan, null), true);
+  assert.equal(await removeBlobIfUnused(db, config, orphan, null), true);
   assert.ok(!fs.existsSync(orphanAbs), 'an unreferenced blob is freed');
 
   // Already gone: a second sweep, or a caller that lost the race. Not an error,
   // and not a removal worth reporting.
-  assert.equal(await removeBlobIfUnused(sql, config, orphan, null), false);
+  assert.equal(await removeBlobIfUnused(db, config, orphan, null), false);
 
   // The same answer for a file an account's avatar names. The helper only ever
   // looked at versions, so this digest was free to be deleted underneath the
@@ -124,9 +124,9 @@ test('removeBlobIfUnused reports whether it freed the file', async () => {
   const heldAbs = blobPathFor(config.dataDir, held);
   fs.mkdirSync(path.dirname(heldAbs), { recursive: true });
   fs.writeFileSync(heldAbs, 'bytes an avatar still points at');
-  await sql`UPDATE users SET avatar_blob_digest = ${held} WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE users SET avatar_blob_digest = ${held} WHERE namespace = ${ns}`;
 
-  assert.equal(await removeBlobIfUnused(sql, config, held, null), false);
+  assert.equal(await removeBlobIfUnused(db, config, held, null), false);
   assert.ok(fs.existsSync(heldAbs), 'a profile image names these bytes');
   fs.rmSync(heldAbs, { force: true });
 });
@@ -142,7 +142,7 @@ test('gc keeps a referenced blob however old the file is', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   await publishAndApprove(admin.token, owner, 'aged', '// aged bytes');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE extension_id = 'aged' AND blob_digest IS NOT NULL
   `;
@@ -151,7 +151,7 @@ test('gc keeps a referenced blob however old the file is', async () => {
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
   fs.utimesSync(abs, old, old);
 
-  const removed = await gcBlobs(sql, config.dataDir);
+  const removed = await gcBlobs(db, config.dataDir);
   assert.equal(removed, 0);
   assert.ok(fs.existsSync(abs), 'a referenced blob is kept however old it is');
 });
@@ -161,26 +161,26 @@ test('scrub reports missing and corrupted blobs and updates the error gauge', as
   const owner = await signupAndAccept(app, uniqNs());
   await publishAndApprove(admin.token, owner, 'watched', '// watched bytes');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE extension_id = 'watched' AND blob_digest IS NOT NULL
   `;
   const abs = blobPathFor(config.dataDir, row.blob_digest);
 
   // Clean disk: no problems, gauge zeroed.
-  assert.deepEqual(await scrubBlobs(sql, config.dataDir), []);
+  assert.deepEqual(await scrubBlobs(db, config.dataDir), []);
   assert.equal(getIntegrityErrors(), 0);
 
   // Corrupt the stored blob in place.
   fs.writeFileSync(abs, 'totally different bytes');
-  const corrupt = await scrubBlobs(sql, config.dataDir);
+  const corrupt = await scrubBlobs(db, config.dataDir);
   assert.equal(corrupt.length, 1);
   assert.equal(corrupt[0].problem, 'mismatch');
   assert.equal(getIntegrityErrors(), 1);
 
   // Missing file reports as missing.
   fs.rmSync(abs);
-  const missing = await scrubBlobs(sql, config.dataDir);
+  const missing = await scrubBlobs(db, config.dataDir);
   assert.equal(missing.length, 1);
   assert.equal(missing[0].problem, 'missing');
   assert.equal(getIntegrityErrors(), 1);
@@ -204,7 +204,7 @@ async function insertStaging(namespace, publisherId, id, bytes, { keepBlob }) {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content);
   }
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     INSERT INTO versions
       (owner_id, namespace, extension_id, version, status, name, license,
        description, blob_path, blob_digest, blob_size, created_at)
@@ -220,14 +220,15 @@ test('boot reconciliation decides the status from the namespace account', async 
   const helper = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
   const [{ id: helperId }] =
-    await sql`SELECT id FROM users WHERE namespace = ${helper.user.namespace}`;
+    await db.$queryRaw`SELECT id FROM users WHERE namespace = ${helper.user.namespace}`;
   // The namespace account is past its first publish, so new work skips review.
-  await sql`UPDATE users SET has_published = true WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE users SET has_published = true WHERE namespace = ${ns}`;
 
   const staging = await insertStaging(ns, helperId, 'crashed', 0, { keepBlob: true });
-  await reconcileOnBoot(sql, config);
+  await reconcileOnBoot(db, config);
 
-  const [row] = await sql`SELECT status, published_at FROM versions WHERE id = ${staging.id}`;
+  const [row] =
+    await db.$queryRaw`SELECT status, published_at FROM versions WHERE id = ${staging.id}`;
   assert.equal(row.status, 'published', 'the namespace account, not the publisher, owns the gate');
   assert.ok(row.published_at, 'a promoted version gets a published_at');
 
@@ -242,15 +243,15 @@ test('boot reconciliation decides the status from the namespace account', async 
 test('boot reconciliation refunds the charge when the staging row is dropped', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
-  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
-  await sql`UPDATE users SET blob_bytes = 900 WHERE namespace = ${ns}`;
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE users SET blob_bytes = 900 WHERE namespace = ${ns}`;
 
   const staging = await insertStaging(ns, ownerId, 'lost', 900, { keepBlob: false });
-  await reconcileOnBoot(sql, config);
+  await reconcileOnBoot(db, config);
 
-  const rows = await sql`SELECT id FROM versions WHERE id = ${staging.id}`;
+  const rows = await db.$queryRaw`SELECT id FROM versions WHERE id = ${staging.id}`;
   assert.equal(rows.length, 0, 'an unrecoverable staging row is removed');
-  const [after] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [after] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
   assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
 });
 
@@ -264,8 +265,8 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
-  const [row] = await sql`
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [row] = await db.$queryRaw`
     INSERT INTO versions
       (owner_id, namespace, extension_id, version, status, name, license,
        description, blob_path, created_at, published_at)
@@ -274,24 +275,32 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
     RETURNING id
   `;
 
+  // A client that behaves normally except that its second transaction fails,
+  // so the reconcile has already copied a file into place when it rolls back.
   let transactions = 0;
-  const failingSql = (...args) => sql(...args);
-  failingSql.begin = (callback) =>
-    sql.begin(async (tx) => {
-      await callback(tx);
-      if (++transactions === 2) throw new Error('migration failed before commit');
-    });
-  await assert.rejects(reconcileOnBoot(failingSql, config), /migration failed before commit/);
+  const failingDb = new Proxy(db, {
+    get(target, prop, receiver) {
+      if (prop === '$transaction') {
+        return (callback) =>
+          db.$transaction(async (tx) => {
+            await callback(tx);
+            if (++transactions === 2) throw new Error('migration failed before commit');
+          });
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  await assert.rejects(reconcileOnBoot(failingDb, config), /migration failed before commit/);
   assert.equal(fs.readFileSync(legacyAbs, 'utf8'), content);
-  const [rolledBack] = await sql`
+  const [rolledBack] = await db.$queryRaw`
     SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}
   `;
   assert.equal(rolledBack.blob_digest, null);
   assert.equal(rolledBack.blob_path, legacyRel);
 
-  await reconcileOnBoot(sql, config);
+  await reconcileOnBoot(db, config);
 
-  const [after] = await sql`
+  const [after] = await db.$queryRaw`
     SELECT blob_digest, blob_path, blob_size FROM versions WHERE id = ${row.id}
   `;
   assert.equal(after.blob_digest, digest);
@@ -317,8 +326,8 @@ test('two instances reconciling the same legacy blob do not race each other', as
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await sql`SELECT id FROM users WHERE namespace = ${ns}`;
-  const [row] = await sql`
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [row] = await db.$queryRaw`
     INSERT INTO versions
       (owner_id, namespace, extension_id, version, status, name, license,
        description, blob_path, created_at, published_at)
@@ -331,12 +340,13 @@ test('two instances reconciling the same legacy blob do not race each other', as
   // and the data directory, which is what hosting.md allows behind a balancer.
   const peer = createDb(config);
   try {
-    await Promise.all([reconcileOnBoot(sql, config), reconcileOnBoot(peer, config)]);
+    await Promise.all([reconcileOnBoot(db, config), reconcileOnBoot(peer, config)]);
   } finally {
-    await peer.end();
+    await peer.$disconnect();
   }
 
-  const [after] = await sql`SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}`;
+  const [after] =
+    await db.$queryRaw`SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}`;
   assert.equal(after.blob_digest, digest);
   assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
   assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed exactly once');
@@ -356,7 +366,7 @@ test('the startup pass collects garbage but does not scrub', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   await publishAndApprove(admin.token, owner, 'startuppass', '// startup bytes');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE extension_id = 'startuppass' AND blob_digest IS NOT NULL
   `;
@@ -382,7 +392,7 @@ test('the startup pass collects garbage but does not scrub', async () => {
   };
 
   try {
-    const job = makeMaintenanceJob({ sql, config });
+    const job = makeMaintenanceJob({ db, config });
     job.start();
     await job.stop();
     assert.ok(!fs.existsSync(orphanAbs), 'the startup pass still collects garbage');

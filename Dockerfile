@@ -4,6 +4,11 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+# `npm ci` runs the package's `postinstall`, which is `prisma generate`. That
+# reads the schema, the migrations directory it points at, and the config that
+# supplies the datasource, so all three have to be on disk before the install.
+COPY prisma ./prisma
+COPY prisma.config.mjs ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY . .

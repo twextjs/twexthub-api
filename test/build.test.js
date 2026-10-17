@@ -17,14 +17,14 @@ import {
 import { compileProject, compilerEnv } from '../src/compiler.js';
 
 let app;
-let sql;
+let db;
 let _config;
 before(async () => {
-  ({ app, sql, config: _config } = await boot());
+  ({ app, db, config: _config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('a successful build surfaces buildLog and sourceUrl on the pending version', async () => {

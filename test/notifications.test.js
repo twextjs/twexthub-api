@@ -12,23 +12,25 @@ import {
   uniqNs,
 } from './helpers.mjs';
 
-let app, sql;
+let app, db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 async function seedNotification(namespace, kind, message, payload = {}, readAt = null) {
-  const [user] = await sql`SELECT id FROM users WHERE namespace = ${namespace}`;
-  const [row] = await sql`
+  const [user] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${namespace}`;
+  const [row] = await db.$queryRaw`
     INSERT INTO notifications (user_id, kind, message, payload, read_at)
-    VALUES (${user.id}, ${kind}, ${message}, ${sql.json(payload)}::jsonb, ${readAt})
+    VALUES (${user.id}, ${kind}, ${message}, ${payload}::jsonb, ${readAt})
     RETURNING *
   `;
-  return row;
+  // The API hands ids back as strings and these ids go into request bodies, so
+  // the row carries the same shape here.
+  return { ...row, id: String(row.id) };
 }
 
 test('notifications list requires auth', async () => {
@@ -301,7 +303,7 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
   assert.equal(r.body.data.length, 50);
   assert.ok(r.body._links.next);
 
-  const [count] = await sql`
+  const [count] = await db.$queryRaw`
     SELECT COUNT(*) AS count FROM notifications
     WHERE user_id = (SELECT id FROM users WHERE namespace = ${user.namespace})
   `;
@@ -341,7 +343,7 @@ test('one notification is patched on its own resource', async () => {
   assert.equal(after.body.unreadCount, 0);
 
   // Another account's notification is a 404, so this does not confirm it exists.
-  const [theirs] = await sql`
+  const [theirs] = await db.$queryRaw`
     SELECT id FROM notifications
     WHERE user_id = (SELECT id FROM users WHERE namespace = ${other.user.namespace})
   `;
@@ -356,7 +358,7 @@ test('one notification is patched on its own resource', async () => {
 // ---- emit points
 
 async function promoteToAdmin(namespace) {
-  await sql`UPDATE users SET role = 'admin' WHERE namespace = ${namespace}`;
+  await db.$executeRaw`UPDATE users SET role = 'admin' WHERE namespace = ${namespace}`;
 }
 
 async function publishPending(app, { token, namespace, id, version }) {
@@ -434,7 +436,7 @@ test('rejecting a pending version notifies the owner with the reason', async () 
 
 test('publishes that skip review do not notify', async () => {
   const owner = await signupAndAccept(app, uniqNs());
-  await sql`UPDATE users SET has_published = true WHERE namespace = ${owner.user.namespace}`;
+  await db.$executeRaw`UPDATE users SET has_published = true WHERE namespace = ${owner.user.namespace}`;
 
   const published = await publishPending(app, {
     token: owner.token,
@@ -483,8 +485,8 @@ test('the first terms document is not a bump', async () => {
   await promoteToAdmin(admin.user.namespace);
 
   // Roll the registry back to the pre-terms bootstrap state.
-  await sql`DELETE FROM legal_documents`;
-  await sql`UPDATE users SET terms_accepted_version = NULL`;
+  await db.$executeRaw`DELETE FROM legal_documents`;
+  await db.$executeRaw`UPDATE users SET terms_accepted_version = NULL`;
 
   const created = await request(app)
     .patch(apiPath('/admin/terms'))
@@ -508,7 +510,7 @@ test('an admin password reset notifies the target, self-service does not', async
     .send({ password: 'newpassword1' })
     .expect(200);
 
-  const rows = await sql`
+  const rows = await db.$queryRaw`
     SELECT kind, message FROM notifications
     WHERE user_id = (SELECT id FROM users WHERE namespace = ${target.user.namespace})
     ORDER BY id DESC
@@ -527,7 +529,7 @@ test('an admin password reset notifies the target, self-service does not', async
     .send({ password: 'newpassword2', currentPassword: 'newpassword1' })
     .expect(200);
 
-  const after = await sql`
+  const after = await db.$queryRaw`
     SELECT COUNT(*) AS count FROM notifications
     WHERE user_id = (SELECT id FROM users WHERE namespace = ${target.user.namespace})
   `;

@@ -12,13 +12,13 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function makeSetup() {
@@ -225,7 +225,8 @@ test("a co-owner's approval trusts the namespace, not the co-owner", async () =>
   const ns = ownerA.user.namespace;
 
   const hasPublished = async (namespace) => {
-    const [row] = await sql`SELECT has_published FROM users WHERE namespace = ${namespace}`;
+    const [row] =
+      await db.$queryRaw`SELECT has_published FROM users WHERE namespace = ${namespace}`;
     return row.has_published;
   };
 

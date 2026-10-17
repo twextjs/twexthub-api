@@ -1,7 +1,9 @@
 import { stat } from 'node:fs/promises';
 import sharp from 'sharp';
+import { Prisma } from '../prisma/generated/client/index.js';
 import { sniffImageType, supportedImageTypes } from './image-sniff.js';
 import { BLOB_GC_LOCK_KEY, blobPathFor, removeBlobIfUnused, storeBlobBuffer } from './blobs.js';
+import { withLocks } from './locks.js';
 import { payloadTooLarge, unsupportedMediaType } from './errors.js';
 
 // The body parser is built once, when the routes are wired, so it cannot read
@@ -152,27 +154,28 @@ export async function fitProfileImage(kind, buffer, contentType) {
  * order publish uses, and the shared lock keeps the collector from unlinking
  * the file between the two statements.
  */
-export async function storeProfileImage(sql, config, user, kind, buffer, declaredType) {
+export async function storeProfileImage(db, config, user, kind, buffer, declaredType) {
   const { contentType } = validateProfileImage(config, kind, buffer, declaredType);
   const columns = PROFILE_IMAGES[kind];
   const previous = user[columns.digestColumn] ?? null;
   const fitted = await fitProfileImage(kind, buffer, contentType);
   const size = fitted.buffer.length;
-  const { digest } = await sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
+  const { digest } = await withLocks(db, [{ key: BLOB_GC_LOCK_KEY, shared: true }], async (tx) => {
     const stored = await storeBlobBuffer(config.dataDir, fitted.buffer);
     // The external reference is left alone. An account can hold a URL and an
     // upload at once; the upload is what a visitor sees, and the URL is what
     // comes back if the upload is removed, so neither write has to destroy the
     // other. It is also the only copy the instance controls, and dropping it
     // because someone picked a file would silently discard it.
-    await tx`
-      UPDATE users
-      SET ${tx(columns.digestColumn)} = ${stored.digest},
-          ${tx(columns.typeColumn)} = ${fitted.contentType},
-          ${tx(columns.bytesColumn)} = ${size}
-      WHERE id = ${user.id}
-    `;
+    // The three column names are constants from PROFILE_IMAGES, never request
+    // values, so Prisma.raw is safe to splice them in.
+    await tx.$executeRaw`
+        UPDATE users
+        SET ${Prisma.raw(columns.digestColumn)} = ${stored.digest},
+            ${Prisma.raw(columns.typeColumn)} = ${fitted.contentType},
+            ${Prisma.raw(columns.bytesColumn)} = ${size}
+        WHERE id = ${user.id}
+      `;
     return stored;
   });
   return { digest, contentType: fitted.contentType, size, previous };
@@ -239,6 +242,6 @@ export function profileImagePointer(user, kind) {
  * avatar and a banner that share bytes would end up with the file unlinked under
  * the banner.
  */
-export async function removeProfileImageBlob(sql, config, digest) {
-  return removeBlobIfUnused(sql, config, digest, null);
+export async function removeProfileImageBlob(db, config, digest) {
+  return removeBlobIfUnused(db, config, digest, null);
 }

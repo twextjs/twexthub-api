@@ -14,13 +14,13 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('profile fields round-trip through PATCH and the public user', async () => {

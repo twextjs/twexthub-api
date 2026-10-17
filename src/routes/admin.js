@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Prisma } from '../../prisma/generated/client/index.js';
 import { requireAdmin } from '../auth.js';
 import { renderRegistryMetrics } from '../observability.js';
 import { fieldErrors, notFound } from '../errors.js';
@@ -18,13 +19,13 @@ import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js
 const BROADCAST_MAX_LENGTH = 280;
 import { requireObjectBody } from './shared.js';
 
-export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
+export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
   const router = Router();
 
   router.get('/admin/metrics', requireAdmin, async (req, res) => {
     res
       .type('text/plain; version=0.0.4; charset=utf-8')
-      .send(await renderRegistryMetrics(sql, req.app.locals.telemetry));
+      .send(await renderRegistryMetrics(db, req.app.locals.telemetry));
   });
 
   // The instance's own configuration, as far as an admin is allowed to change
@@ -72,7 +73,7 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
       // be rolled back, so this row is the only record that the change happened.
       // Awaiting it does not make the two atomic; it makes a failed write reach
       // the admin instead of leaving an unlogged change behind a 200.
-      await audit(sql, req.auth.user, 'config.update', {}, { changed: result.changes });
+      await audit(db, req.auth.user, 'config.update', {}, { changed: result.changes });
     }
     res.json({
       changed: result.changes,
@@ -88,23 +89,18 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
       if (typeof body !== 'string' || body.length === 0) {
         throw fieldErrors([{ field: 'body', message: bodyError }]);
       }
-      const row = await sql.begin(async (tx) => {
-        const [doc] = await tx`
-          INSERT INTO legal_documents (kind, body)
-          VALUES (${kind}, ${body})
-          ON CONFLICT (kind)
-          DO UPDATE SET
-            version = legal_documents.version + 1,
-            body = EXCLUDED.body,
-            updated_at = now()
-          RETURNING *
-        `;
+      const row = await db.$transaction(async (tx) => {
+        const doc = await tx.legal_documents.upsert({
+          where: { kind },
+          create: { kind, body },
+          update: { version: { increment: 1 }, body, updated_at: new Date() },
+        });
         // A first insert (version 1) is not a bump, and only accounts that
         // accepted a previous version are blocked by the gate afterwards.
         if (kind === 'terms' && doc.version > 1) {
           await notifyUsersMatching(
             tx,
-            tx`WHERE terms_accepted_version IS NOT NULL`,
+            Prisma.sql`WHERE terms_accepted_version IS NOT NULL`,
             'terms.bumped',
             termsBumpedMessage(doc.version),
             { version: doc.version, previousVersion: doc.version - 1 },
@@ -145,15 +141,15 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
         },
       ]);
     }
-    const created = await sql.begin((tx) =>
-      notifyUsersMatching(tx, tx``, 'broadcast', message.trim()),
+    const created = await db.$transaction((tx) =>
+      notifyUsersMatching(tx, Prisma.empty, 'broadcast', message.trim()),
     );
     res.status(201).json({ created });
   });
 
   router.patch('/admin/users/:namespace/quota', requireAdmin, termsGate, async (req, res) => {
     requireObjectBody(req);
-    const [user] = await sql`SELECT * FROM users WHERE namespace = ${req.params.namespace}`;
+    const user = await db.users.findUnique({ where: { namespace: req.params.namespace } });
     if (!user) throw notFound('No such account.');
     const { maxBlobBytes } = req.body;
     if (maxBlobBytes !== null && (!Number.isInteger(maxBlobBytes) || maxBlobBytes <= 0)) {
@@ -161,12 +157,14 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
         { field: 'maxBlobBytes', message: 'Must be a positive integer, or null for the default.' },
       ]);
     }
-    const updated = await sql.begin(async (tx) => {
-      const [row] = await tx`
-        UPDATE users SET max_blob_bytes = ${maxBlobBytes}
-        WHERE id = ${user.id}
-        RETURNING id, namespace, blob_bytes, max_blob_bytes
-      `;
+    const updated = await db.$transaction(async (tx) => {
+      const row = await tx.users.update({
+        where: { id: user.id },
+        data: { max_blob_bytes: maxBlobBytes },
+        select: { id: true, namespace: true, blob_bytes: true, max_blob_bytes: true },
+      });
+      // The audit detail is a JSON column, so the previous quota is folded to a
+      // number rather than handed over as a BigInt.
       await audit(
         tx,
         req.auth.user,
@@ -174,7 +172,7 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
         { namespace: user.namespace },
         {
           maxBlobBytes,
-          previousMaxBlobBytes: user.max_blob_bytes,
+          previousMaxBlobBytes: user.max_blob_bytes === null ? null : Number(user.max_blob_bytes),
         },
       );
       return row;
@@ -187,10 +185,10 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
   });
 
   router.get('/admin/users/:namespace/quota', requireAdmin, async (req, res) => {
-    const [user] = await sql`
-      SELECT namespace, blob_bytes, max_blob_bytes FROM users
-      WHERE namespace = ${req.params.namespace}
-    `;
+    const user = await db.users.findUnique({
+      where: { namespace: req.params.namespace },
+      select: { namespace: true, blob_bytes: true, max_blob_bytes: true },
+    });
     if (!user) throw notFound('No such account.');
     res.json({
       namespace: user.namespace,
@@ -203,12 +201,11 @@ export function makeAdminRouter({ sql, config, termsGate, storageProbe = {} }) {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
-    const rows = await sql`
-      SELECT * FROM audit_log
-      ${cursor ? (back ? sql`WHERE id > ${cursor.i}` : sql`WHERE id < ${cursor.i}`) : sql``}
-      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
-      LIMIT ${limit + 1}
-    `;
+    const rows = await db.audit_log.findMany({
+      where: cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {},
+      orderBy: { id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
     res.json(
       keysetPage(req, rows, {
         limit,

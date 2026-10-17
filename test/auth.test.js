@@ -19,7 +19,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('signing in creates a session, with its location and its own id', async () => {

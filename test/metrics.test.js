@@ -13,15 +13,15 @@ import {
 import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
-let sql;
+let db;
 let aggregateDay;
 before(async () => {
-  ({ app, sql } = await boot());
-  aggregateDay = aggregateDayLoader(sql);
+  ({ app, db } = await boot());
+  aggregateDay = aggregateDayLoader(db);
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function publishAs(ns, nsToken, adminToken, id, version, code) {
@@ -47,7 +47,7 @@ async function makePublished() {
 // at a delay.
 async function waitForEvents(namespace, id, count) {
   for (let i = 0; i < 50; i += 1) {
-    const [row] = await sql`
+    const [row] = await db.$queryRaw`
       SELECT COUNT(*)::int AS n FROM download_events
       WHERE namespace = ${namespace} AND extension_id = ${id}
     `;
@@ -81,7 +81,7 @@ test('downloads roll up per version and appear on version objects', async () => 
   await aggregateDay(new Date());
 
   // The per-version rollup keeps the versions apart...
-  const buckets = await sql`
+  const buckets = await db.$queryRaw`
     SELECT version, total_downloads FROM extension_version_daily_downloads
     WHERE namespace = ${ownerNs} AND extension_id = 'hello'
     ORDER BY version
@@ -145,7 +145,7 @@ test('downloads are counted, surfaced, and feed trending', async () => {
     .get(apiPath(`/@${ownerNs}/hello/versions/latest/download`))
     .expect(200);
 
-  await sql.unsafe(`
+  await db.$executeRawUnsafe(`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash, created_at)
     SELECT e.namespace, e.extension_id, '1.0.0', 'x', '10.0.0.1',
            now() - INTERVAL '3 days'
@@ -163,7 +163,7 @@ test('downloads are counted, surfaced, and feed trending', async () => {
 
   // the published extension's daily bucket only counts aggregations run so far
   await aggregateDay(new Date());
-  const [bucket] = await sql`
+  const [bucket] = await db.$queryRaw`
     SELECT * FROM extension_daily_downloads
     WHERE namespace = ${ownerNs} AND extension_id = 'hello'
   `;
@@ -194,7 +194,7 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const sixDaysAgo = new Date(today - 6 * 86400000);
   const sevenDaysAgo = new Date(today - 7 * 86400000);
-  await sql`
+  await db.$executeRaw`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, created_at)
     VALUES (${ownerNs}, 'recent', '1.0.0', 'recent', ${sixDaysAgo.toISOString()}),
            (${ownerNs}, 'old', '1.0.0', 'old', ${sevenDaysAgo.toISOString()})
@@ -211,15 +211,15 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
 test('trending selects a deprecated version when a newer version was yanked', async () => {
   const { ownerNs, ownerToken } = await makePublished();
   await publishProject(app, ownerNs, 'hello', ownerToken, { version: '2.0.0' });
-  await sql`
+  await db.$executeRaw`
     UPDATE versions SET status = 'deprecated'
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '1.0.0'
   `;
-  await sql`
+  await db.$executeRaw`
     UPDATE versions SET status = 'yanked'
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '2.0.0'
   `;
-  await sql`
+  await db.$executeRaw`
     INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
     VALUES (${ownerNs}, 'hello', CURRENT_DATE, 3)
   `;
@@ -238,7 +238,7 @@ test('a download records a keyed hash of the address, never the address', async 
     .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
     .expect(200);
 
-  const readEvents = () => sql`
+  const readEvents = () => db.$queryRaw`
     SELECT ip_hash FROM download_events
     WHERE namespace = ${ownerNs} AND extension_id = 'hello'
     ORDER BY id
@@ -259,7 +259,7 @@ test('a download records a keyed hash of the address, never the address', async 
 
   // The hash still serves its purpose: one client, one distinct download.
   await aggregateDay(new Date());
-  const [day] = await sql`
+  const [day] = await db.$queryRaw`
     SELECT distinct_downloads, total_downloads FROM extension_daily_downloads
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND day = CURRENT_DATE
   `;

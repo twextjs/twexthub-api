@@ -1,6 +1,8 @@
+import { Prisma } from '../prisma/generated/client/index.js';
 import { conflict, notFound } from './errors.js';
 import { audit } from './audit.js';
 import { isOrganizationOwner, organizationsOwnedBy } from './auth.js';
+import { acquireAdvisoryLocks } from './locks.js';
 import {
   notifyOwnerCandidate,
   transferRequestedMessage,
@@ -58,31 +60,41 @@ function chargedBytes(versions) {
 // somebody else's extension, but moving it out from under its address is not
 // theirs to do, and neither is removing the address holder. An organization
 // owner speaks for the organization; an admin can act for either side.
-export async function mayOfferTransfer(sql, user, namespace) {
+export async function mayOfferTransfer(db, user, namespace) {
   if (user.role === 'admin') return true;
   if (user.namespace === namespace) return true;
-  return isOrganizationOwner(sql, user, namespace);
+  return isOrganizationOwner(db, user, namespace);
 }
 
-export async function mayReceiveTransfer(sql, user, toNamespace) {
+export async function mayReceiveTransfer(db, user, toNamespace) {
   if (user.role === 'admin') return true;
   if (user.namespace === toNamespace) return true;
-  return isOrganizationOwner(sql, user, toNamespace);
+  return isOrganizationOwner(db, user, toNamespace);
 }
 
-export async function loadNamespaceAccount(sql, namespace) {
-  const [row] = await sql`
-    SELECT id, namespace, display_name, kind, blob_bytes, max_blob_bytes
-    FROM users WHERE namespace = ${namespace}
-  `;
+export async function loadNamespaceAccount(db, namespace) {
+  const row = await db.users.findUnique({
+    where: { namespace },
+    select: {
+      id: true,
+      namespace: true,
+      display_name: true,
+      kind: true,
+      blob_bytes: true,
+      max_blob_bytes: true,
+    },
+  });
   return row ?? null;
 }
 
 // An organization with no owners on its list cannot be acted for by anybody, so
 // it could accept a transfer and then never publish to it. The org routes refuse
 // to create that state; this covers an extension arriving at one.
-export async function hasOrgOwner(sql, orgId) {
-  const [row] = await sql`SELECT 1 FROM organization_owners WHERE org_id = ${orgId} LIMIT 1`;
+export async function hasOrgOwner(db, orgId) {
+  const row = await db.organization_owners.findFirst({
+    where: { org_id: orgId },
+    select: { org_id: true },
+  });
   return Boolean(row);
 }
 
@@ -92,17 +104,17 @@ export async function hasOrgOwner(sql, orgId) {
 // the transfer just delivered, which is a loop. Refusing is clearer than
 // following it.
 async function assertDestinationIsFree(tx, toNamespace, id) {
-  const [existing] = await tx`
-    SELECT 1 FROM versions
-    WHERE namespace = ${toNamespace} AND extension_id = ${id} AND status <> 'rejected'
-  `;
+  const existing = await tx.versions.findFirst({
+    where: { namespace: toNamespace, extension_id: id, status: { not: 'rejected' } },
+    select: { id: true },
+  });
   if (existing) {
     throw conflict(`@${toNamespace}/${id} already exists, so it cannot be transferred into.`);
   }
-  const [redirect] = await tx`
-    SELECT 1 FROM extension_redirects
-    WHERE from_namespace = ${toNamespace} AND from_extension_id = ${id}
-  `;
+  const redirect = await tx.extension_redirects.findFirst({
+    where: { from_namespace: toNamespace, from_extension_id: id },
+    select: { from_namespace: true },
+  });
   if (redirect) {
     throw conflict(
       `@${toNamespace}/${id} has itself been transferred away, so it cannot receive one.`,
@@ -116,18 +128,18 @@ async function assertDestinationIsFree(tx, toNamespace, id) {
 // sender to pick a different destination, where refusing at accept tells them
 // after the recipient has already said yes.
 export async function openTransfer(tx, { config, actor, namespace, id, toNamespace, recipient }) {
-  const [pending] = await tx`
-    SELECT 1 FROM extension_transfers
-    WHERE namespace = ${namespace} AND extension_id = ${id} AND to_namespace = ${toNamespace}
-  `;
+  const pending = await tx.extension_transfers.findFirst({
+    where: { namespace, extension_id: id, to_namespace: toNamespace },
+    select: { namespace: true },
+  });
   if (pending) {
     throw conflict(`@${namespace}/${id} has already been offered to @${toNamespace}.`);
   }
 
-  const versions = await tx`
-    SELECT blob_size, source_size, status FROM versions
-    WHERE namespace = ${namespace} AND extension_id = ${id}
-  `;
+  const versions = await tx.versions.findMany({
+    where: { namespace, extension_id: id },
+    select: { blob_size: true, source_size: true, status: true },
+  });
   if (versions.length === 0) throw notFound(`@${namespace}/${id} does not exist.`);
   if (versions.some((row) => row.status === 'staging')) {
     throw conflict('A publish is in progress for this extension.');
@@ -147,10 +159,9 @@ export async function openTransfer(tx, { config, actor, namespace, id, toNamespa
     );
   }
 
-  await tx`
-    INSERT INTO extension_transfers (namespace, extension_id, to_namespace, requested_by)
-    VALUES (${namespace}, ${id}, ${toNamespace}, ${actor.id})
-  `;
+  await tx.extension_transfers.create({
+    data: { namespace, extension_id: id, to_namespace: toNamespace, requested_by: actor.id },
+  });
 
   // The recipient is the one who has to act, and an organization has no inbox of
   // its own, so every account on its owner list is told.
@@ -165,12 +176,11 @@ export async function openTransfer(tx, { config, actor, namespace, id, toNamespa
 }
 
 export async function withdrawTransfer(tx, { actor, namespace, id, toNamespace, recipient }) {
-  const [removed] = await tx`
-    DELETE FROM extension_transfers
-    WHERE namespace = ${namespace} AND extension_id = ${id} AND to_namespace = ${toNamespace}
-    RETURNING 1
-  `;
-  if (!removed) throw notFound(`@${namespace}/${id} has no transfer waiting for @${toNamespace}.`);
+  const { count } = await tx.extension_transfers.deleteMany({
+    where: { namespace, extension_id: id, to_namespace: toNamespace },
+  });
+  if (count === 0)
+    throw notFound(`@${namespace}/${id} has no transfer waiting for @${toNamespace}.`);
   await notifyOwnerCandidate(
     tx,
     recipient,
@@ -188,24 +198,20 @@ export async function withdrawTransfer(tx, { actor, namespace, id, toNamespace, 
 // deadlock each other. It is held to the end of the transaction, so a publish
 // against either address either happens entirely before or entirely after.
 export async function acceptTransfer(tx, { config, actor, namespace, id, toNamespace, recipient }) {
-  const keys = [`${namespace}/${id}`, `${toNamespace}/${id}`].sort();
-  for (const key of keys) {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
-  }
+  await acquireAdvisoryLocks(tx, [`${namespace}/${id}`, `${toNamespace}/${id}`]);
 
   // Re-read everything the open checked. The offer may be months old: the
   // destination may have published its own `id` in the meantime, or filled up.
-  const [offer] = await tx`
-    DELETE FROM extension_transfers
-    WHERE namespace = ${namespace} AND extension_id = ${id} AND to_namespace = ${toNamespace}
-    RETURNING 1
-  `;
-  if (!offer) throw notFound(`@${namespace}/${id} has no transfer waiting for @${toNamespace}.`);
+  const { count: offerCount } = await tx.extension_transfers.deleteMany({
+    where: { namespace, extension_id: id, to_namespace: toNamespace },
+  });
+  if (offerCount === 0)
+    throw notFound(`@${namespace}/${id} has no transfer waiting for @${toNamespace}.`);
 
-  const versions = await tx`
-    SELECT blob_size, source_size, status FROM versions
-    WHERE namespace = ${namespace} AND extension_id = ${id}
-  `;
+  const versions = await tx.versions.findMany({
+    where: { namespace, extension_id: id },
+    select: { blob_size: true, source_size: true, status: true },
+  });
   if (versions.length === 0) throw notFound(`@${namespace}/${id} no longer exists.`);
   if (versions.some((row) => row.status === 'staging')) {
     throw conflict('A publish is in progress for this extension.');
@@ -213,8 +219,9 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
   await assertDestinationIsFree(tx, toNamespace, id);
 
   // The charge follows the extension and the quota stays a hard limit, so a
-  // transfer is not a way around one.
-  const [account] = await tx`
+  // transfer is not a way around one. The receiving row is locked before the
+  // charge is read, so a concurrent accept cannot both pass the check.
+  const [account] = await tx.$queryRaw`
     SELECT id, blob_bytes, max_blob_bytes FROM users WHERE id = ${recipient.id} FOR UPDATE
   `;
   if (!account) throw notFound('No such receiving account.');
@@ -226,43 +233,43 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
     );
   }
 
+  // The table names come from the constant lists above, never from a request.
   for (const table of ADDRESS_KEYED) {
-    await tx`
-      DELETE FROM ${tx(table)}
+    await tx.$executeRaw`
+      DELETE FROM ${Prisma.raw(table)}
       WHERE namespace = ${toNamespace} AND extension_id = ${id}
     `;
   }
-  await tx`
+  await tx.$executeRaw`
     DELETE FROM extension_owners
     WHERE namespace = ${namespace} AND extension_id = ${id}
       AND owner_id = (SELECT id FROM users WHERE namespace = ${namespace})
   `;
   for (const table of MOVED_TABLES) {
-    await tx`
-      UPDATE ${tx(table)} SET namespace = ${toNamespace}
+    await tx.$executeRaw`
+      UPDATE ${Prisma.raw(table)} SET namespace = ${toNamespace}
       WHERE namespace = ${namespace} AND extension_id = ${id}
     `;
   }
-  await tx`
+  await tx.$executeRaw`
     UPDATE versions SET author = ${recipient.display_name}
     WHERE namespace = ${toNamespace} AND extension_id = ${id}
   `;
 
-  await tx`
-    INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
-    VALUES (${account.id}, ${toNamespace}, ${id}, ${actor.id})
-    ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
-  `;
+  await tx.extension_owners.createMany({
+    data: [{ owner_id: account.id, namespace: toNamespace, extension_id: id, added_by: actor.id }],
+    skipDuplicates: true,
+  });
 
   // versions.owner_id is the account that ran the publish, not the namespace, so
   // it is deliberately left alone: who pushed 1.0.0 stays on the version, which
   // is what keeps the audit trail readable after the move.
   if (charged > 0) {
-    await tx`
+    await tx.$executeRaw`
       UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charged}, 0)
       WHERE namespace = ${namespace}
     `;
-    await tx`UPDATE users SET blob_bytes = blob_bytes + ${charged} WHERE namespace = ${toNamespace}`;
+    await tx.$executeRaw`UPDATE users SET blob_bytes = blob_bytes + ${charged} WHERE namespace = ${toNamespace}`;
   }
 
   // The destination deliberately does not become `has_published`. That flag is
@@ -276,15 +283,16 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
   // Point the old address at the new one and collapse whatever already pointed
   // at the old address onto the new one, so a chain never forms and a lookup
   // never has to follow one. The destination is known not to be a redirect, so
-  // this cannot introduce a cycle.
-  await tx`
+  // this cannot introduce a cycle. Kept raw: the conflicting update reads
+  // EXCLUDED in the same statement, which the typed upsert cannot express.
+  await tx.$executeRaw`
     INSERT INTO extension_redirects (from_namespace, from_extension_id, to_namespace, to_extension_id)
     VALUES (${namespace}, ${id}, ${toNamespace}, ${id})
     ON CONFLICT (from_namespace, from_extension_id)
     DO UPDATE SET to_namespace = EXCLUDED.to_namespace,
                   to_extension_id = EXCLUDED.to_extension_id
   `;
-  await tx`
+  await tx.$executeRaw`
     UPDATE extension_redirects SET to_namespace = ${toNamespace}, to_extension_id = ${id}
     WHERE to_namespace = ${namespace} AND to_extension_id = ${id}
   `;
@@ -294,8 +302,10 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
   // as it was before. Both are dropped rather than rewritten: neither can be
   // accepted, and rewriting the second would have somebody else's offer reappear
   // against the new address as though they had asked for it.
-  await tx`DELETE FROM extension_transfers WHERE namespace = ${namespace} AND extension_id = ${id}`;
-  await tx`DELETE FROM extension_transfers WHERE to_namespace = ${namespace} AND extension_id = ${id}`;
+  await tx.extension_transfers.deleteMany({ where: { namespace, extension_id: id } });
+  await tx.extension_transfers.deleteMany({
+    where: { to_namespace: namespace, extension_id: id },
+  });
 
   // The sender is the one being told something they did not do. The recipient
   // accepted the offer a moment ago and already knows, so telling it as well
@@ -322,9 +332,9 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
 // What has been offered at this address, to a namespace the caller can answer
 // for. An organization holds no inbox, so an account acting for one sees what is
 // waiting on the organization as well as on itself.
-export async function pendingTransfersFor(sql, user, namespace, id) {
-  const organizations = await organizationsOwnedBy(sql, user);
-  const rows = await sql`
+export async function pendingTransfersFor(db, user, namespace, id) {
+  const organizations = await organizationsOwnedBy(db, user);
+  const rows = await db.$queryRaw`
     SELECT t.to_namespace, u.display_name, u.kind, t.created_at, a.namespace AS requested_by_namespace
     FROM extension_transfers t
     JOIN users u ON u.namespace = t.to_namespace
@@ -332,7 +342,7 @@ export async function pendingTransfersFor(sql, user, namespace, id) {
     WHERE t.namespace = ${namespace} AND t.extension_id = ${id}
       AND (
         t.to_namespace = ${user.namespace}
-        OR t.to_namespace = ANY (${sql.array(organizations)}::text[])
+        OR t.to_namespace = ANY (${organizations}::text[])
       )
     ORDER BY t.created_at
   `;
@@ -347,11 +357,12 @@ export async function pendingTransfersFor(sql, user, namespace, id) {
 
 // Where an address used to point, or null. One lookup with no loop, because the
 // table is kept collapsed.
-export async function redirectFor(sql, namespace, id) {
-  const [row] = await sql`
-    SELECT to_namespace, to_extension_id FROM extension_redirects
-    WHERE from_namespace = ${namespace} AND from_extension_id = ${id}
-  `;
+export async function redirectFor(db, namespace, id) {
+  const row = await db.extension_redirects.findUnique({
+    where: {
+      from_namespace_from_extension_id: { from_namespace: namespace, from_extension_id: id },
+    },
+  });
   if (!row) return null;
   return { namespace: row.to_namespace, id: row.to_extension_id };
 }

@@ -12,13 +12,13 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function makeSetup() {
@@ -300,9 +300,9 @@ for (const ownership of ['co-owner', 'organization co-owner', 'organization owne
     );
     if (ownership === 'organization owner') {
       // Exercise namespace authority without an extension ownership row.
-      await sql`DELETE FROM extension_owners WHERE namespace = ${ns} AND extension_id = 'ranger'`;
+      await db.$executeRaw`DELETE FROM extension_owners WHERE namespace = ${ns} AND extension_id = 'ranger'`;
     } else {
-      await sql`
+      await db.$executeRaw`
         INSERT INTO extension_owners (owner_id, namespace, extension_id)
         SELECT id, ${ns}, 'ranger' FROM users WHERE namespace = ${grant.namespace}
       `;

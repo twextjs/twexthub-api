@@ -7,7 +7,7 @@ import { isValidNamespace, normalizeApiRoot } from '../util.js';
 import { sessionToObject, userToObject } from '../serialize.js';
 import { createSession, requireObjectBody, resolveTargetUser } from './shared.js';
 
-export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
+export function makeSessionsRouter({ db, config, termsGate, rateLimiter }) {
   const router = Router();
   // Listing and revoking other sessions is a grantable permission, so a token
   // holding it can sign the account out everywhere but its own session.
@@ -44,7 +44,7 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
       rateLimiter.loginCheck(`login:ip:${req.ip}`),
     ]);
 
-    const [user] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
+    const user = await db.users.findUnique({ where: { namespace } });
     // An organization is a pseudo-account with no password, and its namespace is
     // public knowledge, so this says what it is instead of pretending the
     // credentials were wrong.
@@ -57,7 +57,7 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
       throw unauthorized('Invalid namespace or password.');
     }
 
-    const created = await createSession(sql, user.id, sessionTtlMs);
+    const created = await createSession(db, user.id, sessionTtlMs);
     const root = normalizeApiRoot(config.apiRoot);
     res
       .location(`${root ? `/${root}` : ''}/sessions/${created.session.id}`)
@@ -70,18 +70,19 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
   });
 
   router.get('/', guard, async (req, res) => {
-    const user = await resolveTargetUser(sql, req);
+    const user = await resolveTargetUser(db, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
 
-    const rows = await sql`
-      SELECT * FROM sessions
-      WHERE user_id = ${user.id}
-        ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
-      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
-      LIMIT ${limit + 1}
-    `;
+    const rows = await db.sessions.findMany({
+      where: {
+        user_id: user.id,
+        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+      },
+      orderBy: { id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
 
     res.json(
       keysetPage(req, rows, {
@@ -103,19 +104,19 @@ export function makeSessionsRouter({ sql, config, termsGate, rateLimiter }) {
   // independently, so a token id matched against this table would end somebody
   // else's session.
   router.delete('/current', requireSession, async (req, res) => {
-    await sql`DELETE FROM sessions WHERE id = ${req.auth.tokenId}`;
+    await db.sessions.deleteMany({ where: { id: req.auth.tokenId } });
     res.status(204).end();
   });
 
   router.delete('/:id', guard, async (req, res) => {
     const targetId = Number(req.params.id);
     const isNumeric = Number.isSafeInteger(targetId) && targetId > 0;
-    const [row] = isNumeric ? await sql`SELECT * FROM sessions WHERE id = ${targetId}` : [];
+    const row = isNumeric ? await db.sessions.findUnique({ where: { id: targetId } }) : null;
     if (!row) throw notFound();
     if (Number(row.user_id) !== Number(req.auth.user.id) && req.auth.user.role !== 'admin') {
       throw forbidden("Only an admin can revoke another account's sessions.");
     }
-    await sql`DELETE FROM sessions WHERE id = ${targetId}`;
+    await db.sessions.deleteMany({ where: { id: targetId } });
     res.status(204).end();
   });
 

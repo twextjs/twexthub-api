@@ -27,6 +27,8 @@ jobs:
         run: npm ci
       - name: Run ESLint
         run: npm run lint
+      - name: Check Prisma usage
+        run: npm run check:prisma
 
   format:
     name: Format

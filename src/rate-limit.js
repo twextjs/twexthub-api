@@ -5,7 +5,7 @@ function windowStartFor(now, windowMinutes) {
   return new Date(Math.floor(now.getTime() / ms) * ms);
 }
 
-export function makeRateLimiter(sql, config) {
+export function makeRateLimiter(db, config) {
   const limits = config.rateLimits;
 
   function secondsUntilReset(windowMinutes) {
@@ -14,26 +14,30 @@ export function makeRateLimiter(sql, config) {
     return Math.max(1, Math.ceil(remaining / 1000));
   }
 
+  // One statement per bucket increment so concurrent requests cannot lose a
+  // count between a read and a write. The upsert has to be raw: the `count`
+  // column's new value is derived from its old one, which the typed upsert
+  // cannot express without a read-modify-write race.
   async function record(bucket, windowMinutes) {
     const windowStart = windowStartFor(new Date(), windowMinutes);
-    const [{ count }] = await sql`
+    const [row] = await db.$queryRaw`
       INSERT INTO rate_limit_entries (bucket, window_start, count)
       VALUES (${bucket}, ${windowStart}, 1)
       ON CONFLICT (bucket, window_start)
       DO UPDATE SET count = rate_limit_entries.count + 1
       RETURNING count
     `;
-    return Number(count);
+    return Number(row.count);
   }
 
   async function loginCheck(bucket) {
     const max = limits.loginAttemptsPerWindow;
     const windowMinutes = limits.loginWindowMinutes;
     const windowStart = windowStartFor(new Date(), windowMinutes);
-    const [existing] = await sql`
-      SELECT count FROM rate_limit_entries
-      WHERE bucket = ${bucket} AND window_start = ${windowStart}
-    `;
+    const existing = await db.rate_limit_entries.findUnique({
+      where: { bucket_window_start: { bucket, window_start: windowStart } },
+      select: { count: true },
+    });
     if (existing && Number(existing.count) >= max) {
       throw tooManyRequests(secondsUntilReset(windowMinutes));
     }
@@ -82,7 +86,7 @@ export function makeRateLimiter(sql, config) {
   const cleanupInterval = setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - maxWindow * 60_000);
-      await sql`DELETE FROM rate_limit_entries WHERE window_start < ${cutoff}`;
+      await db.rate_limit_entries.deleteMany({ where: { window_start: { lt: cutoff } } });
     } catch {
       // cleanup errors are non-fatal
     }

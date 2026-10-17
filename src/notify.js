@@ -1,19 +1,23 @@
+import { Prisma } from '../prisma/generated/client/index.js';
+
 // Pre-rendered notification messages and insert helpers. Every insert takes
 // the caller's transaction so a notification can never outlive the event that
-// produced it.
+// produced it. `tx` is the root client or an interactive-transaction client.
 export async function notifyUser(tx, userId, kind, message, payload = {}) {
-  await tx`
-    INSERT INTO notifications (user_id, kind, message, payload)
-    VALUES (${userId}, ${kind}, ${message}, ${tx.json(payload)}::jsonb)
-  `;
+  await tx.notifications.create({
+    data: { user_id: userId, kind, message, payload },
+  });
 }
 
-// Fan out to every user matching a WHERE fragment (used for terms bumps and
-// broadcasts). Returns the number of rows inserted.
+// Fan out to every user matching a filter (used for terms bumps and
+// broadcasts). Returns the number of rows inserted. The insert runs as one
+// statement selecting from `users` so a concurrent change to the audience
+// cannot land between the select and the insert; `where` is a parameterized
+// `Prisma.sql` fragment (possibly `Prisma.empty`).
 export async function notifyUsersMatching(tx, where, kind, message, payload = {}) {
-  const rows = await tx`
+  const rows = await tx.$queryRaw`
     INSERT INTO notifications (user_id, kind, message, payload)
-    SELECT id, ${kind}, ${message}, ${tx.json(payload)}::jsonb FROM users ${where}
+    SELECT id, ${kind}, ${message}, ${payload}::jsonb FROM users ${where}
     RETURNING 1
   `;
   return rows.length;
@@ -29,7 +33,7 @@ export async function notifyOwnerCandidate(tx, candidate, kind, message, payload
   }
   return notifyUsersMatching(
     tx,
-    tx`WHERE id IN (SELECT user_id FROM organization_owners WHERE org_id = ${candidate.id})`,
+    Prisma.sql`WHERE id IN (SELECT user_id FROM organization_owners WHERE org_id = ${candidate.id})`,
     kind,
     message,
     payload,

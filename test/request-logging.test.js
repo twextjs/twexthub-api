@@ -1,15 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { apiPath, makeConfig } from './helpers.mjs';
+import { apiPath, ensureTestDatabase, makeConfig } from './helpers.mjs';
 import { createApp } from '../src/app.js';
 import { createDb, ensureDataDirs } from '../src/db.js';
 
 test('logging.requests emits one JSON line per request', async () => {
+  // This file builds its own app instead of calling boot(), so it creates its
+  // per-process database clone itself.
+  await ensureTestDatabase();
   const config = makeConfig({ logging: { requests: true } });
   ensureDataDirs(config.dataDir);
-  const sql = createDb(config);
-  const { app } = createApp({ config, sql });
+  const db = createDb(config);
+  const { app } = createApp({ config, db });
 
   const lines = [];
   const original = console.log;
@@ -40,5 +43,5 @@ test('logging.requests emits one JSON line per request', async () => {
   assert.ok(unmatched, 'unmatched paths still get a line');
   assert.equal(unmatched.status, 404);
 
-  await sql.end();
+  await db.$disconnect();
 });

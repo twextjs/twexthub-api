@@ -35,6 +35,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run format:check
+      - run: npm run check:prisma
       - run: npm test
         env:
           TWEXTHUB_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/twexthub_test

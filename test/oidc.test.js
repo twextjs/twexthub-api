@@ -21,7 +21,7 @@ beforeEach(async () => {
 });
 after(async () => {
   await idp.close();
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 // A browser that carries the flow cookie from authorize to callback. Each flow

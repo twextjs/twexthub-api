@@ -70,14 +70,17 @@ export function makeRequestTelemetry({ logRequests = false } = {}) {
   return { middleware, render };
 }
 
-export async function renderRegistryMetrics(sql, telemetry) {
+// Grouped counts are kept as raw reads: each is one aggregate the typed client
+// would still issue as its own round trip, and the BigInt results are folded to
+// numbers at the gauge.
+export async function renderRegistryMetrics(db, telemetry) {
   const [byStatus, users, extensions, downloads, storage] = await Promise.all([
-    sql`SELECT status, COUNT(*)::bigint AS count FROM versions GROUP BY status`,
-    sql`SELECT COUNT(*)::bigint AS count FROM users`,
-    sql`SELECT COUNT(DISTINCT (namespace, extension_id))::bigint AS count FROM versions
+    db.$queryRaw`SELECT status, COUNT(*)::bigint AS count FROM versions GROUP BY status`,
+    db.$queryRaw`SELECT COUNT(*)::bigint AS count FROM users`,
+    db.$queryRaw`SELECT COUNT(DISTINCT (namespace, extension_id))::bigint AS count FROM versions
         WHERE status IN ('published', 'deprecated')`,
-    sql`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS total FROM extension_daily_downloads`,
-    sql`SELECT COALESCE(SUM(blob_size), 0)::bigint AS blob,
+    db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS total FROM extension_daily_downloads`,
+    db.$queryRaw`SELECT COALESCE(SUM(blob_size), 0)::bigint AS blob,
                COALESCE(SUM(source_size), 0)::bigint AS source
         FROM versions`,
   ]);

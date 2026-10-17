@@ -79,6 +79,7 @@ cors:
 - [🌐 Server](#-server)
 - [🗄️ Database](#-database)
 - [🔐 Authentication](#-authentication)
+  - [Signing in with an identity provider](#signing-in-with-an-identity-provider)
 - [🚦 Rate Limits](#-rate-limits)
 - [📄 Pagination](#-pagination)
 - [📦 Size Limits](#-size-limits)
@@ -119,7 +120,9 @@ Not every key has an environment variable: `database.connectTimeoutSeconds`, `da
 - `connectTimeoutSeconds`: How long to wait for a connection before giving up. Defaults to `30`. File-only.
 - `idleTimeoutSeconds`: How long an unused connection is kept before closing. Defaults to `60`. File-only.
 
-Migrations run automatically when the server boots, and `node src/migrate.js` applies them on its own when you would rather not start the server.
+The three pool settings map onto the `pg` pool the Prisma client runs on: `maxConnections` is its `max`, `connectTimeoutSeconds` its `connectionTimeoutMillis`, and `idleTimeoutSeconds` its `idleTimeoutMillis`. The pool it opens is also pinned to a UTC session, so a server whose own `timezone` is set to something else still returns the timestamps the API was built against.
+
+Migrations are applied by Prisma Migrate. The server runs `prisma migrate deploy` as part of booting — before it serves anything — and `node src/migrate.js` runs the same thing on its own when you would rather not start the server. Both take the database URL from this setting; the `database.url` key is what the CLI is handed, so there is no second place to keep it.
 
 ## 🔐 Authentication
 

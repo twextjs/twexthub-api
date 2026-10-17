@@ -17,14 +17,14 @@ import { blobPathFor } from '../src/blobs.js';
 // ordinary source sizes: a trusted build whose raw output would be rejected
 // passes once it minifies under the limit.
 let app;
-let sql;
+let db;
 let config;
 before(async () => {
-  ({ app, sql, config } = await boot({ limits: { maxBlobBytes: 4096 } }));
+  ({ app, db, config } = await boot({ limits: { maxBlobBytes: 4096 } }));
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 const padded = (lines) =>
@@ -48,7 +48,7 @@ test('a trusted publish is accepted when minification brings the build under the
   const pub = await publishProject(app, ns, 'big', owner.token, { code });
   assert.equal(pub.body.status, 'published');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest, blob_size FROM versions
     WHERE namespace = ${ns} AND extension_id = 'big'
   `;

@@ -22,7 +22,7 @@ import { makeAdminRouter } from './routes/admin.js';
 
 export function createApp(opts = {}) {
   const config = opts.config ?? loadConfig();
-  const sql = opts.sql ?? createDb(config);
+  const db = opts.db ?? createDb(config);
 
   const app = express();
   app.disable('x-powered-by');
@@ -54,16 +54,16 @@ export function createApp(opts = {}) {
     const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions\/?$/.test(req.path);
     return isPublish ? next() : jsonBody(req, res, next);
   });
-  app.use(makeAuthenticate(sql));
+  app.use(makeAuthenticate(db));
 
-  const rateLimiter = makeRateLimiter(sql, config);
-  const termsGate = makeRequireTerms(sql);
+  const rateLimiter = makeRateLimiter(db, config);
+  const termsGate = makeRequireTerms(db);
   // How configStorage decides whether the config file survives a recreate. Left
   // unset the route reads the real mount table; a test passes its own so the
   // answer does not depend on where the checkout happens to be running.
   const storageProbe = opts.storageProbe ?? {};
   const shared = {
-    sql,
+    db,
     config,
     rateLimiter,
     termsGate,
@@ -94,5 +94,5 @@ export function createApp(opts = {}) {
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
 
-  return { app, sql, config, rateLimiter, telemetry };
+  return { app, db, config, rateLimiter, telemetry };
 }

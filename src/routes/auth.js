@@ -7,6 +7,7 @@ import { isValidNamespace, normalizeApiRoot } from '../util.js';
 import { sessionToObject, userToObject } from '../serialize.js';
 import { createSession, requireObjectBody } from './shared.js';
 import { audit } from '../audit.js';
+import { withLocks } from '../locks.js';
 
 // How long a sign-in may sit between the authorize redirect and the callback,
 // and how long the browser then has to redeem its one-time code for the
@@ -15,7 +16,7 @@ import { audit } from '../audit.js';
 const FLOW_TTL_MS = 10 * 60_000;
 const EXCHANGE_TTL_MS = 5 * 60_000;
 
-export function makeAuthRouter({ sql, config, rateLimiter }) {
+export function makeAuthRouter({ db, config, rateLimiter }) {
   const root = normalizeApiRoot(config.apiRoot);
   const mount = (path) => `${root ? `/${root}` : ''}${path}`;
   const router = Router();
@@ -69,11 +70,18 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     const binding = newSecret();
     const authorizationUrl = await client.authorizationUrl({ state, nonce, verifier });
 
-    await sql`DELETE FROM oidc_flows WHERE expires_at < now()`;
-    await sql`
-      INSERT INTO oidc_flows (kind, state_hash, flow_secret_hash, code_verifier, nonce, return_to, expires_at)
-      VALUES ('signin', ${hashToken(state)}, ${hashToken(binding)}, ${verifier}, ${nonce}, ${returnTo}, ${new Date(Date.now() + FLOW_TTL_MS)})
-    `;
+    await db.oidc_flows.deleteMany({ where: { expires_at: { lt: new Date() } } });
+    await db.oidc_flows.create({
+      data: {
+        kind: 'signin',
+        state_hash: hashToken(state),
+        flow_secret_hash: hashToken(binding),
+        code_verifier: verifier,
+        nonce,
+        return_to: returnTo,
+        expires_at: new Date(Date.now() + FLOW_TTL_MS),
+      },
+    });
     setFlowCookie(res, state, binding);
 
     if (wantsHtml(req)) return res.redirect(authorizationUrl);
@@ -98,10 +106,11 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     // on exchange_code_hash means only the first callback through matches, so
     // a replayed state finds nothing. The cookie binding is checked in the
     // same statement, so a callback carrying another browser's state does not
-    // complete a sign-in for this one.
+    // complete a sign-in for this one. A conditional update across two unique
+    // filters has no typed equivalent that both claims the row and returns it.
     const exchangeCode = newSecret();
     const binding = readCookie(req, flowCookieName(state));
-    const [flow] = await sql`
+    const [flow] = await db.$queryRaw`
       UPDATE oidc_flows
       SET exchange_code_hash = ${hashToken(exchangeCode)}
       WHERE state_hash = ${hashToken(state)}
@@ -170,16 +179,16 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     if (typeof code !== 'string' || code === '') {
       throw fieldErrors([{ field: 'code', message: 'A code is required.' }]);
     }
-    const [flow] = await sql`
+    const [flow] = await db.$queryRaw`
       DELETE FROM oidc_flows
       WHERE exchange_code_hash = ${hashToken(code)} AND user_id IS NOT NULL AND expires_at > now()
       RETURNING *
     `;
     if (!flow) throw new HttpError(400, { detail: 'That code is invalid or has expired.' });
-    const [user] = await sql`SELECT * FROM users WHERE id = ${flow.user_id}`;
+    const user = await db.users.findUnique({ where: { id: flow.user_id } });
     if (!user) throw new HttpError(400, { detail: 'That code is invalid or has expired.' });
 
-    const created = await createSession(sql, user.id, sessionTtlMs);
+    const created = await createSession(db, user.id, sessionTtlMs);
     res
       .location(mount(`/sessions/${created.session.id}`))
       .status(201)
@@ -204,21 +213,29 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     const binding = newSecret();
     const authorizationUrl = await client.authorizationUrl({ state, nonce, verifier });
 
-    await sql`DELETE FROM oidc_flows WHERE expires_at < now()`;
-    await sql`
-      INSERT INTO oidc_flows (kind, state_hash, flow_secret_hash, code_verifier, nonce, user_id, return_to, expires_at)
-      VALUES ('link', ${hashToken(state)}, ${hashToken(binding)}, ${verifier}, ${nonce}, ${req.auth.user.id}, ${returnTo}, ${new Date(Date.now() + FLOW_TTL_MS)})
-    `;
+    await db.oidc_flows.deleteMany({ where: { expires_at: { lt: new Date() } } });
+    await db.oidc_flows.create({
+      data: {
+        kind: 'link',
+        state_hash: hashToken(state),
+        flow_secret_hash: hashToken(binding),
+        code_verifier: verifier,
+        nonce,
+        user_id: req.auth.user.id,
+        return_to: returnTo,
+        expires_at: new Date(Date.now() + FLOW_TTL_MS),
+      },
+    });
     setFlowCookie(res, state, binding);
     res.json({ authorizationUrl });
   });
 
   router.get('/oidc/identities', requireSession, async (req, res) => {
-    const rows = await sql`
-      SELECT id, issuer, subject, email, created_at FROM user_identities
-      WHERE user_id = ${req.auth.user.id}
-      ORDER BY id
-    `;
+    const rows = await db.user_identities.findMany({
+      where: { user_id: req.auth.user.id },
+      select: { id: true, issuer: true, subject: true, email: true, created_at: true },
+      orderBy: { id: 'asc' },
+    });
     res.json({ data: rows.map(identityToObject) });
   });
 
@@ -228,15 +245,14 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   router.delete('/oidc/identities/:id', requireSession, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
-    await sql.begin(async (tx) => {
-      const [identity] = await tx`
+    await db.$transaction(async (tx) => {
+      const [identity] = await tx.$queryRaw`
         SELECT * FROM user_identities WHERE id = ${id} AND user_id = ${req.auth.user.id} FOR UPDATE
       `;
       if (!identity) throw notFound('No such linked identity.');
-      const [user] = await tx`SELECT * FROM users WHERE id = ${req.auth.user.id} FOR UPDATE`;
-      const [{ count }] = await tx`
-        SELECT count(*)::int AS count FROM user_identities WHERE user_id = ${req.auth.user.id}
-      `;
+      const [user] =
+        await tx.$queryRaw`SELECT * FROM users WHERE id = ${req.auth.user.id} FOR UPDATE`;
+      const count = await tx.user_identities.count({ where: { user_id: req.auth.user.id } });
       // Unlinking the last way in would strand the account: a password that
       // still works is a way in, but one the instance no longer accepts is not.
       const canUsePassword = Boolean(user.password_hash) && !oidc.required;
@@ -247,7 +263,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
             : 'This link is the only way into the account. Ask an admin for a password before removing it.',
         );
       }
-      await tx`DELETE FROM user_identities WHERE id = ${id}`;
+      await tx.user_identities.delete({ where: { id } });
       await audit(
         tx,
         user,
@@ -260,7 +276,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   });
 
   async function finishLink(req, res, flow, { issuer, subject, claims }) {
-    const [user] = await sql`SELECT * FROM users WHERE id = ${flow.user_id}`;
+    const user = await db.users.findUnique({ where: { id: flow.user_id } });
     if (!user) {
       return failFlow(
         req,
@@ -271,7 +287,7 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
         'The account this link was started for no longer exists.',
       );
     }
-    const identity = await attachIdentity(sql, user.id, issuer, subject, claimEmail(claims));
+    const identity = await attachIdentity(db, user.id, issuer, subject, claimEmail(claims));
     if (!identity || Number(identity.user_id) !== Number(user.id)) {
       return failFlow(
         req,
@@ -283,9 +299,9 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
       );
     }
     if (identity.created) {
-      await audit(sql, user, 'identity.link', { namespace: user.namespace }, { issuer });
+      await audit(db, user, 'identity.link', { namespace: user.namespace }, { issuer });
     }
-    await sql`DELETE FROM oidc_flows WHERE id = ${flow.id}`;
+    await db.oidc_flows.deleteMany({ where: { id: flow.id } });
     if (wantsHtml(req)) {
       const target = redirectTarget(flow.return_to, config);
       target.searchParams.set('oidc_linked', '1');
@@ -295,14 +311,14 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
   }
 
   async function finishSignin(req, res, flow, exchangeCode, { issuer, subject, claims }) {
-    const [existing] = await sql`
-      SELECT * FROM user_identities WHERE issuer = ${issuer} AND subject = ${subject}
-    `;
+    const existing = await db.user_identities.findUnique({
+      where: { issuer_subject: { issuer, subject } },
+    });
     let user;
     if (existing) {
-      [user] = await sql`SELECT * FROM users WHERE id = ${existing.user_id}`;
+      user = await db.users.findUnique({ where: { id: existing.user_id } });
     } else {
-      user = await createAccountFromClaims(sql, rateLimiter, req, {
+      user = await createAccountFromClaims(db, rateLimiter, req, {
         issuer,
         subject,
         claims,
@@ -315,18 +331,17 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
     // A browser cannot read an Authorization header from a redirect, so it is
     // sent back with a one-time code instead and trades that for the session.
     if (wantsHtml(req)) {
-      await sql`
-        UPDATE oidc_flows
-        SET user_id = ${user.id}, expires_at = ${new Date(Date.now() + EXCHANGE_TTL_MS)}
-        WHERE id = ${flow.id}
-      `;
+      await db.oidc_flows.update({
+        where: { id: flow.id },
+        data: { user_id: user.id, expires_at: new Date(Date.now() + EXCHANGE_TTL_MS) },
+      });
       const target = redirectTarget(flow.return_to, config);
       target.searchParams.set('oidc_code', exchangeCode);
       return res.redirect(target.toString());
     }
 
-    const created = await createSession(sql, user.id, sessionTtlMs);
-    await sql`DELETE FROM oidc_flows WHERE id = ${flow.id}`;
+    const created = await createSession(db, user.id, sessionTtlMs);
+    await db.oidc_flows.deleteMany({ where: { id: flow.id } });
     res
       .location(mount(`/sessions/${created.session.id}`))
       .status(201)
@@ -357,68 +372,61 @@ export function makeAuthRouter({ sql, config, rateLimiter }) {
 // it is for password sign-up -- and the namespace comes from the provider's
 // preferred name when it can, with a digest-based fallback that cannot collide
 // with anybody.
-async function createAccountFromClaims(sql, rateLimiter, req, { issuer, subject, claims }) {
+async function createAccountFromClaims(db, rateLimiter, req, { issuer, subject, claims }) {
   await rateLimiter.signupCheck(`signup:${req.ip}`);
   const base = namespaceFromClaims(claims, issuer, subject);
   const displayName = displayNameFromClaims(claims, base);
 
-  return sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtext('signup-bootstrap'))`;
+  return withLocks(db, ['signup-bootstrap'], async (tx) => {
     // Another callback for the same identity may have created the account
     // while this one waited for the lock.
-    const [existing] = await tx`
-      SELECT u.* FROM user_identities i JOIN users u ON u.id = i.user_id
-      WHERE i.issuer = ${issuer} AND i.subject = ${subject}
-    `;
-    if (existing) return existing;
+    const existing = await tx.user_identities.findFirst({
+      where: { issuer, subject },
+      include: { users: true },
+    });
+    if (existing) return existing.users;
 
-    const [{ count }] = await tx`SELECT count(*)::int AS count FROM users`;
+    const count = await tx.users.count();
     const role = count === 0 ? 'admin' : 'normal';
     const namespace = await freeNamespace(tx, base);
-    const [user] = await tx`
-      INSERT INTO users (namespace, display_name, role)
-      VALUES (${namespace}, ${displayName}, ${role})
-      RETURNING *
-    `;
-    await tx`
-      INSERT INTO user_identities (user_id, issuer, subject, email)
-      VALUES (${user.id}, ${issuer}, ${subject}, ${claimEmail(claims)})
-    `;
+    const user = await tx.users.create({
+      data: { namespace, display_name: displayName, role },
+    });
+    await tx.user_identities.create({
+      data: { user_id: user.id, issuer, subject, email: claimEmail(claims) },
+    });
     return user;
   });
 }
 
 // Inserts the link unless the identity already exists, in which case the row
 // is returned with `created: false` and the caller decides what an existing
-// link belonging to somebody else means.
-async function attachIdentity(sql, userId, issuer, subject, email) {
-  const [inserted] = await sql`
+// link belonging to somebody else means. The insert and the fallback read have
+// to be one statement apart, so the conflict-ignoring INSERT keeps its
+// `RETURNING`.
+async function attachIdentity(db, userId, issuer, subject, email) {
+  const inserted = await db.$queryRaw`
     INSERT INTO user_identities (user_id, issuer, subject, email)
     VALUES (${userId}, ${issuer}, ${subject}, ${email})
     ON CONFLICT (issuer, subject) DO NOTHING
     RETURNING *
   `;
-  if (inserted) return { ...inserted, created: true };
-  const [existing] = await sql`
-    SELECT * FROM user_identities WHERE issuer = ${issuer} AND subject = ${subject}
-  `;
-  return existing;
+  if (inserted[0]) return { ...inserted[0], created: true };
+  return db.user_identities.findUnique({ where: { issuer_subject: { issuer, subject } } });
 }
 
 async function freeNamespace(tx, base) {
+  const taken = (namespace) => tx.users.findFirst({ where: { namespace }, select: { id: true } });
   if (base) {
-    const [taken] = await tx`SELECT 1 FROM users WHERE namespace = ${base}`;
-    if (!taken) return base;
+    if (!(await taken(base))) return base;
     for (let suffix = 2; suffix <= 50; suffix += 1) {
       const candidate = `${base.slice(0, 36)}-${suffix}`;
-      const [hit] = await tx`SELECT 1 FROM users WHERE namespace = ${candidate}`;
-      if (!hit) return candidate;
+      if (!(await taken(candidate))) return candidate;
     }
   }
   for (;;) {
     const candidate = `user-${randomBytes(6).toString('hex')}`;
-    const [hit] = await tx`SELECT 1 FROM users WHERE namespace = ${candidate}`;
-    if (!hit) return candidate;
+    if (!(await taken(candidate))) return candidate;
   }
 }
 

@@ -2,6 +2,7 @@ import { mkdir, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { BLOB_GC_LOCK_KEY, sha256Hex } from './blobs.js';
+import { withLocks } from './locks.js';
 
 // Sources are keyed by digest just like blobs, so identical tarballs share one
 // file. Addressed as sources/<first two hex chars>/<rest> for fan-out.
@@ -30,18 +31,23 @@ export async function storeSource(dataDir, buffer) {
   return { path: path.relative(dataDir, abs), digest, size: buffer.length };
 }
 
-export async function removeSourceIfUnused(sql, config, digest) {
+// The keeper check and the unlink, without taking the GC lock: for callers that
+// already hold it across a delete and the cleanup that follows it.
+export async function removeSourceIfUnusedInTx(tx, config, digest) {
   if (!digest) return;
-  await sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
-    const [keeper] = await tx`
-      SELECT 1 FROM versions WHERE source_digest = ${digest} LIMIT 1
-    `;
-    if (keeper) return;
-    try {
-      await unlink(sourcePathFor(config.dataDir, digest));
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
+  const keeper = await tx.versions.findFirst({
+    where: { source_digest: digest },
+    select: { id: true },
   });
+  if (keeper) return;
+  try {
+    await unlink(sourcePathFor(config.dataDir, digest));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+}
+
+export async function removeSourceIfUnused(db, config, digest) {
+  if (!digest) return;
+  await withLocks(db, [BLOB_GC_LOCK_KEY], (tx) => removeSourceIfUnusedInTx(tx, config, digest));
 }

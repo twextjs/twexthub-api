@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { Prisma } from '../../prisma/generated/client/index.js';
 import { requireAdmin } from '../auth.js';
 import { decodeCursor, keysetPage, pageLinks, parseDir, parseLimit } from '../pagination.js';
 import { HttpError, notFound } from '../errors.js';
@@ -19,7 +20,7 @@ import {
 
 const SORTS = new Set(['recent', 'downloads', 'updated', 'name']);
 
-export function makeDiscoveryRouter({ sql, config, termsGate }) {
+export function makeDiscoveryRouter({ db, config, termsGate }) {
   const router = Router();
 
   function escapeLike(value) {
@@ -42,8 +43,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   // becomes an expression that cannot be index-seeked, while the ordering
   // below stays on the timestamptz.
   const TIMESTAMP_SORT_KEYS = {
-    recent: sql`((extract(epoch from s.published_at) * 1000000)::bigint)`,
-    updated: sql`((extract(epoch from s.updated_at) * 1000000)::bigint)`,
+    recent: Prisma.sql`((extract(epoch from s.published_at) * 1000000)::bigint)`,
+    updated: Prisma.sql`((extract(epoch from s.updated_at) * 1000000)::bigint)`,
   };
   const SORT_TYPES = {
     recent: 'int8',
@@ -60,22 +61,23 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   // tiebreaker, skipping or repeating rows whenever the sort key ties, so the
   // two are compared separately.
   function cursorCondition(cursor, sort, back) {
-    if (!cursor) return sql``;
+    if (!cursor) return Prisma.empty;
     // downloads is a joined aggregate, not a column of the versions subquery,
-    // and the timestamp sorts compare their whole-microsecond keys.
+    // and the timestamp sorts compare their whole-microsecond keys. The column
+    // and type names come from the constant maps above, never from a request.
     const col =
       sort === 'downloads'
-        ? sql`COALESCE(d.total, 0)::bigint`
-        : (TIMESTAMP_SORT_KEYS[sort] ?? sql('s.' + SORT_COLUMNS[sort]));
-    const key = sql`${cursor.k}::${sql(SORT_TYPES[sort])}`;
+        ? Prisma.sql`COALESCE(d.total, 0)::bigint`
+        : (TIMESTAMP_SORT_KEYS[sort] ?? Prisma.raw('s.' + SORT_COLUMNS[sort]));
+    const key = Prisma.sql`${cursor.k}::${Prisma.raw(SORT_TYPES[sort])}`;
     // The name sort reads A→Z and everything else reads newest-first, so which
     // side of the cursor the next rows fall on depends on the sort. The
     // (namespace, id) tiebreaker ascends in the forward direction whatever the
     // sort key does, and only reverses when the whole page does.
     const ascending = sort === 'name';
-    const after = ascending !== back ? sql`${col} > ${key}` : sql`${col} < ${key}`;
-    const tie = back ? sql`<` : sql`>`;
-    return sql`
+    const after = ascending !== back ? Prisma.sql`${col} > ${key}` : Prisma.sql`${col} < ${key}`;
+    const tie = back ? Prisma.sql`<` : Prisma.sql`>`;
+    return Prisma.sql`
       AND (${after}
         OR (${col} = ${key}
           AND (s.namespace, s.extension_id) ${tie} (${cursor.ns}, ${cursor.id})))
@@ -83,19 +85,22 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   }
 
   const SORT_ORDER = {
-    recent: sql`s.published_at DESC, s.namespace ASC, s.extension_id ASC`,
-    updated: sql`s.updated_at DESC, s.namespace ASC, s.extension_id ASC`,
-    downloads: sql`downloads DESC, s.namespace ASC, s.extension_id ASC`,
-    name: sql`s.name ASC, s.namespace ASC, s.extension_id ASC`,
+    recent: Prisma.sql`s.published_at DESC, s.namespace ASC, s.extension_id ASC`,
+    updated: Prisma.sql`s.updated_at DESC, s.namespace ASC, s.extension_id ASC`,
+    downloads: Prisma.sql`downloads DESC, s.namespace ASC, s.extension_id ASC`,
+    name: Prisma.sql`s.name ASC, s.namespace ASC, s.extension_id ASC`,
   };
 
   const SORT_ORDER_BACK = {
-    recent: sql`s.published_at ASC, s.namespace DESC, s.extension_id DESC`,
-    updated: sql`s.updated_at ASC, s.namespace DESC, s.extension_id DESC`,
-    downloads: sql`downloads ASC, s.namespace DESC, s.extension_id DESC`,
-    name: sql`s.name DESC, s.namespace DESC, s.extension_id DESC`,
+    recent: Prisma.sql`s.published_at ASC, s.namespace DESC, s.extension_id DESC`,
+    updated: Prisma.sql`s.updated_at ASC, s.namespace DESC, s.extension_id DESC`,
+    downloads: Prisma.sql`downloads ASC, s.namespace DESC, s.extension_id DESC`,
+    name: Prisma.sql`s.name DESC, s.namespace DESC, s.extension_id DESC`,
   };
 
+  // A window ranking (latest version per extension), a joined rollup, and a
+  // keyset boundary on a microsecond expression: one statement with no typed
+  // equivalent.
   async function listLatestVersions({
     req,
     limit,
@@ -103,10 +108,10 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     sort = 'recent',
     license,
     namespace = null,
-    searchFilter = sql``,
+    searchFilter = Prisma.empty,
   }) {
     const back = parseDir(req.query.dir);
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT s.*, COALESCE(d.total, 0)::bigint AS downloads,
         ${TIMESTAMP_SORT_KEYS.recent}::text AS published_key,
         ${TIMESTAMP_SORT_KEYS.updated}::text AS updated_key
@@ -129,8 +134,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
         GROUP BY namespace, extension_id
       ) d ON d.namespace = s.namespace AND d.extension_id = s.extension_id
       WHERE rn = 1
-        ${namespace ? sql`AND s.namespace = ${namespace}` : sql``}
-        ${license ? sql`AND s.license = ${license}` : sql``}
+        ${namespace ? Prisma.sql`AND s.namespace = ${namespace}` : Prisma.empty}
+        ${license ? Prisma.sql`AND s.license = ${license}` : Prisma.empty}
         ${searchFilter}
         ${cursorCondition(cursor, sort, back)}
       ORDER BY ${back ? SORT_ORDER_BACK[sort] : SORT_ORDER[sort]}
@@ -219,16 +224,17 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     // the query as a negative or fractional LIMIT.
     const requested = Number(req.query.limit ?? 10);
     const limit = Math.min(Number.isInteger(requested) && requested > 0 ? requested : 10, 50);
-    const trending = await trendingExtensions(sql, { limit });
+    const trending = await trendingExtensions(db, { limit });
     if (trending.length === 0) {
       return res.json({ data: [], _links: pageLinks(req) });
     }
     const t = trending;
     // Trending is a flat (namespace, id) list, so the pair has to be joined as a
-    // pair: two ANY() lists would match every combination of both columns.
+    // pair: two ANY() lists would match every combination of both columns. The
+    // paired-unnest hydration stays raw.
     const namespaces = t.map((e) => e.namespace);
     const ids = t.map((e) => e.id);
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT * FROM (
         SELECT v.*,
           row_number() OVER (
@@ -272,8 +278,8 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
       id: 'string',
     });
     const searchFilter = folded
-      ? sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
-      : sql``;
+      ? Prisma.sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
+      : Prisma.empty;
     res.json(
       await listLatestVersions({
         req,
@@ -296,11 +302,12 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   });
 
   router.get('/stats', async (req, res) => {
+    // Distinct composite counts and a rollup sum: kept raw.
     const [published, pending, authors, downloads] = await Promise.all([
-      sql`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
-      sql`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
-      sql`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
-      sql`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS count FROM extension_daily_downloads`,
+      db.$queryRaw`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
+      db.$queryRaw`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
+      db.$queryRaw`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
+      db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS count FROM extension_daily_downloads`,
     ]);
     res.json({
       published: Number(published[0].count),
@@ -551,9 +558,9 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   }
 
   // The latest published or deprecated version, which is what every badge
-  // variant reports on.
+  // variant reports on. A window ranking, kept raw.
   async function latestBadgeRow(namespace, id) {
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT * FROM (
         SELECT v.*, row_number() OVER (
           PARTITION BY namespace, extension_id
@@ -614,7 +621,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     } else if (field === 'license') {
       message = row.license;
     } else {
-      message = String(Number((await totalDownloads(sql, namespace, id)) ?? 0));
+      message = String(Number((await totalDownloads(db, namespace, id)) ?? 0));
     }
     sendBadge(res, {
       label: requestedLabel(req, field),
@@ -630,7 +637,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await latestBadgeRow(namespace, id);
-    const downloads = Number((await totalDownloads(sql, namespace, id)) ?? 0);
+    const downloads = Number((await totalDownloads(db, namespace, id)) ?? 0);
     const versionText = `v${row.version}`;
     const downloadsText = downloads === 1 ? '1 download' : `${downloads} downloads`;
     sendBadge(res, {
@@ -643,7 +650,7 @@ export function makeDiscoveryRouter({ sql, config, termsGate }) {
   });
 
   router.get('/feed.atom', async (req, res) => {
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT * FROM (
         SELECT v.*, row_number() OVER (
           PARTITION BY namespace, extension_id
@@ -690,13 +697,13 @@ ${entries}
   });
 
   router.get('/terms', async (req, res) => {
-    const [row] = await sql`SELECT * FROM legal_documents WHERE kind = 'terms'`;
+    const row = await db.legal_documents.findUnique({ where: { kind: 'terms' } });
     if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
 
   router.get('/privacy', async (req, res) => {
-    const [row] = await sql`SELECT * FROM legal_documents WHERE kind = 'privacy'`;
+    const row = await db.legal_documents.findUnique({ where: { kind: 'privacy' } });
     if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
@@ -711,7 +718,7 @@ ${entries}
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { c: 'micros', i: 'int' });
     const back = parseDir(req.query.dir);
-    const ahead = back ? sql`<` : sql`>`;
+    const ahead = back ? Prisma.sql`<` : Prisma.sql`>`;
 
     // created_at is keyed on as whole microseconds and compared as whole
     // microseconds, so the boundary is exact. A cursor carrying the column as a
@@ -720,18 +727,18 @@ ${entries}
     // the range itself is an expression and so cannot be index-seeked; the
     // ordering stays on the timestamptz, and the pending set is small enough
     // that the filter is not worth an approximate boundary.
-    const key = sql`((extract(epoch from created_at) * 1000000)::bigint)`;
-    const rows = await sql`
+    const key = Prisma.sql`((extract(epoch from created_at) * 1000000)::bigint)`;
+    const rows = await db.$queryRaw`
       SELECT *, (${key})::text AS created_key
       FROM versions
       WHERE status = 'pending'
         ${
           cursor
-            ? sql`AND (${key} ${ahead} ${cursor.c}::bigint
+            ? Prisma.sql`AND (${key} ${ahead} ${cursor.c}::bigint
               OR (${key} = ${cursor.c}::bigint AND id ${ahead} ${cursor.i}))`
-            : sql``
+            : Prisma.empty
         }
-      ORDER BY created_at ${back ? sql`DESC` : sql`ASC`}, id ${back ? sql`DESC` : sql`ASC`}
+      ORDER BY created_at ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}, id ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}
       LIMIT ${limit + 1}
     `;
 

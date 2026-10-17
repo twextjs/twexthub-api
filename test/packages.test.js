@@ -20,7 +20,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 async function makeAdminAndOwner() {
@@ -335,8 +335,8 @@ test('a version awaiting moderation is not served by digest', async () => {
   assert.equal(published.body.status, 'pending');
   // A pending version publishes no dist, so the digest comes from the row. It
   // is the whole address of the bytes: anyone can derive it from a build.
-  const { sql } = await boot();
-  const [row] = await sql`
+  const { db } = await boot();
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND blob_digest IS NOT NULL
   `;

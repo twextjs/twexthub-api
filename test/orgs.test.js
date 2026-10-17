@@ -17,7 +17,7 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 let config;
 
 // The sandbox resolver cannot invent a host, and a hook URL is resolved and
@@ -27,11 +27,11 @@ const PUBLIC_URL = 'https://example.com/twext-hook';
 before(async () => {
   // An organization draws from the signup bucket the same as an account, and
   // these tests want more than the default five of them.
-  ({ app, sql, config } = await boot({ rateLimits: { signupsPerIpPerWindow: 10_000 } }));
+  ({ app, db, config } = await boot({ rateLimits: { signupsPerIpPerWindow: 10_000 } }));
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function org(body = {}) {
@@ -299,19 +299,19 @@ describe('changing an organization', () => {
   test('organization deletion clears namespace state at either transfer endpoint', async () => {
     const { ns, owner } = await org();
     const outside = owner.user.namespace;
-    const [account] = await sql`SELECT id FROM users WHERE namespace = ${outside}`;
+    const [account] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${outside}`;
     for (const namespace of [ns, outside]) {
-      await sql`INSERT INTO dist_tags (owner_id, namespace, extension_id, tag, version)
+      await db.$executeRaw`INSERT INTO dist_tags (owner_id, namespace, extension_id, tag, version)
         VALUES (${account.id}, ${namespace}, 'cleanup', 'latest', '1.0.0')`;
-      await sql`INSERT INTO extension_owners (owner_id, namespace, extension_id)
+      await db.$executeRaw`INSERT INTO extension_owners (owner_id, namespace, extension_id)
         VALUES (${account.id}, ${namespace}, 'cleanup')`;
-      await sql`INSERT INTO extension_owner_invites (owner_id, namespace, extension_id)
+      await db.$executeRaw`INSERT INTO extension_owner_invites (owner_id, namespace, extension_id)
         VALUES (${account.id}, ${namespace}, 'cleanup')`;
-      await sql`INSERT INTO download_events (namespace, extension_id, version)
+      await db.$executeRaw`INSERT INTO download_events (namespace, extension_id, version)
         VALUES (${namespace}, 'cleanup', '1.0.0')`;
-      await sql`INSERT INTO extension_daily_downloads (namespace, extension_id, day)
+      await db.$executeRaw`INSERT INTO extension_daily_downloads (namespace, extension_id, day)
         VALUES (${namespace}, 'cleanup', current_date)`;
-      await sql`INSERT INTO extension_version_daily_downloads (namespace, extension_id, version, day)
+      await db.$executeRaw`INSERT INTO extension_version_daily_downloads (namespace, extension_id, version, day)
         VALUES (${namespace}, 'cleanup', '1.0.0', current_date)`;
     }
     for (const [from, to] of [
@@ -319,9 +319,9 @@ describe('changing an organization', () => {
       [outside, ns],
       [outside, outside],
     ]) {
-      await sql`INSERT INTO extension_transfers (namespace, extension_id, to_namespace, requested_by)
+      await db.$executeRaw`INSERT INTO extension_transfers (namespace, extension_id, to_namespace, requested_by)
         VALUES (${from}, 'cleanup', ${to}, ${account.id})`;
-      await sql`INSERT INTO extension_redirects (from_namespace, from_extension_id, to_namespace, to_extension_id)
+      await db.$executeRaw`INSERT INTO extension_redirects (from_namespace, from_extension_id, to_namespace, to_extension_id)
         VALUES (${from}, ${to}, ${to}, 'cleanup')`;
     }
 
@@ -339,14 +339,16 @@ describe('changing an organization', () => {
       'extension_version_daily_downloads',
       'extension_transfers',
     ]) {
-      const rows = await sql`SELECT namespace FROM ${sql(table)}`;
+      // `table` comes from the fixed list above, so the identifier is safe to
+      // paste; Prisma cannot bind an identifier as a parameter.
+      const rows = await db.$queryRawUnsafe(`SELECT namespace FROM "${table}"`);
       assert.deepEqual(
         rows.map((row) => row.namespace),
         [outside],
         table,
       );
     }
-    const redirects = await sql`
+    const redirects = await db.$queryRaw`
       SELECT from_namespace, to_namespace FROM extension_redirects
       WHERE from_namespace IN (${ns}, ${outside}) OR to_namespace IN (${ns}, ${outside})
     `;
@@ -356,13 +358,13 @@ describe('changing an organization', () => {
   test('organization deletion removes published files and both kinds of webhook', async () => {
     const { ns, owner } = await org();
     await publishProject(app, ns, 'cleanup', owner.token);
-    const [version] = await sql`SELECT * FROM versions WHERE namespace = ${ns}`;
+    const [version] = await db.$queryRaw`SELECT * FROM versions WHERE namespace = ${ns}`;
     for (const extensionId of [null, 'cleanup']) {
-      const [hook] = await sql`
+      const [hook] = await db.$queryRaw`
         INSERT INTO webhooks (namespace, extension_id, url, secret)
         VALUES (${ns}, ${extensionId}, ${PUBLIC_URL}, 'test-secret') RETURNING id
       `;
-      await sql`
+      await db.$executeRaw`
         INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
         VALUES (${hook.id}, 'version.published', '{}', '{}', 'test-signature')
       `;
@@ -371,9 +373,9 @@ describe('changing an organization', () => {
       .delete(apiPath(`/orgs/${ns}`))
       .set(bearer(owner.token))
       .expect(204);
-    assert.equal((await sql`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
-    assert.equal((await sql`SELECT 1 FROM webhooks WHERE namespace = ${ns}`).length, 0);
-    assert.equal((await sql`SELECT 1 FROM webhook_deliveries`).length, 0);
+    assert.equal((await db.$queryRaw`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
+    assert.equal((await db.$queryRaw`SELECT 1 FROM webhooks WHERE namespace = ${ns}`).length, 0);
+    assert.equal((await db.$queryRaw`SELECT 1 FROM webhook_deliveries`).length, 0);
     await assert.rejects(stat(blobPathFor(config.dataDir, version.blob_digest)), {
       code: 'ENOENT',
     });
@@ -533,16 +535,16 @@ describe('owners', () => {
       await approveVersion(app, admin.token, ns, id, '1.0.0');
       await publishProject(app, ns, 'retained', owner.token, { code: 'const retained = 2;' });
     }
-    const removed = await sql`SELECT * FROM versions WHERE extension_id LIKE 'removed%'`;
+    const removed = await db.$queryRaw`SELECT * FROM versions WHERE extension_id LIKE 'removed%'`;
     await request(app)
       .delete(apiPath(`/users/${publisher.user.namespace}`))
       .set(bearer(publisher.token))
       .expect(204);
     for (const { ns } of organizations) {
-      const rows = await sql`SELECT * FROM versions WHERE namespace = ${ns}`;
+      const rows = await db.$queryRaw`SELECT * FROM versions WHERE namespace = ${ns}`;
       assert.equal(rows.length, 1);
       assert.equal(rows[0].extension_id, 'retained');
-      const [account] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+      const [account] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
       assert.equal(
         Number(account.blob_bytes),
         Number(rows[0].blob_size) + Number(rows[0].source_size),
@@ -737,7 +739,7 @@ describe('webhooks', () => {
     // Scheduling is fire-and-forget, so give it the tick it takes to insert.
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    const deliveries = await sql`
+    const deliveries = await db.$queryRaw`
       SELECT d.event, d.payload
       FROM webhook_deliveries d
       JOIN webhooks w ON w.id = d.webhook_id
@@ -829,12 +831,15 @@ describe('webhooks', () => {
       .send({ url: PUBLIC_URL, events: ['version.published'] })
       .expect(201);
 
-    const [delivery] = await sql`
+    const [delivery] = await db.$queryRaw`
       INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, status, attempt)
-      VALUES (${created.body.id}, 'version.published', ${sql.json({ id: 'one' })}, '{}', 'sig',
+      VALUES (${created.body.id}, 'version.published', ${{ id: 'one' }}, '{}', 'sig',
               'failed', 4)
       RETURNING id
     `;
+    // The listing answers with string ids, so the row this is compared against
+    // carries one too.
+    delivery.id = String(delivery.id);
 
     const listed = await request(app)
       .get(apiPath(`/orgs/${ns}/webhooks/${created.body.id}/deliveries`))

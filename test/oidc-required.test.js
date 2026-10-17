@@ -21,7 +21,7 @@ beforeEach(async () => {
 });
 after(async () => {
   await idp.close();
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('the descriptor says password sign-in is off', async () => {
