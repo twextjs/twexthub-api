@@ -85,8 +85,8 @@ test('approval minifies a pending build and updates digest, integrity, size, and
 
   await publishProject(app, ns, 'mini', owner.token, { code });
   const [row] = await db.$queryRaw`
-    SELECT blob_digest, blob_size, source_size FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'mini'
+    SELECT "BlobDigest" AS blob_digest, "BlobSize" AS blob_size, "SourceSize" AS source_size FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'mini'
   `;
   const beforeText = fs.readFileSync(blobPathFor(config.dataDir, row.blob_digest), 'utf8');
   assert.match(beforeText, /REMOVE_ME_SENTINEL_ABC/, 'the pending blob keeps the comment');
@@ -99,8 +99,8 @@ test('approval minifies a pending build and updates digest, integrity, size, and
     .expect(200);
 
   const [after] = await db.$queryRaw`
-    SELECT blob_digest, blob_size FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'mini'
+    SELECT "BlobDigest" AS blob_digest, "BlobSize" AS blob_size FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'mini'
   `;
   assert.notEqual(after.blob_digest, row.blob_digest, 'the approved blob has a new digest');
   const afterBytes = fs.readFileSync(blobPathFor(config.dataDir, after.blob_digest));
@@ -113,7 +113,7 @@ test('approval minifies a pending build and updates digest, integrity, size, and
   assert.equal(createHash('sha256').update(afterBytes).digest('hex'), after.blob_digest);
 
   // The publish charged the unminified build; approval refunded the shaved bytes.
-  const [account] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [account] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   assert.equal(Number(account.blob_bytes), Number(after.blob_size) + Number(row.source_size));
 
   // The old unminified file is no longer referenced and is swept.
@@ -141,8 +141,8 @@ test('a trusted account publishes minified output directly', async () => {
   assert.equal(published.body.status, 'published', 'trusted publishes skip review');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'mini'
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'mini'
   `;
   const text = fs.readFileSync(blobPathFor(config.dataDir, row.blob_digest), 'utf8');
   assert.ok(!text.includes('REMOVE_ME_SENTINEL_XYZ'), 'the served blob is minified');

@@ -193,8 +193,11 @@ test('a complete legacy history is adopted in place', async () => {
     const files = await legacyFiles();
     assert.equal(files.length, 29, 'the archive holds the 29 SQL migrations the releases wrote');
     await applyLegacyMigrations(db, files);
+    // The database is still the legacy snake_case one at this point: the
+    // rename happens inside runMigrations below, so this row is written the
+    // way the legacy releases wrote it and then has to survive the rename.
     await db.$executeRaw`
-      INSERT INTO "Users" ("Namespace", "PasswordHash", "DisplayName")
+      INSERT INTO users (namespace, password_hash, display_name)
       VALUES ('sentinel', 'x', 'sentinel')
     `;
 

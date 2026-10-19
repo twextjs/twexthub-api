@@ -337,8 +337,8 @@ test('a version awaiting moderation is not served by digest', async () => {
   // is the whole address of the bytes: anyone can derive it from a build.
   const { db } = await boot();
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND blob_digest IS NOT NULL
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello' AND "BlobDigest" IS NOT NULL
   `;
   assert.ok(row.blob_digest, 'the pending version should have compiled output');
 

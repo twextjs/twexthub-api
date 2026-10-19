@@ -91,7 +91,7 @@ describe('an invitation grants nothing until it is accepted', () => {
     await invite(ns, 'hello', candidate.user.namespace, owner.token);
     const attempts = [];
     await db.$transaction(async (tx) => {
-      await tx.$executeRaw`LOCK TABLE extension_owner_invites IN SHARE MODE`;
+      await tx.$executeRaw`LOCK TABLE "ExtensionOwnerInvites" IN SHARE MODE`;
       for (let i = 0; i < 2; i += 1) {
         attempts.push(
           request(app)
@@ -109,7 +109,7 @@ describe('an invitation grants nothing until it is accepted', () => {
         const [{ waiting }] = await db.$queryRaw`
           SELECT count(*)::int AS waiting FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%extension_owner_invites%'
+            AND query LIKE '%ExtensionOwnerInvites%'
         `;
         if (waiting === 2) break;
         assert.ok(Date.now() < deadline, 'both acceptances should reach the claim');
@@ -353,7 +353,7 @@ describe('withdrawing', () => {
       .expect(204);
 
     const [{ count }] =
-      await db.$queryRaw`SELECT count(*)::int AS count FROM extension_owner_invites`;
+      await db.$queryRaw`SELECT count(*)::int AS count FROM "ExtensionOwnerInvites"`;
     assert.equal(count, 0);
     await request(app)
       .post(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}/accept`))

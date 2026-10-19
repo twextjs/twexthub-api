@@ -147,8 +147,8 @@ test('account deletion still removes sources when blob cleanup fails', async () 
   const ns = owner.user.namespace;
   await publishProject(app, ns, 'cleanup', owner.token);
   const [version] = await db.$queryRaw`
-    SELECT blob_digest, source_path FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'cleanup'
+    SELECT "BlobDigest" AS blob_digest, "SourcePath" AS source_path FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'cleanup'
   `;
   const blobPath = blobPathFor(config.dataDir, version.blob_digest);
   const sourcePath = path.join(config.dataDir, version.source_path);
@@ -335,11 +335,11 @@ test('an account hook hears every extension under the namespace', async () => {
   // must hear rather than sleeping one fixed tick.
   const accountDeliveries = async () => {
     const rows = await db.$queryRaw`
-      SELECT d.event, d.payload
-      FROM webhook_deliveries d
-      JOIN webhooks w ON w.id = d.webhook_id
-      WHERE w.namespace = ${ns} AND w.extension_id IS NULL
-      ORDER BY d.id
+      SELECT d."Event" AS event, d."Payload" AS payload
+      FROM "WebhookDeliveries" d
+      JOIN "Webhooks" w ON w."Id" = d."WebhookId"
+      WHERE w."Namespace" = ${ns} AND w."ExtensionId" IS NULL
+      ORDER BY d."Id"
     `;
     return rows.length === 2 ? rows : null;
   };
@@ -508,10 +508,10 @@ test('deleting an account removes its webhooks and their deliveries', async () =
   const hookState = async () => {
     const [row] = await db.$queryRaw`
       SELECT
-        (SELECT count(*)::int FROM webhooks WHERE namespace = ${ns}) AS hooks,
-        (SELECT count(*)::int FROM webhook_deliveries d
-           JOIN webhooks w ON w.id = d.webhook_id
-          WHERE w.namespace = ${ns}) AS deliveries
+        (SELECT count(*)::int FROM "Webhooks" WHERE "Namespace" = ${ns}) AS hooks,
+        (SELECT count(*)::int FROM "WebhookDeliveries" d
+           JOIN "Webhooks" w ON w."Id" = d."WebhookId"
+          WHERE w."Namespace" = ${ns}) AS deliveries
     `;
     return row;
   };
@@ -543,10 +543,10 @@ test('an account hook exposes its delivery log and redelivers', async () => {
     .expect(201);
 
   const [delivery] = await db.$queryRaw`
-    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, status, attempt)
+    INSERT INTO "WebhookDeliveries" ("WebhookId", "Event", "Payload", "Body", "Signature", "Status", "Attempt")
     VALUES (${created.body.id}, 'version.published', ${{ id: 'one' }}, '{}', 'sig',
             'delivered', 1)
-    RETURNING id
+    RETURNING "Id" AS id
   `;
   // The listing answers with string ids, so the row this is compared against
   // carries one too.

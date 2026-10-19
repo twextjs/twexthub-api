@@ -226,7 +226,7 @@ test("a co-owner's approval trusts the namespace, not the co-owner", async () =>
 
   const hasPublished = async (namespace) => {
     const [row] =
-      await db.$queryRaw`SELECT has_published FROM users WHERE namespace = ${namespace}`;
+      await db.$queryRaw`SELECT "HasPublished" AS has_published FROM "Users" WHERE "Namespace" = ${namespace}`;
     return row.has_published;
   };
 

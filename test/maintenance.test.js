@@ -43,8 +43,8 @@ test('gc removes blobs no version references and keeps live ones', async () => {
   await publishAndApprove(admin.token, owner, 'keeper', '// keeper bytes');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE extension_id = 'keeper' AND blob_digest IS NOT NULL
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "ExtensionId" = 'keeper' AND "BlobDigest" IS NOT NULL
   `;
   assert.ok(row, 'published version carries a digest');
   const liveAbs = blobPathFor(config.dataDir, row.blob_digest);
@@ -85,8 +85,8 @@ test('gc keeps an aged blob that a profile image names', async () => {
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, bytes);
   await db.$executeRaw`
-    UPDATE users SET avatar_blob_digest = ${digest}, avatar_content_type = 'image/png'
-    WHERE namespace = ${ns}
+    UPDATE "Users" SET "AvatarBlobDigest" = ${digest}, "AvatarContentType" = 'image/png'
+    WHERE "Namespace" = ${ns}
   `;
   const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
   fs.utimesSync(abs, old, old);
@@ -124,7 +124,7 @@ test('removeBlobIfUnused reports whether it freed the file', async () => {
   const heldAbs = blobPathFor(config.dataDir, held);
   fs.mkdirSync(path.dirname(heldAbs), { recursive: true });
   fs.writeFileSync(heldAbs, 'bytes an avatar still points at');
-  await db.$executeRaw`UPDATE users SET avatar_blob_digest = ${held} WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE "Users" SET "AvatarBlobDigest" = ${held} WHERE "Namespace" = ${ns}`;
 
   assert.equal(await removeBlobIfUnused(db, config, held, null), false);
   assert.ok(fs.existsSync(heldAbs), 'a profile image names these bytes');
@@ -143,8 +143,8 @@ test('gc keeps a referenced blob however old the file is', async () => {
   await publishAndApprove(admin.token, owner, 'aged', '// aged bytes');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE extension_id = 'aged' AND blob_digest IS NOT NULL
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "ExtensionId" = 'aged' AND "BlobDigest" IS NOT NULL
   `;
   const abs = blobPathFor(config.dataDir, row.blob_digest);
   assert.ok(fs.existsSync(abs));
@@ -162,8 +162,8 @@ test('scrub reports missing and corrupted blobs and updates the error gauge', as
   await publishAndApprove(admin.token, owner, 'watched', '// watched bytes');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE extension_id = 'watched' AND blob_digest IS NOT NULL
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "ExtensionId" = 'watched' AND "BlobDigest" IS NOT NULL
   `;
   const abs = blobPathFor(config.dataDir, row.blob_digest);
 
@@ -205,12 +205,12 @@ async function insertStaging(namespace, publisherId, id, bytes, { keepBlob }) {
     fs.writeFileSync(abs, content);
   }
   const [row] = await db.$queryRaw`
-    INSERT INTO versions
-      (owner_id, namespace, extension_id, version, status, name, license,
-       description, blob_path, blob_digest, blob_size, created_at)
+    INSERT INTO "Versions"
+      ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name", "License",
+       "Description", "BlobPath", "BlobDigest", "BlobSize", "CreatedAt")
     VALUES (${publisherId}, ${namespace}, ${id}, '1.0.0', 'staging', ${id},
             'MIT', '', ${rel}, ${digest}, ${bytes}, now() - interval '2 hours')
-    RETURNING id, status
+    RETURNING "Id" AS id, "Status" AS status
   `;
   return { ...row, rel, abs, content, digest };
 }
@@ -220,15 +220,15 @@ test('boot reconciliation decides the status from the namespace account', async 
   const helper = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
   const [{ id: helperId }] =
-    await db.$queryRaw`SELECT id FROM users WHERE namespace = ${helper.user.namespace}`;
+    await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${helper.user.namespace}`;
   // The namespace account is past its first publish, so new work skips review.
-  await db.$executeRaw`UPDATE users SET has_published = true WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE "Users" SET "HasPublished" = true WHERE "Namespace" = ${ns}`;
 
   const staging = await insertStaging(ns, helperId, 'crashed', 0, { keepBlob: true });
   await reconcileOnBoot(db, config);
 
   const [row] =
-    await db.$queryRaw`SELECT status, published_at FROM versions WHERE id = ${staging.id}`;
+    await db.$queryRaw`SELECT "Status" AS status, "PublishedAt" AS published_at FROM "Versions" WHERE "Id" = ${staging.id}`;
   assert.equal(row.status, 'published', 'the namespace account, not the publisher, owns the gate');
   assert.ok(row.published_at, 'a promoted version gets a published_at');
 
@@ -243,15 +243,15 @@ test('boot reconciliation decides the status from the namespace account', async 
 test('boot reconciliation refunds the charge when the staging row is dropped', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
-  await db.$executeRaw`UPDATE users SET blob_bytes = 900 WHERE namespace = ${ns}`;
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
+  await db.$executeRaw`UPDATE "Users" SET "BlobBytes" = 900 WHERE "Namespace" = ${ns}`;
 
   const staging = await insertStaging(ns, ownerId, 'lost', 900, { keepBlob: false });
   await reconcileOnBoot(db, config);
 
-  const rows = await db.$queryRaw`SELECT id FROM versions WHERE id = ${staging.id}`;
+  const rows = await db.$queryRaw`SELECT "Id" AS id FROM "Versions" WHERE "Id" = ${staging.id}`;
   assert.equal(rows.length, 0, 'an unrecoverable staging row is removed');
-  const [after] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [after] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
 });
 
@@ -265,14 +265,14 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
   const [row] = await db.$queryRaw`
-    INSERT INTO versions
-      (owner_id, namespace, extension_id, version, status, name, license,
-       description, blob_path, created_at, published_at)
+    INSERT INTO "Versions"
+      ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name", "License",
+       "Description", "BlobPath", "CreatedAt", "PublishedAt")
     VALUES (${ownerId}, ${ns}, 'ancient', '1.0.0', 'published', 'ancient', 'MIT',
             '', ${legacyRel}, now() - interval '2 days', now() - interval '2 days')
-    RETURNING id
+    RETURNING "Id" AS id
   `;
 
   // A client that behaves normally except that its second transaction fails,
@@ -293,7 +293,7 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   await assert.rejects(reconcileOnBoot(failingDb, config), /migration failed before commit/);
   assert.equal(fs.readFileSync(legacyAbs, 'utf8'), content);
   const [rolledBack] = await db.$queryRaw`
-    SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}
+    SELECT "BlobDigest" AS blob_digest, "BlobPath" AS blob_path FROM "Versions" WHERE "Id" = ${row.id}
   `;
   assert.equal(rolledBack.blob_digest, null);
   assert.equal(rolledBack.blob_path, legacyRel);
@@ -301,7 +301,7 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   await reconcileOnBoot(db, config);
 
   const [after] = await db.$queryRaw`
-    SELECT blob_digest, blob_path, blob_size FROM versions WHERE id = ${row.id}
+    SELECT "BlobDigest" AS blob_digest, "BlobPath" AS blob_path, "BlobSize" AS blob_size FROM "Versions" WHERE "Id" = ${row.id}
   `;
   assert.equal(after.blob_digest, digest);
   assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
@@ -326,14 +326,14 @@ test('two instances reconciling the same legacy blob do not race each other', as
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${ns}`;
+  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
   const [row] = await db.$queryRaw`
-    INSERT INTO versions
-      (owner_id, namespace, extension_id, version, status, name, license,
-       description, blob_path, created_at, published_at)
+    INSERT INTO "Versions"
+      ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name", "License",
+       "Description", "BlobPath", "CreatedAt", "PublishedAt")
     VALUES (${ownerId}, ${ns}, 'contested', '1.0.0', 'published', 'contested', 'MIT',
             '', ${legacyRel}, now() - interval '2 days', now() - interval '2 days')
-    RETURNING id
+    RETURNING "Id" AS id
   `;
 
   // The second connection stands in for a second instance sharing the database
@@ -346,7 +346,7 @@ test('two instances reconciling the same legacy blob do not race each other', as
   }
 
   const [after] =
-    await db.$queryRaw`SELECT blob_digest, blob_path FROM versions WHERE id = ${row.id}`;
+    await db.$queryRaw`SELECT "BlobDigest" AS blob_digest, "BlobPath" AS blob_path FROM "Versions" WHERE "Id" = ${row.id}`;
   assert.equal(after.blob_digest, digest);
   assert.equal(after.blob_path, path.join('blobs', digest.slice(0, 2), digest.slice(2)));
   assert.ok(!fs.existsSync(legacyAbs), 'the legacy file is removed exactly once');
@@ -367,8 +367,8 @@ test('the startup pass collects garbage but does not scrub', async () => {
   await publishAndApprove(admin.token, owner, 'startuppass', '// startup bytes');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest FROM versions
-    WHERE extension_id = 'startuppass' AND blob_digest IS NOT NULL
+    SELECT "BlobDigest" AS blob_digest FROM "Versions"
+    WHERE "ExtensionId" = 'startuppass' AND "BlobDigest" IS NOT NULL
   `;
   const liveAbs = blobPathFor(config.dataDir, row.blob_digest);
   assert.ok(fs.existsSync(liveAbs));

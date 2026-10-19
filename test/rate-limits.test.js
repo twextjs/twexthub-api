@@ -64,13 +64,13 @@ before(async () => {
 beforeEach(async () => {
   // Shared database, so clear the rows both app instances see.
   await db.$executeRawUnsafe(`
-    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
-    users, legal_documents, download_events, extension_daily_downloads, extension_version_daily_downloads, dist_tags,
-    webhook_deliveries, webhooks
+    TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications",
+    "Users", "LegalDocuments", "DownloadEvents", "ExtensionDailyDownloads", "ExtensionVersionDailyDownloads", "DistTags",
+    "WebhookDeliveries", "Webhooks"
     RESTART IDENTITY CASCADE
   `);
   await db.$executeRaw`
-    INSERT INTO legal_documents (kind, version, body)
+    INSERT INTO "LegalDocuments" ("Kind", "Version", "Body")
     VALUES ('terms', 1, 'Placeholder terms.'), ('privacy', 1, 'Placeholder privacy.')
   `;
 });
@@ -127,14 +127,14 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
 
   // With the bucket disabled, repeated hits sail through and nothing is counted:
   // a null limit has to beat the 240-per-window default to be meaningful.
-  await db.$executeRaw`DELETE FROM rate_limit_entries WHERE bucket LIKE 'download:%'`;
+  await db.$executeRaw`DELETE FROM "RateLimitEntries" WHERE "Bucket" LIKE 'download:%'`;
   for (let i = 0; i < 3; i += 1) {
     await request(looseApp)
       .get(apiPath(`/@${ns}/hello/versions/1.0.0/download`))
       .expect(200);
   }
   const disabled = await db.$queryRaw`
-    SELECT 1 FROM rate_limit_entries WHERE bucket LIKE 'download:%'
+    SELECT 1 FROM "RateLimitEntries" WHERE "Bucket" LIKE 'download:%'
   `;
   assert.equal(disabled.length, 0, 'a null download limit records no bucket');
 });

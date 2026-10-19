@@ -72,7 +72,7 @@ const put = (ns, kind, body, type) =>
     .send(body);
 
 const avatarDigest = (ns) =>
-  db.$queryRaw`SELECT avatar_blob_digest FROM users WHERE namespace = ${ns}`;
+  db.$queryRaw`SELECT "AvatarBlobDigest" AS avatar_blob_digest FROM "Users" WHERE "Namespace" = ${ns}`;
 
 // The published URL names the exact bytes, so it carries a short version token
 // taken from the content digest. Reading it back from the row keeps a test from
@@ -82,11 +82,11 @@ const avatarDigest = (ns) =>
 const asPath = (url) => url.replace(config.publicBaseUrl, '');
 
 const versioned = async (ns, kind) => {
-  const column = kind === 'avatar' ? 'avatar_blob_digest' : 'banner_blob_digest';
+  const column = kind === 'avatar' ? 'AvatarBlobDigest' : 'BannerBlobDigest';
   // `column` is one of two literal names, so the identifier is safe to paste;
   // Prisma cannot bind an identifier as a parameter.
   const [row] = await db.$queryRawUnsafe(
-    `SELECT ${column} AS digest FROM users WHERE namespace = $1`,
+    `SELECT "${column}" AS digest FROM "Users" WHERE "Namespace" = $1`,
     ns,
   );
   assert.ok(row.digest, `expected ${ns} to have a ${kind} upload`);
@@ -119,11 +119,11 @@ describe('uploading a profile image', () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
 
-    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
-    assert.match(row.avatar_blob_digest, /^[0-9a-f]{64}$/);
-    assert.equal(row.avatar_content_type, 'image/png');
-    assert.equal(row.avatar_bytes, TINY_PNG.length);
-    assert.ok(existsSync(blobPathFor(config.dataDir, row.avatar_blob_digest)));
+    const [row] = await db.$queryRaw`SELECT * FROM "Users" WHERE "Namespace" = ${ns}`;
+    assert.match(row.AvatarBlobDigest, /^[0-9a-f]{64}$/);
+    assert.equal(row.AvatarContentType, 'image/png');
+    assert.equal(row.AvatarBytes, TINY_PNG.length);
+    assert.ok(existsSync(blobPathFor(config.dataDir, row.AvatarBlobDigest)));
   });
 
   test('stores a banner', async () => {
@@ -155,7 +155,7 @@ describe('uploading a profile image', () => {
     const res = await put(ns, 'avatar', pngBytes(), 'image/png');
 
     const [row] =
-      await db.$queryRaw`SELECT avatar_url, avatar_blob_digest FROM users WHERE namespace = ${ns}`;
+      await db.$queryRaw`SELECT "AvatarUrl" AS avatar_url, "AvatarBlobDigest" AS avatar_blob_digest FROM "Users" WHERE "Namespace" = ${ns}`;
     assert.equal(row.avatar_url, 'https://cdn.example/old.png');
     assert.ok(row.avatar_blob_digest);
     // The upload is what a visitor is shown, not the linked file.
@@ -258,8 +258,9 @@ describe('stored size', () => {
   // What ended up on disk, rather than what was sent: the point of these is the
   // stored copy, and reading it back is the only way to see what was kept.
   const storedMeta = async (ns, kind) => {
-    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
-    const bytes = await readFile(blobPathFor(config.dataDir, row[`${kind}_blob_digest`]));
+    const [row] = await db.$queryRaw`SELECT * FROM "Users" WHERE "Namespace" = ${ns}`;
+    const column = kind === 'avatar' ? 'AvatarBlobDigest' : 'BannerBlobDigest';
+    const bytes = await readFile(blobPathFor(config.dataDir, row[column]));
     return { ...(await sharp(bytes).metadata()), bytes: bytes.length };
   };
 
@@ -338,11 +339,11 @@ describe('stored size', () => {
       const res = await put(ns, 'avatar', await solidPng(4000, 4000), 'image/png');
       assert.equal(res.status, 200);
     });
-    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT * FROM "Users" WHERE "Namespace" = ${ns}`;
     // The re-encode is a new file, so the type and the byte count have to
     // describe that one rather than what the client sent.
-    assert.equal(row.avatar_content_type, 'image/png');
-    assert.equal(row.avatar_bytes, (await storedMeta(ns, 'avatar')).bytes);
+    assert.equal(row.AvatarContentType, 'image/png');
+    assert.equal(row.AvatarBytes, (await storedMeta(ns, 'avatar')).bytes);
   });
 
   test('refuses a signed file that no decoder can read', async () => {
@@ -369,7 +370,7 @@ describe('upload authorization', () => {
     // to be created first for this to be testing the admin path.
     const adminRes = await signupAndAccept(app, uniqNs());
     const [adminRow] =
-      await db.$queryRaw`SELECT role FROM users WHERE namespace = ${adminRes.user.namespace}`;
+      await db.$queryRaw`SELECT "Role" AS role FROM "Users" WHERE "Namespace" = ${adminRes.user.namespace}`;
     assert.equal(adminRow.role, 'admin');
 
     const owner = await account();
@@ -551,14 +552,14 @@ describe('removing a profile image', () => {
   // something the upload path can be relied on to produce and is set directly.
   const pointBannerAtAvatar = async (ns) => {
     const [row] = await db.$queryRaw`
-      SELECT avatar_blob_digest AS digest, avatar_bytes AS bytes
-      FROM users WHERE namespace = ${ns}
+      SELECT "AvatarBlobDigest" AS digest, "AvatarBytes" AS bytes
+      FROM "Users" WHERE "Namespace" = ${ns}
     `;
     await db.$executeRaw`
-      UPDATE users
-      SET banner_blob_digest = ${row.digest}, banner_content_type = 'image/png',
-          banner_bytes = ${row.bytes}
-      WHERE namespace = ${ns}
+      UPDATE "Users"
+      SET "BannerBlobDigest" = ${row.digest}, "BannerContentType" = 'image/png',
+          "BannerBytes" = ${row.bytes}
+      WHERE "Namespace" = ${ns}
     `;
   };
 
@@ -710,7 +711,7 @@ describe('blob collection', () => {
   test('keeps a banner a users row still points at', async () => {
     const ns = await account();
     await put(ns, 'banner', gifBytes(), 'image/gif');
-    const [row] = await db.$queryRaw`SELECT banner_blob_digest FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT "BannerBlobDigest" AS banner_blob_digest FROM "Users" WHERE "Namespace" = ${ns}`;
     const stored = blobPathFor(config.dataDir, row.banner_blob_digest);
     await age([stored]);
 

@@ -22,15 +22,15 @@ after(async () => {
 });
 
 async function seedNotification(namespace, kind, message, payload = {}, readAt = null) {
-  const [user] = await db.$queryRaw`SELECT id FROM users WHERE namespace = ${namespace}`;
+  const [user] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${namespace}`;
   const [row] = await db.$queryRaw`
-    INSERT INTO notifications (user_id, kind, message, payload, read_at)
+    INSERT INTO "Notifications" ("UserId", "Kind", "Message", "Payload", "ReadAt")
     VALUES (${user.id}, ${kind}, ${message}, ${payload}::jsonb, ${readAt})
     RETURNING *
   `;
   // The API hands ids back as strings and these ids go into request bodies, so
   // the row carries the same shape here.
-  return { ...row, id: String(row.id) };
+  return { ...row, id: String(row.Id) };
 }
 
 test('notifications list requires auth', async () => {
@@ -304,8 +304,8 @@ test('the 200-row prune keeps the newest per-user rows', async () => {
   assert.ok(r.body._links.next);
 
   const [count] = await db.$queryRaw`
-    SELECT COUNT(*) AS count FROM notifications
-    WHERE user_id = (SELECT id FROM users WHERE namespace = ${user.namespace})
+    SELECT COUNT(*) AS count FROM "Notifications"
+    WHERE "UserId" = (SELECT "Id" FROM "Users" WHERE "Namespace" = ${user.namespace})
   `;
   assert.equal(Number(count.count), 200);
   assert.equal(r.body.data[0].message, 'note 209');
@@ -344,8 +344,8 @@ test('one notification is patched on its own resource', async () => {
 
   // Another account's notification is a 404, so this does not confirm it exists.
   const [theirs] = await db.$queryRaw`
-    SELECT id FROM notifications
-    WHERE user_id = (SELECT id FROM users WHERE namespace = ${other.user.namespace})
+    SELECT "Id" AS id FROM "Notifications"
+    WHERE "UserId" = (SELECT "Id" FROM "Users" WHERE "Namespace" = ${other.user.namespace})
   `;
   await request(app)
     .patch(apiPath(`/notifications/${theirs.id}`))
@@ -358,7 +358,7 @@ test('one notification is patched on its own resource', async () => {
 // ---- emit points
 
 async function promoteToAdmin(namespace) {
-  await db.$executeRaw`UPDATE users SET role = 'admin' WHERE namespace = ${namespace}`;
+  await db.$executeRaw`UPDATE "Users" SET "Role" = 'admin' WHERE "Namespace" = ${namespace}`;
 }
 
 async function publishPending(app, { token, namespace, id, version }) {
@@ -436,7 +436,7 @@ test('rejecting a pending version notifies the owner with the reason', async () 
 
 test('publishes that skip review do not notify', async () => {
   const owner = await signupAndAccept(app, uniqNs());
-  await db.$executeRaw`UPDATE users SET has_published = true WHERE namespace = ${owner.user.namespace}`;
+  await db.$executeRaw`UPDATE "Users" SET "HasPublished" = true WHERE "Namespace" = ${owner.user.namespace}`;
 
   const published = await publishPending(app, {
     token: owner.token,
@@ -485,8 +485,8 @@ test('the first terms document is not a bump', async () => {
   await promoteToAdmin(admin.user.namespace);
 
   // Roll the registry back to the pre-terms bootstrap state.
-  await db.$executeRaw`DELETE FROM legal_documents`;
-  await db.$executeRaw`UPDATE users SET terms_accepted_version = NULL`;
+  await db.$executeRaw`DELETE FROM "LegalDocuments"`;
+  await db.$executeRaw`UPDATE "Users" SET "TermsAcceptedVersion" = NULL`;
 
   const created = await request(app)
     .patch(apiPath('/admin/terms'))
@@ -511,9 +511,9 @@ test('an admin password reset notifies the target, self-service does not', async
     .expect(200);
 
   const rows = await db.$queryRaw`
-    SELECT kind, message FROM notifications
-    WHERE user_id = (SELECT id FROM users WHERE namespace = ${target.user.namespace})
-    ORDER BY id DESC
+    SELECT "Kind" AS kind, "Message" AS message FROM "Notifications"
+    WHERE "UserId" = (SELECT "Id" FROM "Users" WHERE "Namespace" = ${target.user.namespace})
+    ORDER BY "Id" DESC
   `;
   assert.equal(rows.length, 1);
   assert.equal(rows[0].kind, 'tokens.revoked');
@@ -530,8 +530,8 @@ test('an admin password reset notifies the target, self-service does not', async
     .expect(200);
 
   const after = await db.$queryRaw`
-    SELECT COUNT(*) AS count FROM notifications
-    WHERE user_id = (SELECT id FROM users WHERE namespace = ${target.user.namespace})
+    SELECT COUNT(*) AS count FROM "Notifications"
+    WHERE "UserId" = (SELECT "Id" FROM "Users" WHERE "Namespace" = ${target.user.namespace})
   `;
   assert.equal(Number(after[0].count), 1);
 });
