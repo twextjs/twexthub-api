@@ -33,7 +33,7 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
   // is descending except for name, which reads naturally A→Z.
   const SORT_COLUMNS = {
     downloads: 'downloads',
-    name: 'name',
+    name: 'Name',
   };
   // recent and updated are keyed on whole microseconds of the timestamp, not
   // the timestamp itself. A Date keeps only milliseconds, so a key built from
@@ -43,8 +43,8 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
   // becomes an expression that cannot be index-seeked, while the ordering
   // below stays on the timestamptz.
   const TIMESTAMP_SORT_KEYS = {
-    recent: Prisma.sql`((extract(epoch from s.published_at) * 1000000)::bigint)`,
-    updated: Prisma.sql`((extract(epoch from s.updated_at) * 1000000)::bigint)`,
+    recent: Prisma.sql`((extract(epoch from s."PublishedAt") * 1000000)::bigint)`,
+    updated: Prisma.sql`((extract(epoch from s."UpdatedAt") * 1000000)::bigint)`,
   };
   const SORT_TYPES = {
     recent: 'int8',
@@ -68,7 +68,7 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const col =
       sort === 'downloads'
         ? Prisma.sql`COALESCE(d.total, 0)::bigint`
-        : (TIMESTAMP_SORT_KEYS[sort] ?? Prisma.raw('s.' + SORT_COLUMNS[sort]));
+        : (TIMESTAMP_SORT_KEYS[sort] ?? Prisma.raw('s."' + SORT_COLUMNS[sort] + '"'));
     const key = Prisma.sql`${cursor.k}::${Prisma.raw(SORT_TYPES[sort])}`;
     // The name sort reads A→Z and everything else reads newest-first, so which
     // side of the cursor the next rows fall on depends on the sort. The
@@ -80,22 +80,22 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     return Prisma.sql`
       AND (${after}
         OR (${col} = ${key}
-          AND (s.namespace, s.extension_id) ${tie} (${cursor.ns}, ${cursor.id})))
+          AND (s."Namespace", s."ExtensionId") ${tie} (${cursor.ns}, ${cursor.id})))
     `;
   }
 
   const SORT_ORDER = {
-    recent: Prisma.sql`s.published_at DESC, s.namespace ASC, s.extension_id ASC`,
-    updated: Prisma.sql`s.updated_at DESC, s.namespace ASC, s.extension_id ASC`,
-    downloads: Prisma.sql`downloads DESC, s.namespace ASC, s.extension_id ASC`,
-    name: Prisma.sql`s.name ASC, s.namespace ASC, s.extension_id ASC`,
+    recent: Prisma.sql`s."PublishedAt" DESC, s."Namespace" ASC, s."ExtensionId" ASC`,
+    updated: Prisma.sql`s."UpdatedAt" DESC, s."Namespace" ASC, s."ExtensionId" ASC`,
+    downloads: Prisma.sql`downloads DESC, s."Namespace" ASC, s."ExtensionId" ASC`,
+    name: Prisma.sql`s."Name" ASC, s."Namespace" ASC, s."ExtensionId" ASC`,
   };
 
   const SORT_ORDER_BACK = {
-    recent: Prisma.sql`s.published_at ASC, s.namespace DESC, s.extension_id DESC`,
-    updated: Prisma.sql`s.updated_at ASC, s.namespace DESC, s.extension_id DESC`,
-    downloads: Prisma.sql`downloads ASC, s.namespace DESC, s.extension_id DESC`,
-    name: Prisma.sql`s.name DESC, s.namespace DESC, s.extension_id DESC`,
+    recent: Prisma.sql`s."PublishedAt" ASC, s."Namespace" DESC, s."ExtensionId" DESC`,
+    updated: Prisma.sql`s."UpdatedAt" ASC, s."Namespace" DESC, s."ExtensionId" DESC`,
+    downloads: Prisma.sql`downloads ASC, s."Namespace" DESC, s."ExtensionId" DESC`,
+    name: Prisma.sql`s."Name" DESC, s."Namespace" DESC, s."ExtensionId" DESC`,
   };
 
   // A window ranking (latest version per extension), a joined rollup, and a
@@ -118,24 +118,24 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
       FROM (
         SELECT v.*,
           row_number() OVER (
-            PARTITION BY namespace, extension_id
+            PARTITION BY "Namespace", "ExtensionId"
             ORDER BY
-              CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
-              v.published_at DESC, v.id DESC
+              CASE WHEN v."Status" = 'published' THEN 0 ELSE 1 END,
+              v."PublishedAt" DESC, v."Id" DESC
           ) AS rn,
           -- updated_at: publication time of the newest accepted version
-          MAX(v.published_at) OVER (PARTITION BY namespace, extension_id) AS updated_at
-        FROM versions v
-        WHERE v.status IN ('published', 'deprecated')
+          MAX(v."PublishedAt") OVER (PARTITION BY "Namespace", "ExtensionId") AS "UpdatedAt"
+        FROM "Versions" v
+        WHERE v."Status" IN ('published', 'deprecated')
       ) s
       LEFT JOIN (
-        SELECT namespace, extension_id, SUM(total_downloads) AS total
-        FROM extension_daily_downloads
-        GROUP BY namespace, extension_id
-      ) d ON d.namespace = s.namespace AND d.extension_id = s.extension_id
+        SELECT "Namespace", "ExtensionId", SUM("TotalDownloads") AS total
+        FROM "ExtensionDailyDownloads"
+        GROUP BY "Namespace", "ExtensionId"
+      ) d ON d."Namespace" = s."Namespace" AND d."ExtensionId" = s."ExtensionId"
       WHERE rn = 1
-        ${namespace ? Prisma.sql`AND s.namespace = ${namespace}` : Prisma.empty}
-        ${license ? Prisma.sql`AND s.license = ${license}` : Prisma.empty}
+        ${namespace ? Prisma.sql`AND s."Namespace" = ${namespace}` : Prisma.empty}
+        ${license ? Prisma.sql`AND s."License" = ${license}` : Prisma.empty}
         ${searchFilter}
         ${cursorCondition(cursor, sort, back)}
       ORDER BY ${back ? SORT_ORDER_BACK[sort] : SORT_ORDER[sort]}
@@ -149,12 +149,12 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
         sort === 'downloads'
           ? String(Number(row.downloads ?? 0))
           : sort === 'name'
-            ? row.name
+            ? row.Name
             : sort === 'recent'
               ? row.published_key
               : row.updated_key,
-      ns: row.namespace,
-      id: row.extension_id,
+      ns: row.Namespace,
+      id: row.ExtensionId,
     });
 
     return keysetPage(req, rows, {
@@ -238,14 +238,14 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
       SELECT * FROM (
         SELECT v.*,
           row_number() OVER (
-            PARTITION BY v.namespace, v.extension_id
-            ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
-                     v.published_at DESC, v.id DESC
+            PARTITION BY v."Namespace", v."ExtensionId"
+            ORDER BY CASE WHEN v."Status" = 'published' THEN 0 ELSE 1 END,
+                     v."PublishedAt" DESC, v."Id" DESC
           ) AS rn
-        FROM versions v
+        FROM "Versions" v
         JOIN unnest(${namespaces}::text[], ${ids}::text[]) AS trending(namespace, extension_id)
-          ON trending.namespace = v.namespace AND trending.extension_id = v.extension_id
-        WHERE v.status IN ('published', 'deprecated')
+          ON trending.namespace = v."Namespace" AND trending.extension_id = v."ExtensionId"
+        WHERE v."Status" IN ('published', 'deprecated')
       ) s
       WHERE rn = 1
     `;
@@ -253,7 +253,7 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const page = rows
       .map((row) => {
         const summary = extensionSummaryFromRow(row);
-        summary.downloads = byKey.get(`${row.namespace}/${row.extension_id}`)?.downloads ?? 0;
+        summary.downloads = byKey.get(`${row.Namespace}/${row.ExtensionId}`)?.downloads ?? 0;
         return summary;
       })
       .sort((a, b) => Number(b.downloads) - Number(a.downloads));
@@ -278,7 +278,7 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
       id: 'string',
     });
     const searchFilter = folded
-      ? Prisma.sql`AND search_text LIKE ${'%' + escapeLike(folded) + '%'}`
+      ? Prisma.sql`AND "SearchText" LIKE ${'%' + escapeLike(folded) + '%'}`
       : Prisma.empty;
     res.json(
       await listLatestVersions({
@@ -304,10 +304,10 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
   router.get('/stats', async (req, res) => {
     // Distinct composite counts and a rollup sum: kept raw.
     const [published, pending, authors, downloads] = await Promise.all([
-      db.$queryRaw`SELECT COUNT(DISTINCT (namespace, extension_id)) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
-      db.$queryRaw`SELECT COUNT(*) AS count FROM versions WHERE status = 'pending'`,
-      db.$queryRaw`SELECT COUNT(DISTINCT owner_id) AS count FROM versions WHERE status IN ('published', 'deprecated')`,
-      db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS count FROM extension_daily_downloads`,
+      db.$queryRaw`SELECT COUNT(DISTINCT ("Namespace", "ExtensionId")) AS count FROM "Versions" WHERE "Status" IN ('published', 'deprecated')`,
+      db.$queryRaw`SELECT COUNT(*) AS count FROM "Versions" WHERE "Status" = 'pending'`,
+      db.$queryRaw`SELECT COUNT(DISTINCT "OwnerId") AS count FROM "Versions" WHERE "Status" IN ('published', 'deprecated')`,
+      db.$queryRaw`SELECT COALESCE(SUM("TotalDownloads"), 0)::bigint AS count FROM "ExtensionDailyDownloads"`,
     ]);
     res.json({
       published: Number(published[0].count),
@@ -563,13 +563,13 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const rows = await db.$queryRaw`
       SELECT * FROM (
         SELECT v.*, row_number() OVER (
-          PARTITION BY namespace, extension_id
-          ORDER BY CASE WHEN status = 'published' THEN 0 ELSE 1 END,
-                   published_at DESC, id DESC
+          PARTITION BY v."Namespace", v."ExtensionId"
+          ORDER BY CASE WHEN v."Status" = 'published' THEN 0 ELSE 1 END,
+                   v."PublishedAt" DESC, v."Id" DESC
         ) AS rn
-        FROM versions v
-        WHERE namespace = ${namespace} AND extension_id = ${id}
-          AND status IN ('published', 'deprecated')
+        FROM "Versions" v
+        WHERE v."Namespace" = ${namespace} AND v."ExtensionId" = ${id}
+          AND v."Status" IN ('published', 'deprecated')
       ) s
       WHERE rn = 1
     `;
@@ -617,9 +617,9 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const row = await latestBadgeRow(namespace, id);
     let message;
     if (field === 'version') {
-      message = `v${row.version}`;
+      message = `v${row.Version}`;
     } else if (field === 'license') {
-      message = row.license;
+      message = row.License;
     } else {
       message = String(Number((await totalDownloads(db, namespace, id)) ?? 0));
     }
@@ -638,11 +638,11 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await latestBadgeRow(namespace, id);
     const downloads = Number((await totalDownloads(db, namespace, id)) ?? 0);
-    const versionText = `v${row.version}`;
+    const versionText = `v${row.Version}`;
     const downloadsText = downloads === 1 ? '1 download' : `${downloads} downloads`;
     sendBadge(res, {
       label: requestedLabel(req, id),
-      message: `${versionText} | ${downloadsText} | ${row.license}`,
+      message: `${versionText} | ${downloadsText} | ${row.License}`,
       namespace,
       id,
       ariaLabel: `${requestedLabel(req, id)}: ${versionText}`,
@@ -653,15 +653,15 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const rows = await db.$queryRaw`
       SELECT * FROM (
         SELECT v.*, row_number() OVER (
-          PARTITION BY namespace, extension_id
-          ORDER BY CASE WHEN status = 'published' THEN 0 ELSE 1 END,
-                   published_at DESC, id DESC
+          PARTITION BY v."Namespace", v."ExtensionId"
+          ORDER BY CASE WHEN v."Status" = 'published' THEN 0 ELSE 1 END,
+                   v."PublishedAt" DESC, v."Id" DESC
         ) AS rn
-        FROM versions v
-        WHERE status IN ('published', 'deprecated') AND published_at IS NOT NULL
+        FROM "Versions" v
+        WHERE v."Status" IN ('published', 'deprecated') AND v."PublishedAt" IS NOT NULL
       ) s
       WHERE rn = 1
-      ORDER BY published_at DESC
+      ORDER BY "PublishedAt" DESC
       LIMIT 50
     `;
     const base = config.publicBaseUrl.replace(/\/$/, '');
@@ -670,17 +670,17 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
     const entries = rows
       .map(
         (row) => `  <entry>
-    <id>tag:twexthub,${row.published_at.toISOString().slice(0, 10)}:${xmlEscape(
-      `@${row.namespace}/${row.extension_id}-${row.version}`,
+    <id>tag:twexthub,${row.PublishedAt.toISOString().slice(0, 10)}:${xmlEscape(
+      `@${row.Namespace}/${row.ExtensionId}-${row.Version}`,
     )}</id>
-    <title>${xmlEscape(`${row.name} v${row.version}`)}</title>
+    <title>${xmlEscape(`${row.Name} v${row.Version}`)}</title>
     <link rel="alternate" href="${xmlEscape(
-      `${base}${root}/@${row.namespace}/${row.extension_id}`,
+      `${base}${root}/@${row.Namespace}/${row.ExtensionId}`,
     )}"/>
-    <published>${row.published_at.toISOString()}</published>
-    <updated>${row.published_at.toISOString()}</updated>
-    <author><name>${xmlEscape(row.author || row.namespace)}</name></author>
-    <summary>${xmlEscape(row.description)}</summary>
+    <published>${row.PublishedAt.toISOString()}</published>
+    <updated>${row.PublishedAt.toISOString()}</updated>
+    <author><name>${xmlEscape(row.Author || row.Namespace)}</name></author>
+    <summary>${xmlEscape(row.Description)}</summary>
   </entry>`,
       )
       .join('\n');
@@ -689,7 +689,7 @@ export function makeDiscoveryRouter({ db, config, termsGate }) {
   <title>${xmlEscape(product.name)} — new releases</title>
   <id>${xmlEscape(`${base}${root}/feed.atom`)}</id>
   <link rel="self" href="${xmlEscape(`${base}${root}/feed.atom`)}"/>
-  <updated>${rows[0]?.published_at?.toISOString() ?? new Date().toISOString()}</updated>
+  <updated>${rows[0]?.PublishedAt?.toISOString() ?? new Date().toISOString()}</updated>
 ${entries}
 </feed>
 `;
@@ -697,13 +697,13 @@ ${entries}
   });
 
   router.get('/terms', async (req, res) => {
-    const row = await db.legal_documents.findUnique({ where: { kind: 'terms' } });
+    const row = await db.LegalDocuments.findUnique({ where: { Kind: 'terms' } });
     if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
 
   router.get('/privacy', async (req, res) => {
-    const row = await db.legal_documents.findUnique({ where: { kind: 'privacy' } });
+    const row = await db.LegalDocuments.findUnique({ where: { Kind: 'privacy' } });
     if (!row) throw notFound();
     res.json(legalDocumentToObject(row));
   });
@@ -727,18 +727,18 @@ ${entries}
     // the range itself is an expression and so cannot be index-seeked; the
     // ordering stays on the timestamptz, and the pending set is small enough
     // that the filter is not worth an approximate boundary.
-    const key = Prisma.sql`((extract(epoch from created_at) * 1000000)::bigint)`;
+    const key = Prisma.sql`((extract(epoch from "CreatedAt") * 1000000)::bigint)`;
     const rows = await db.$queryRaw`
       SELECT *, (${key})::text AS created_key
-      FROM versions
-      WHERE status = 'pending'
+      FROM "Versions"
+      WHERE "Status" = 'pending'
         ${
           cursor
             ? Prisma.sql`AND (${key} ${ahead} ${cursor.c}::bigint
-              OR (${key} = ${cursor.c}::bigint AND id ${ahead} ${cursor.i}))`
+              OR (${key} = ${cursor.c}::bigint AND "Id" ${ahead} ${cursor.i}))`
             : Prisma.empty
         }
-      ORDER BY created_at ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}, id ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}
+      ORDER BY "CreatedAt" ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}, "Id" ${back ? Prisma.sql`DESC` : Prisma.sql`ASC`}
       LIMIT ${limit + 1}
     `;
 
@@ -748,7 +748,7 @@ ${entries}
         back,
         cursor,
         serialize: (row) => pendingVersionToObject(row, config),
-        keyOf: (row) => ({ c: row.created_key, i: Number(row.id) }),
+        keyOf: (row) => ({ c: row.created_key, i: Number(row.Id) }),
       }),
     );
   });
