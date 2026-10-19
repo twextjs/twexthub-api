@@ -35,7 +35,7 @@ model AutomationTokens {
   LastUsedAt DateTime? @db.Timestamptz(6)
   Users      Users     @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
 
-  @@index([UserId])
+  @@index([UserId], map: "automation_tokens_user_id_idx")
 }
 
 model DistTags {

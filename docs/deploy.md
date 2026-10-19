@@ -39,6 +39,8 @@ The first user account to sign up is automatically promoted to an administrator.
 
 Releases before 2.2 applied their own numbered SQL files and recorded them in `schema_migrations`. The instance now runs Prisma Migrate instead, and adopts such a database rather than rebuilding it. This release also renames every table and column the application owns from snake_case to PascalCase, so a tool that reads the database directly must be updated to the new names.
 
+Stop every previous-release instance before starting the first new-release instance, which applies the rename on boot. Rolling or blue/green deployments with both releases active against the same database are unsafe: after the rename, previous-release instances cannot use the renamed tables and columns.
+
 The rules, all enforced at boot inside one transaction that holds an advisory lock:
 
 - If the database has no migration history at all, the baseline is applied: a fresh install needs nothing from you.
