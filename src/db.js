@@ -184,10 +184,25 @@ export async function runMigrations(db, config = loadConfig()) {
   // them with a duplicate key error on `pg_type` rather than creating nothing.
   await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(${MIGRATE_LOCK_KEY}::bigint)::text`;
+    // `schema_migrations` was the snake_case name this table carried before
+    // #43; a database being adopted has it, so it is folded into the PascalCase
+    // name once, under the lock, before anything reads it.
     await tx.$executeRawUnsafe(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        version TEXT PRIMARY KEY,
-        applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      DO $$
+      BEGIN
+        IF to_regclass('public.schema_migrations') IS NOT NULL
+           AND to_regclass('public."SchemaMigrations"') IS NULL THEN
+          ALTER TABLE "public"."schema_migrations" RENAME TO "SchemaMigrations";
+          ALTER TABLE "public"."SchemaMigrations" RENAME COLUMN "version" TO "Version";
+          ALTER TABLE "public"."SchemaMigrations" RENAME COLUMN "applied_at" TO "AppliedAt";
+        END IF;
+      END
+      $$
+    `);
+    await tx.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS "SchemaMigrations" (
+        "Version" TEXT PRIMARY KEY,
+        "AppliedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
       )
     `);
     await tx.$executeRawUnsafe(`
@@ -209,8 +224,8 @@ export async function runMigrations(db, config = loadConfig()) {
       // `::text` because the lock function returns void, which the client
       // cannot deserialize.
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(${MIGRATE_LOCK_KEY}::bigint)::text`;
-      const legacyRows = await tx.$queryRaw`SELECT version FROM schema_migrations`;
-      const legacySet = new Set(normalizeRows(legacyRows).map((r) => r.version));
+      const legacyRows = await tx.$queryRaw`SELECT "Version" FROM "SchemaMigrations"`;
+      const legacySet = new Set(normalizeRows(legacyRows).map((r) => r.Version));
       const prismaRows = await tx.$queryRaw`SELECT migration_name FROM _prisma_migrations`;
       const prismaSet = new Set(normalizeRows(prismaRows).map((r) => r.migration_name));
 
@@ -239,45 +254,45 @@ export async function reconcileOnBoot(db, config) {
   const stagingCutoff = new Date(Date.now() - 3600_000);
   await db.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(${RECONCILE_LOCK_KEY}::bigint)::text`;
-    const staging = await tx.versions.findMany({
-      where: { status: 'staging', created_at: { lt: stagingCutoff } },
+    const staging = await tx.Versions.findMany({
+      where: { Status: 'staging', CreatedAt: { lt: stagingCutoff } },
     });
     for (const row of staging) {
-      const blobAbs = path.join(dataDir, row.blob_path);
-      const sourceAbs = row.source_path ? path.join(dataDir, row.source_path) : null;
+      const blobAbs = path.join(dataDir, row.BlobPath);
+      const sourceAbs = row.SourcePath ? path.join(dataDir, row.SourcePath) : null;
       const complete = existsSync(blobAbs) && (!sourceAbs || existsSync(sourceAbs));
       if (complete) {
         // The namespace account decides the status, same as the live publish
         // path: a delegated publisher's own history says nothing about whether
         // this namespace still goes through review.
-        const account = await tx.users.findUnique({
-          where: { namespace: row.namespace },
-          select: { has_published: true },
+        const account = await tx.Users.findUnique({
+          where: { Namespace: row.Namespace },
+          select: { HasPublished: true },
         });
-        const status = account?.has_published ? 'published' : 'pending';
-        await tx.versions.update({
-          where: { id: row.id },
+        const status = account?.HasPublished ? 'published' : 'pending';
+        await tx.Versions.update({
+          where: { Id: row.Id },
           data: {
-            status,
-            published_at: status === 'published' ? new Date() : null,
+            Status: status,
+            PublishedAt: status === 'published' ? new Date() : null,
           },
         });
         console.log(
-          `reconciled staging version ${row.namespace}/${row.extension_id}@${row.version} -> ${status}`,
+          `reconciled staging version ${row.Namespace}/${row.ExtensionId}@${row.Version} -> ${status}`,
         );
       } else {
         // The charge committed with the staging row, so dropping the row has to
         // give the bytes back the delete path would refund.
-        const charge = Number(row.blob_size ?? 0) + Number(row.source_size ?? 0);
+        const charge = Number(row.BlobSize ?? 0) + Number(row.SourceSize ?? 0);
         if (charge > 0) {
           await tx.$executeRaw`
-            UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charge}, 0)
-            WHERE namespace = ${row.namespace}
+            UPDATE "Users" SET "BlobBytes" = GREATEST("BlobBytes" - ${charge}, 0)
+            WHERE "Namespace" = ${row.Namespace}
           `;
         }
-        await tx.versions.delete({ where: { id: row.id } });
+        await tx.Versions.delete({ where: { Id: row.Id } });
         console.log(
-          `removed staging version ${row.namespace}/${row.extension_id}@${row.version} (blob or source missing)`,
+          `removed staging version ${row.Namespace}/${row.ExtensionId}@${row.Version} (blob or source missing)`,
         );
       }
     }
@@ -315,11 +330,11 @@ export async function reconcileOnBoot(db, config) {
     config.rateLimits.signupWindowMinutes,
   );
   const rateCutoff = new Date(Date.now() - maxWindow * 60_000);
-  await db.rate_limit_entries.deleteMany({ where: { window_start: { lt: rateCutoff } } });
+  await db.RateLimitEntries.deleteMany({ where: { WindowStart: { lt: rateCutoff } } });
 
   const now = new Date();
-  await db.sessions.deleteMany({ where: { expires_at: { lt: now } } });
-  await db.oidc_flows.deleteMany({ where: { expires_at: { lt: now } } });
+  await db.Sessions.deleteMany({ where: { ExpiresAt: { lt: now } } });
+  await db.OidcFlows.deleteMany({ where: { ExpiresAt: { lt: now } } });
 
   // Pre-digest rows (published before the blob_digest migration) point at
   // legacy namespace/blob paths. Re-key them to content-addressed digests so
@@ -331,17 +346,17 @@ export async function reconcileOnBoot(db, config) {
   // digests, and those rows no longer match.
   const legacyPaths = await withLocks(db, [BLOB_GC_LOCK_KEY], async (tx) => {
     const paths = [];
-    const legacy = await tx.versions.findMany({
-      where: { blob_digest: null, status: { in: ['published', 'yanked', 'deprecated'] } },
+    const legacy = await tx.Versions.findMany({
+      where: { BlobDigest: null, Status: { in: ['published', 'yanked', 'deprecated'] } },
     });
     for (const row of legacy) {
-      const legacyPath = path.join(dataDir, row.blob_path);
+      const legacyPath = path.join(dataDir, row.BlobPath);
       let digest;
       try {
         digest = await hashFile(legacyPath);
       } catch {
         console.warn(
-          `indexing skipped for ${row.namespace}/${row.extension_id}@${row.version}: missing blob`,
+          `indexing skipped for ${row.Namespace}/${row.ExtensionId}@${row.Version}: missing blob`,
         );
         continue;
       }
@@ -351,13 +366,13 @@ export async function reconcileOnBoot(db, config) {
       // nothing else in the data directory creates it.
       mkdirSync(path.dirname(digestAbs), { recursive: true });
       await copyFile(legacyPath, digestAbs);
-      await tx.versions.update({
-        where: { id: row.id },
+      await tx.Versions.update({
+        where: { Id: row.Id },
         data: {
-          blob_digest: digest,
-          blob_size: codeBuffer.length,
-          blob_sha512: sha512Base64(codeBuffer),
-          blob_path: path.join('blobs', digest.slice(0, 2), digest.slice(2)),
+          BlobDigest: digest,
+          BlobSize: codeBuffer.length,
+          BlobSha512: sha512Base64(codeBuffer),
+          BlobPath: path.join('blobs', digest.slice(0, 2), digest.slice(2)),
         },
       });
       if (legacyPath !== digestAbs) {
