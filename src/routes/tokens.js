@@ -39,12 +39,12 @@ export function makeTokensRouter({ db, config }) {
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
 
-    const rows = await db.automation_tokens.findMany({
+    const rows = await db.AutomationTokens.findMany({
       where: {
-        user_id: user.id,
-        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+        UserId: user.Id,
+        ...(cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {}),
       },
-      orderBy: { id: back ? 'asc' : 'desc' },
+      orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
 
@@ -54,7 +54,7 @@ export function makeTokensRouter({ db, config }) {
         back,
         cursor,
         serialize: automationTokenToObject,
-        keyOf: (row) => ({ i: Number(row.id) }),
+        keyOf: (row) => ({ i: Number(row.Id) }),
       }),
     );
   });
@@ -90,13 +90,13 @@ export function makeTokensRouter({ db, config }) {
     const expiresAt =
       expiresInDays !== undefined ? new Date(Date.now() + expiresInDays * 86_400_000) : null;
 
-    const row = await db.automation_tokens.create({
+    const row = await db.AutomationTokens.create({
       data: {
-        user_id: req.auth.user.id,
-        name,
-        token_hash: hashToken(token),
-        scopes: cleanScopes,
-        expires_at: expiresAt,
+        UserId: req.auth.user.Id,
+        Name: name,
+        TokenHash: hashToken(token),
+        Scopes: cleanScopes,
+        ExpiresAt: expiresAt,
       },
     });
 
@@ -113,10 +113,10 @@ export function makeTokensRouter({ db, config }) {
     const targetId = Number(req.params.id);
     const row =
       Number.isSafeInteger(targetId) && targetId > 0
-        ? await db.automation_tokens.findUnique({ where: { id: targetId } })
+        ? await db.AutomationTokens.findUnique({ where: { Id: targetId } })
         : null;
     if (!row) throw notFound();
-    if (Number(row.user_id) !== Number(req.auth.user.id) && req.auth.user.role !== 'admin') {
+    if (Number(row.UserId) !== Number(req.auth.user.Id) && req.auth.user.Role !== 'admin') {
       throw forbidden("Only an admin can modify another account's tokens.");
     }
 
@@ -129,10 +129,10 @@ export function makeTokensRouter({ db, config }) {
       ]);
     }
     const patch = {};
-    if (name !== undefined) patch.name = name;
-    if (scopes !== undefined) patch.scopes = validateScopes(scopes, req.auth.scopes);
+    if (name !== undefined) patch.Name = name;
+    if (scopes !== undefined) patch.Scopes = validateScopes(scopes, req.auth.scopes);
 
-    const updated = await db.automation_tokens.update({ where: { id: targetId }, data: patch });
+    const updated = await db.AutomationTokens.update({ where: { Id: targetId }, data: patch });
 
     res.json(automationTokenToObject(updated));
   });
@@ -145,7 +145,7 @@ export function makeTokensRouter({ db, config }) {
     if (req.auth.tokenType !== 'automation') {
       throw forbidden('This is a session; use DELETE /sessions/current to end it.');
     }
-    await db.automation_tokens.deleteMany({ where: { id: req.auth.tokenId } });
+    await db.AutomationTokens.deleteMany({ where: { Id: req.auth.tokenId } });
     res.status(204).end();
   });
 
@@ -153,13 +153,13 @@ export function makeTokensRouter({ db, config }) {
     const targetId = Number(req.params.id);
     const row =
       Number.isSafeInteger(targetId) && targetId > 0
-        ? await db.automation_tokens.findUnique({ where: { id: targetId } })
+        ? await db.AutomationTokens.findUnique({ where: { Id: targetId } })
         : null;
     if (!row) throw notFound();
-    if (Number(row.user_id) !== Number(req.auth.user.id) && req.auth.user.role !== 'admin') {
+    if (Number(row.UserId) !== Number(req.auth.user.Id) && req.auth.user.Role !== 'admin') {
       throw forbidden("Only an admin can revoke another account's tokens.");
     }
-    await db.automation_tokens.deleteMany({ where: { id: targetId } });
+    await db.AutomationTokens.deleteMany({ where: { Id: targetId } });
     res.status(204).end();
   });
 

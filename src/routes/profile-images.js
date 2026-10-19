@@ -52,7 +52,7 @@ export function makeProfileImageRouter({ db, config, load, mayWrite, serialize }
       if (asked !== null && asked !== stored.digest.slice(0, 16)) {
         res.redirect(
           302,
-          `${req.baseUrl}/${row.namespace}/${kind}?v=${stored.digest.slice(0, 16)}`,
+          `${req.baseUrl}/${row.Namespace}/${kind}?v=${stored.digest.slice(0, 16)}`,
         );
         return;
       }
@@ -83,14 +83,14 @@ export function makeProfileImageRouter({ db, config, load, mayWrite, serialize }
       res.sendFile(stored.abs);
       return;
     }
-    const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
+    const external = kind === 'avatar' ? row.AvatarUrl : row.BannerUrl;
     if (external) {
       res.redirect(external);
       return;
     }
     if (!fallback) throw notFound('No banner has been set.');
     res.set('Cache-Control', 'public, max-age=3600');
-    res.type('image/svg+xml').send(identiconSvg(row.namespace));
+    res.type('image/svg+xml').send(identiconSvg(row.Namespace));
   };
 
   // Raw bodies rather than multipart: the caller uploads one file, the file is
@@ -135,7 +135,7 @@ export function makeProfileImageRouter({ db, config, load, mayWrite, serialize }
       }
       const { digest, updates } = profileImagePointer(target, kind);
       // The keys are the avatar/banner column constants from PROFILE_IMAGES.
-      await db.users.update({ where: { id: target.id }, data: updates });
+      await db.Users.update({ where: { Id: target.Id }, data: updates });
       if (digest) await removeProfileImageBlob(db, config, digest);
       res.json(serialize(await load(req.params.namespace)));
     },

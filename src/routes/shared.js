@@ -16,11 +16,11 @@ export function requireObjectBody(req) {
 // hash, and it is shown exactly once.
 export async function createSession(db, userId, sessionTtlMs) {
   const token = newToken();
-  const session = await db.sessions.create({
+  const session = await db.Sessions.create({
     data: {
-      user_id: userId,
-      token_hash: hashToken(token),
-      expires_at: new Date(Date.now() + sessionTtlMs),
+      UserId: userId,
+      TokenHash: hashToken(token),
+      ExpiresAt: new Date(Date.now() + sessionTtlMs),
     },
   });
   return { token, session };
@@ -33,10 +33,10 @@ export async function resolveTargetUser(db, req) {
   if (typeof ns !== 'string') {
     throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid namespace parameter.' });
   }
-  if (me.role !== 'admin' && ns !== me.namespace) {
+  if (me.Role !== 'admin' && ns !== me.Namespace) {
     throw forbidden('Only an admin can inspect another account.');
   }
-  const user = await db.users.findUnique({ where: { namespace: ns } });
+  const user = await db.Users.findUnique({ where: { Namespace: ns } });
   if (!user) throw notFound('No such user.');
   return user;
 }

@@ -90,20 +90,20 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
         throw fieldErrors([{ field: 'body', message: bodyError }]);
       }
       const row = await db.$transaction(async (tx) => {
-        const doc = await tx.legal_documents.upsert({
-          where: { kind },
-          create: { kind, body },
-          update: { version: { increment: 1 }, body, updated_at: new Date() },
+        const doc = await tx.LegalDocuments.upsert({
+          where: { Kind: kind },
+          create: { Kind: kind, Body: body },
+          update: { Version: { increment: 1 }, Body: body, UpdatedAt: new Date() },
         });
         // A first insert (version 1) is not a bump, and only accounts that
         // accepted a previous version are blocked by the gate afterwards.
-        if (kind === 'terms' && doc.version > 1) {
+        if (kind === 'terms' && doc.Version > 1) {
           await notifyUsersMatching(
             tx,
-            Prisma.sql`WHERE terms_accepted_version IS NOT NULL`,
+            Prisma.sql`WHERE "TermsAcceptedVersion" IS NOT NULL`,
             'terms.bumped',
-            termsBumpedMessage(doc.version),
-            { version: doc.version, previousVersion: doc.version - 1 },
+            termsBumpedMessage(doc.Version),
+            { version: doc.Version, previousVersion: doc.Version - 1 },
           );
         }
         return doc;
@@ -149,7 +149,7 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
 
   router.patch('/admin/users/:namespace/quota', requireAdmin, termsGate, async (req, res) => {
     requireObjectBody(req);
-    const user = await db.users.findUnique({ where: { namespace: req.params.namespace } });
+    const user = await db.Users.findUnique({ where: { Namespace: req.params.namespace } });
     if (!user) throw notFound('No such account.');
     const { maxBlobBytes } = req.body;
     if (maxBlobBytes !== null && (!Number.isInteger(maxBlobBytes) || maxBlobBytes <= 0)) {
@@ -158,10 +158,10 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
       ]);
     }
     const updated = await db.$transaction(async (tx) => {
-      const row = await tx.users.update({
-        where: { id: user.id },
-        data: { max_blob_bytes: maxBlobBytes },
-        select: { id: true, namespace: true, blob_bytes: true, max_blob_bytes: true },
+      const row = await tx.Users.update({
+        where: { Id: user.Id },
+        data: { MaxBlobBytes: maxBlobBytes },
+        select: { Id: true, Namespace: true, BlobBytes: true, MaxBlobBytes: true },
       });
       // The audit detail is a JSON column, so the previous quota is folded to a
       // number rather than handed over as a BigInt.
@@ -169,31 +169,31 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
         tx,
         req.auth.user,
         'quota.set',
-        { namespace: user.namespace },
+        { namespace: user.Namespace },
         {
           maxBlobBytes,
-          previousMaxBlobBytes: user.max_blob_bytes === null ? null : Number(user.max_blob_bytes),
+          previousMaxBlobBytes: user.MaxBlobBytes === null ? null : Number(user.MaxBlobBytes),
         },
       );
       return row;
     });
     res.json({
-      namespace: updated.namespace,
-      blobBytes: Number(updated.blob_bytes),
-      maxBlobBytes: updated.max_blob_bytes === null ? null : Number(updated.max_blob_bytes),
+      namespace: updated.Namespace,
+      blobBytes: Number(updated.BlobBytes),
+      maxBlobBytes: updated.MaxBlobBytes === null ? null : Number(updated.MaxBlobBytes),
     });
   });
 
   router.get('/admin/users/:namespace/quota', requireAdmin, async (req, res) => {
-    const user = await db.users.findUnique({
-      where: { namespace: req.params.namespace },
-      select: { namespace: true, blob_bytes: true, max_blob_bytes: true },
+    const user = await db.Users.findUnique({
+      where: { Namespace: req.params.namespace },
+      select: { Namespace: true, BlobBytes: true, MaxBlobBytes: true },
     });
     if (!user) throw notFound('No such account.');
     res.json({
-      namespace: user.namespace,
-      blobBytes: Number(user.blob_bytes),
-      maxBlobBytes: user.max_blob_bytes === null ? null : Number(user.max_blob_bytes),
+      namespace: user.Namespace,
+      blobBytes: Number(user.BlobBytes),
+      maxBlobBytes: user.MaxBlobBytes === null ? null : Number(user.MaxBlobBytes),
     });
   });
 
@@ -201,9 +201,9 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
-    const rows = await db.audit_log.findMany({
-      where: cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {},
-      orderBy: { id: back ? 'asc' : 'desc' },
+    const rows = await db.AuditLog.findMany({
+      where: cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {},
+      orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
     res.json(
@@ -212,7 +212,7 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
         back,
         cursor,
         serialize: auditRowToObject,
-        keyOf: (row) => ({ i: Number(row.id) }),
+        keyOf: (row) => ({ i: Number(row.Id) }),
       }),
     );
   });

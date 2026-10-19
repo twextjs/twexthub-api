@@ -19,9 +19,9 @@ export const MAX_PROFILE_IMAGE_BYTES = 16 * 1024 * 1024;
 // cannot half-work in the upload route and the serving route.
 export const PROFILE_IMAGES = {
   avatar: {
-    digestColumn: 'avatar_blob_digest',
-    typeColumn: 'avatar_content_type',
-    bytesColumn: 'avatar_bytes',
+    digestColumn: 'AvatarBlobDigest',
+    typeColumn: 'AvatarContentType',
+    bytesColumn: 'AvatarBytes',
     // Avatars are small and render on every listing, so the ceiling is tighter
     // than a banner's. Both default from limits.maxProfileImageBytes when the
     // operator has not overridden them.
@@ -34,9 +34,9 @@ export const PROFILE_IMAGES = {
     fit: 'inside',
   },
   banner: {
-    digestColumn: 'banner_blob_digest',
-    typeColumn: 'banner_content_type',
-    bytesColumn: 'banner_bytes',
+    digestColumn: 'BannerBlobDigest',
+    typeColumn: 'BannerContentType',
+    bytesColumn: 'BannerBytes',
     maxBytes: 'maxBannerBytes',
     // A banner is a decorative strip behind a profile, so it is cropped to the
     // ratio and scaled to exactly this size. Anything else leaves a client
@@ -170,11 +170,11 @@ export async function storeProfileImage(db, config, user, kind, buffer, declared
     // The three column names are constants from PROFILE_IMAGES, never request
     // values, so Prisma.raw is safe to splice them in.
     await tx.$executeRaw`
-        UPDATE users
-        SET ${Prisma.raw(columns.digestColumn)} = ${stored.digest},
-            ${Prisma.raw(columns.typeColumn)} = ${fitted.contentType},
-            ${Prisma.raw(columns.bytesColumn)} = ${size}
-        WHERE id = ${user.id}
+        UPDATE "Users"
+        SET ${Prisma.raw(`"${columns.digestColumn}"`)} = ${stored.digest},
+            ${Prisma.raw(`"${columns.typeColumn}"`)} = ${fitted.contentType},
+            ${Prisma.raw(`"${columns.bytesColumn}"`)} = ${size}
+        WHERE "Id" = ${user.Id}
       `;
     return stored;
   });
