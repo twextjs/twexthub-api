@@ -314,9 +314,9 @@ export async function resetDb() {
   for (let attempt = 1; ; attempt += 1) {
     try {
       await db.$executeRawUnsafe(`
-        TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
-        users, legal_documents, download_events, extension_daily_downloads, extension_version_daily_downloads, dist_tags,
-        webhook_deliveries, webhooks, user_identities, oidc_flows
+        TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications",
+        "Users", "LegalDocuments", "DownloadEvents", "ExtensionDailyDownloads", "ExtensionVersionDailyDownloads", "DistTags",
+        "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows"
         RESTART IDENTITY CASCADE
       `);
       break;
@@ -325,10 +325,10 @@ export async function resetDb() {
       await sleep(25 * attempt);
     }
   }
-  await db.legal_documents.createMany({
+  await db.LegalDocuments.createMany({
     data: [
-      { kind: 'terms', version: 1, body: 'Placeholder terms.' },
-      { kind: 'privacy', version: 1, body: 'Placeholder privacy.' },
+      { Kind: 'terms', Version: 1, Body: 'Placeholder terms.' },
+      { Kind: 'privacy', Version: 1, Body: 'Placeholder privacy.' },
     ],
   });
 }
