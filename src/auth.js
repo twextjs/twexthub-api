@@ -200,14 +200,14 @@ export function requireSession(req, res, next) {
 // has to have been granted `admin` as well, and the role check still runs
 // first, so a normal account cannot mint itself an admin token.
 export function isAdmin(auth) {
-  return Boolean(auth) && auth.user.role === 'admin' && auth.scopes.includes('admin');
+  return Boolean(auth) && auth.user.Role === 'admin' && auth.scopes.includes('admin');
 }
 
 // Throws the specific reason; the callers that have a message of their own to
 // add (a review, say) would rather call this than restate both checks.
 export function assertAdmin(auth) {
   if (!auth) throw unauthorized();
-  if (auth.user.role !== 'admin') {
+  if (auth.user.Role !== 'admin') {
     throw forbidden('Admin privileges are required.');
   }
   if (!auth.scopes.includes('admin')) {
