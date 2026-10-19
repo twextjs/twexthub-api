@@ -21,24 +21,24 @@ export function makeRateLimiter(db, config) {
   async function record(bucket, windowMinutes) {
     const windowStart = windowStartFor(new Date(), windowMinutes);
     const [row] = await db.$queryRaw`
-      INSERT INTO rate_limit_entries (bucket, window_start, count)
+      INSERT INTO "RateLimitEntries" ("Bucket", "WindowStart", "Count")
       VALUES (${bucket}, ${windowStart}, 1)
-      ON CONFLICT (bucket, window_start)
-      DO UPDATE SET count = rate_limit_entries.count + 1
-      RETURNING count
+      ON CONFLICT ("Bucket", "WindowStart")
+      DO UPDATE SET "Count" = "RateLimitEntries"."Count" + 1
+      RETURNING "Count"
     `;
-    return Number(row.count);
+    return Number(row.Count);
   }
 
   async function loginCheck(bucket) {
     const max = limits.loginAttemptsPerWindow;
     const windowMinutes = limits.loginWindowMinutes;
     const windowStart = windowStartFor(new Date(), windowMinutes);
-    const existing = await db.rate_limit_entries.findUnique({
-      where: { bucket_window_start: { bucket, window_start: windowStart } },
-      select: { count: true },
+    const existing = await db.RateLimitEntries.findUnique({
+      where: { Bucket_WindowStart: { Bucket: bucket, WindowStart: windowStart } },
+      select: { Count: true },
     });
-    if (existing && Number(existing.count) >= max) {
+    if (existing && Number(existing.Count) >= max) {
       throw tooManyRequests(secondsUntilReset(windowMinutes));
     }
     return async () => {
@@ -86,7 +86,7 @@ export function makeRateLimiter(db, config) {
   const cleanupInterval = setInterval(async () => {
     try {
       const cutoff = new Date(Date.now() - maxWindow * 60_000);
-      await db.rate_limit_entries.deleteMany({ where: { window_start: { lt: cutoff } } });
+      await db.RateLimitEntries.deleteMany({ where: { WindowStart: { lt: cutoff } } });
     } catch {
       // cleanup errors are non-fatal
     }

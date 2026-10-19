@@ -35,9 +35,9 @@ export async function storeSource(dataDir, buffer) {
 // already hold it across a delete and the cleanup that follows it.
 export async function removeSourceIfUnusedInTx(tx, config, digest) {
   if (!digest) return;
-  const keeper = await tx.versions.findFirst({
-    where: { source_digest: digest },
-    select: { id: true },
+  const keeper = await tx.Versions.findFirst({
+    where: { SourceDigest: digest },
+    select: { Id: true },
   });
   if (keeper) return;
   try {

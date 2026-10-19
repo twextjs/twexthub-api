@@ -18,24 +18,24 @@ export async function gcBlobs(db, dataDir) {
   // the same directory at once. The unlink is a separate locked step per
   // candidate, so releasing it before the walk costs nothing.
   const referenced = await withLocks(db, [BLOB_GC_LOCK_KEY], async (tx) => {
-    const known = await tx.versions.findMany({
-      where: { blob_digest: { not: null } },
-      distinct: ['blob_digest'],
-      select: { blob_digest: true },
+    const known = await tx.Versions.findMany({
+      where: { BlobDigest: { not: null } },
+      distinct: ['BlobDigest'],
+      select: { BlobDigest: true },
     });
     // Uploaded profile images share this store, so their digests have to be in
     // the referenced set too. Leaving them out would make every avatar on the
     // instance collectable the first time the sweep ran.
-    const profiles = await tx.users.findMany({
+    const profiles = await tx.Users.findMany({
       where: {
-        OR: [{ avatar_blob_digest: { not: null } }, { banner_blob_digest: { not: null } }],
+        OR: [{ AvatarBlobDigest: { not: null } }, { BannerBlobDigest: { not: null } }],
       },
-      select: { avatar_blob_digest: true, banner_blob_digest: true },
+      select: { AvatarBlobDigest: true, BannerBlobDigest: true },
     });
-    const set = new Set(known.map((row) => row.blob_digest));
+    const set = new Set(known.map((row) => row.BlobDigest));
     for (const row of profiles) {
-      if (row.avatar_blob_digest) set.add(row.avatar_blob_digest);
-      if (row.banner_blob_digest) set.add(row.banner_blob_digest);
+      if (row.AvatarBlobDigest) set.add(row.AvatarBlobDigest);
+      if (row.BannerBlobDigest) set.add(row.BannerBlobDigest);
     }
     return set;
   });
@@ -89,10 +89,10 @@ export function getIntegrityErrors() {
 export async function scrubBlobs(db, dataDir) {
   // One row per digest, newest id first. `DISTINCT ON` has no typed equivalent.
   const rows = await db.$queryRaw`
-    SELECT DISTINCT ON (blob_digest) namespace, extension_id, version, blob_digest
-    FROM versions
-    WHERE blob_digest IS NOT NULL AND status <> 'staging'
-    ORDER BY blob_digest, id DESC
+    SELECT DISTINCT ON ("BlobDigest") "Namespace", "ExtensionId", "Version", "BlobDigest"
+    FROM "Versions"
+    WHERE "BlobDigest" IS NOT NULL AND "Status" <> 'staging'
+    ORDER BY "BlobDigest", "Id" DESC
   `;
 
   // Counted locally so a scrape partway through a long pass does not read a
@@ -100,7 +100,7 @@ export async function scrubBlobs(db, dataDir) {
   let errors = 0;
   const problems = [];
   for (const row of rows) {
-    const abs = blobPathFor(dataDir, row.blob_digest);
+    const abs = blobPathFor(dataDir, row.BlobDigest);
     let actual;
     try {
       actual = sha256Hex(await readFile(abs));
@@ -109,7 +109,7 @@ export async function scrubBlobs(db, dataDir) {
       problems.push({ ...row, problem: 'missing' });
       continue;
     }
-    if (actual !== row.blob_digest) {
+    if (actual !== row.BlobDigest) {
       errors += 1;
       problems.push({ ...row, problem: 'mismatch' });
     }
@@ -142,7 +142,7 @@ export function makeMaintenanceJob({ db, config }) {
         const problems = await scrubBlobs(db, config.dataDir);
         for (const problem of problems) {
           console.warn(
-            `blob integrity ${problem.problem}: ${problem.namespace}/${problem.extension_id}@${problem.version}`,
+            `blob integrity ${problem.problem}: ${problem.Namespace}/${problem.ExtensionId}@${problem.Version}`,
           );
         }
       }

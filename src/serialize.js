@@ -19,8 +19,8 @@ import { normalizeApiRoot } from './util.js';
 // images are published under /orgs rather than /users.
 function profileImagePath(config, row, kind, digest) {
   const root = normalizeApiRoot(config.apiRoot);
-  const collection = row.kind === 'organization' ? 'orgs' : 'users';
-  const base = `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/${collection}/${row.namespace}/${kind}`;
+  const collection = row.Kind === 'organization' ? 'orgs' : 'users';
+  const base = `${config.publicBaseUrl.replace(/\/$/, '')}${root ? `/${root}` : ''}/${collection}/${row.Namespace}/${kind}`;
   return digest ? `${base}?v=${digest.slice(0, 16)}` : base;
 }
 
@@ -33,26 +33,26 @@ function profileImagePath(config, row, kind, digest) {
 // because an organization's owner list shows each owner's avatar without
 // serializing a whole account row.
 export function profileImageUrl(row, kind, config) {
-  const digest = kind === 'avatar' ? row.avatar_blob_digest : row.banner_blob_digest;
+  const digest = kind === 'avatar' ? row.AvatarBlobDigest : row.BannerBlobDigest;
   if (digest) return profileImagePath(config, row, kind, digest);
-  const external = kind === 'avatar' ? row.avatar_url : row.banner_url;
+  const external = kind === 'avatar' ? row.AvatarUrl : row.BannerUrl;
   return external ?? null;
 }
 
 export function userToObject(row, config) {
   return {
-    namespace: row.namespace,
-    displayName: row.display_name,
-    kind: row.kind ?? 'user',
-    role: row.role,
-    hasPublished: row.has_published,
-    bio: row.bio ?? '',
-    website: row.website ?? null,
-    github: row.github ?? null,
+    namespace: row.Namespace,
+    displayName: row.DisplayName,
+    kind: row.Kind ?? 'user',
+    role: row.Role,
+    hasPublished: row.HasPublished,
+    bio: row.Bio ?? '',
+    website: row.Website ?? null,
+    github: row.Github ?? null,
     avatarUrl: profileImageUrl(row, 'avatar', config),
     bannerUrl: profileImageUrl(row, 'banner', config),
-    createdAt: row.created_at.toISOString(),
-    termsAcceptedVersion: row.terms_accepted_version ?? null,
+    createdAt: row.CreatedAt.toISOString(),
+    termsAcceptedVersion: row.TermsAcceptedVersion ?? null,
   };
 }
 
@@ -61,16 +61,16 @@ export function userToObject(row, config) {
 // public profile would invite a client to offer controls that lead nowhere.
 export function organizationToObject(row, config) {
   const root = normalizeApiRoot(config.apiRoot);
-  const base = `${root ? `/${root}` : ''}/orgs/${encodeURIComponent(row.namespace)}`;
+  const base = `${root ? `/${root}` : ''}/orgs/${encodeURIComponent(row.Namespace)}`;
   return {
-    namespace: row.namespace,
-    displayName: row.display_name,
-    bio: row.bio ?? '',
-    website: row.website ?? null,
-    github: row.github ?? null,
+    namespace: row.Namespace,
+    displayName: row.DisplayName,
+    bio: row.Bio ?? '',
+    website: row.Website ?? null,
+    github: row.Github ?? null,
     avatarUrl: profileImageUrl(row, 'avatar', config),
     bannerUrl: profileImageUrl(row, 'banner', config),
-    createdAt: row.created_at.toISOString(),
+    createdAt: row.CreatedAt.toISOString(),
     _links: {
       self: base,
       extensions: `${base}/extensions`,
@@ -82,40 +82,40 @@ export function organizationToObject(row, config) {
 }
 export function sessionToObject(row) {
   return {
-    id: String(row.id),
-    createdAt: row.created_at.toISOString(),
-    expiresAt: row.expires_at.toISOString(),
-    lastUsedAt: row.last_used_at ? row.last_used_at.toISOString() : null,
+    id: String(row.Id),
+    createdAt: row.CreatedAt.toISOString(),
+    expiresAt: row.ExpiresAt.toISOString(),
+    lastUsedAt: row.LastUsedAt ? row.LastUsedAt.toISOString() : null,
   };
 }
 
 export function automationTokenToObject(row) {
   return {
-    id: String(row.id),
-    name: row.name,
-    scopes: row.scopes,
-    createdAt: row.created_at.toISOString(),
-    expiresAt: row.expires_at ? row.expires_at.toISOString() : null,
-    lastUsedAt: row.last_used_at ? row.last_used_at.toISOString() : null,
+    id: String(row.Id),
+    name: row.Name,
+    scopes: row.Scopes,
+    createdAt: row.CreatedAt.toISOString(),
+    expiresAt: row.ExpiresAt ? row.ExpiresAt.toISOString() : null,
+    lastUsedAt: row.LastUsedAt ? row.LastUsedAt.toISOString() : null,
   };
 }
 
 export function notificationToObject(row) {
   return {
-    id: String(row.id),
-    kind: row.kind,
-    message: row.message,
-    payload: row.payload,
-    read: row.read_at !== null,
-    createdAt: row.created_at.toISOString(),
+    id: String(row.Id),
+    kind: row.Kind,
+    message: row.Message,
+    payload: row.Payload,
+    read: row.ReadAt !== null,
+    createdAt: row.CreatedAt.toISOString(),
   };
 }
 
 export function legalDocumentToObject(row) {
   return {
-    version: row.version,
-    body: row.body,
-    updatedAt: row.updated_at.toISOString(),
+    version: row.Version,
+    body: row.Body,
+    updatedAt: row.UpdatedAt.toISOString(),
   };
 }
 
@@ -127,50 +127,50 @@ export function legalDocumentToObject(row) {
 function versionLinks(config, row) {
   const root = normalizeApiRoot(config.apiRoot);
   const base = root ? `/${root}` : '';
-  const extension = `${base}/@${row.namespace}/${row.extension_id}`;
+  const extension = `${base}/@${row.Namespace}/${row.ExtensionId}`;
   const links = {
-    self: `${extension}/versions/${encodeURIComponent(row.version)}`,
+    self: `${extension}/versions/${encodeURIComponent(row.Version)}`,
     extension,
-    author: `${base}/users/${encodeURIComponent(row.namespace)}`,
+    author: `${base}/users/${encodeURIComponent(row.Namespace)}`,
   };
-  if (row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated') {
-    links.download = downloadUrl(config, row.namespace, row.extension_id, row.version);
+  if (row.Status === 'published' || row.Status === 'yanked' || row.Status === 'deprecated') {
+    links.download = downloadUrl(config, row.Namespace, row.ExtensionId, row.Version);
   }
   // Only a version the server still holds the source tarball for can be asked
   // for one.
-  if (row.source_path)
-    links.source = sourceUrl(config, row.namespace, row.extension_id, row.version);
+  if (row.SourcePath)
+    links.source = sourceUrl(config, row.Namespace, row.ExtensionId, row.Version);
   return links;
 }
 
 export function versionToObject(row, config, downloads = 0) {
   const out = {
-    namespace: row.namespace,
-    id: row.extension_id,
-    version: row.version,
-    status: row.status,
-    name: row.name,
-    license: row.license,
-    description: row.description,
-    createdAt: row.created_at.toISOString(),
+    namespace: row.Namespace,
+    id: row.ExtensionId,
+    version: row.Version,
+    status: row.Status,
+    name: row.Name,
+    license: row.License,
+    description: row.Description,
+    createdAt: row.CreatedAt.toISOString(),
     downloads: Number(downloads),
   };
-  if (row.author) out.author = row.author;
-  if (row.published_at) out.publishedAt = row.published_at.toISOString();
-  if (Array.isArray(row.warnings) && row.warnings.length > 0) out.warnings = row.warnings;
-  if (row.status === 'deprecated') {
-    out.deprecation = row.deprecation_message ?? null;
+  if (row.Author) out.author = row.Author;
+  if (row.PublishedAt) out.publishedAt = row.PublishedAt.toISOString();
+  if (Array.isArray(row.Warnings) && row.Warnings.length > 0) out.warnings = row.Warnings;
+  if (row.Status === 'deprecated') {
+    out.deprecation = row.DeprecationMessage ?? null;
   }
-  if (row.status === 'rejected') {
-    out.rejectionReason = row.rejection_reason ?? null;
+  if (row.Status === 'rejected') {
+    out.rejectionReason = row.RejectionReason ?? null;
   }
-  if (row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated') {
+  if (row.Status === 'published' || row.Status === 'yanked' || row.Status === 'deprecated') {
     const dist = {
-      downloadUrl: downloadUrl(config, row.namespace, row.extension_id, row.version),
+      downloadUrl: downloadUrl(config, row.Namespace, row.ExtensionId, row.Version),
     };
-    if (row.blob_digest) {
-      dist.digest = `sha256:${row.blob_digest}`;
-      if (row.blob_sha512) dist.integrity = `sha512-${row.blob_sha512}`;
+    if (row.BlobDigest) {
+      dist.digest = `sha256:${row.BlobDigest}`;
+      if (row.BlobSha512) dist.integrity = `sha512-${row.BlobSha512}`;
     }
     out.dist = dist;
   }
@@ -192,24 +192,24 @@ export function sourceUrl(config, namespace, id, version) {
 
 export function extensionSummaryFromRow(row) {
   return {
-    namespace: row.namespace,
-    id: row.extension_id,
-    name: row.name,
-    version: row.version,
-    description: row.description,
-    publishedAt: row.published_at.toISOString(),
+    namespace: row.Namespace,
+    id: row.ExtensionId,
+    name: row.Name,
+    version: row.Version,
+    description: row.Description,
+    publishedAt: row.PublishedAt.toISOString(),
   };
 }
 
 export function extensionDetailFromRow(row, versions) {
   return {
     ...extensionSummaryFromRow(row),
-    author: row.author ?? '',
-    license: row.license,
-    isUnsandboxed: row.is_unsandboxed ?? null,
-    color1: row.color1 ?? null,
-    color2: row.color2 ?? null,
-    color3: row.color3 ?? null,
+    author: row.Author ?? '',
+    license: row.License,
+    isUnsandboxed: row.IsUnsandboxed ?? null,
+    color1: row.Color1 ?? null,
+    color2: row.Color2 ?? null,
+    color3: row.Color3 ?? null,
     versions,
   };
 }
@@ -217,11 +217,11 @@ export function extensionDetailFromRow(row, versions) {
 export function pendingVersionToObject(row, config) {
   const out = {
     ...versionToObject(row, config),
-    ownerNamespace: row.namespace,
+    ownerNamespace: row.Namespace,
   };
-  if (row.build_log) out.buildLog = row.build_log;
-  if (row.build_error) out.buildError = row.build_error;
-  if (row.source_path)
-    out.sourceUrl = sourceUrl(config, row.namespace, row.extension_id, row.version);
+  if (row.BuildLog) out.buildLog = row.BuildLog;
+  if (row.BuildError) out.buildError = row.BuildError;
+  if (row.SourcePath)
+    out.sourceUrl = sourceUrl(config, row.Namespace, row.ExtensionId, row.Version);
   return out;
 }
