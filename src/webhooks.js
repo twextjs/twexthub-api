@@ -193,50 +193,69 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
       throw new WebhookInputError([{ field: 'url', message: error.message }]);
     }
     const secret = newWebhookSecret();
-    const row = await db.webhooks.create({
+    const row = await db.Webhooks.create({
       data: {
-        namespace,
-        extension_id: extensionId,
-        url: input.url,
-        secret,
-        events: input.events,
-        active: input.active !== false,
+        Namespace: namespace,
+        ExtensionId: extensionId,
+        Url: input.url,
+        Secret: secret,
+        Events: input.events,
+        Active: input.active !== false,
       },
       select: {
-        id: true,
-        namespace: true,
-        extension_id: true,
-        url: true,
-        events: true,
-        active: true,
-        created_at: true,
+        Id: true,
+        Namespace: true,
+        ExtensionId: true,
+        Url: true,
+        Events: true,
+        Active: true,
+        CreatedAt: true,
       },
     });
-    return { ...withStringId(row), secret };
+    return {
+      id: row.Id.toString(),
+      namespace: row.Namespace,
+      extension_id: row.ExtensionId,
+      url: row.Url,
+      events: row.Events,
+      active: row.Active,
+      created_at: row.CreatedAt,
+      secret,
+    };
   }
 
   async function list(namespace, extensionId) {
-    const rows = await db.webhooks.findMany({
-      where: { namespace, extension_id: extensionId ?? null },
+    const rows = await db.Webhooks.findMany({
+      where: { Namespace: namespace, ExtensionId: extensionId ?? null },
       select: {
-        id: true,
-        namespace: true,
-        extension_id: true,
-        url: true,
-        events: true,
-        active: true,
-        last_delivery_status: true,
-        last_delivery_at: true,
-        created_at: true,
+        Id: true,
+        Namespace: true,
+        ExtensionId: true,
+        Url: true,
+        Events: true,
+        Active: true,
+        LastDeliveryStatus: true,
+        LastDeliveryAt: true,
+        CreatedAt: true,
       },
-      orderBy: { created_at: 'desc' },
+      orderBy: { CreatedAt: 'desc' },
     });
-    return rows.map(withStringId);
+    return rows.map((row) => ({
+      id: row.Id.toString(),
+      namespace: row.Namespace,
+      extension_id: row.ExtensionId,
+      url: row.Url,
+      events: row.Events,
+      active: row.Active,
+      last_delivery_status: row.LastDeliveryStatus,
+      last_delivery_at: row.LastDeliveryAt,
+      created_at: row.CreatedAt,
+    }));
   }
 
   async function remove(namespace, extensionId, id) {
-    const { count } = await db.webhooks.deleteMany({
-      where: { id, namespace, extension_id: extensionId ?? null },
+    const { count } = await db.Webhooks.deleteMany({
+      where: { Id: id, Namespace: namespace, ExtensionId: extensionId ?? null },
     });
     return count > 0;
   }
@@ -245,9 +264,9 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
   // another collection or namespace. `remove` refuses the same mismatches with
   // the same clause, so an id means the same thing wherever it is passed.
   async function scopedWebhook(namespace, extensionId, id) {
-    const row = await db.webhooks.findFirst({
-      where: { id, namespace, extension_id: extensionId ?? null },
-      select: { id: true },
+    const row = await db.Webhooks.findFirst({
+      where: { Id: id, Namespace: namespace, ExtensionId: extensionId ?? null },
+      select: { Id: true },
     });
     return row ?? null;
   }
@@ -261,16 +280,17 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
     }
     const keyset = cursor
       ? back
-        ? Prisma.sql`AND id > ${cursor.i}`
-        : Prisma.sql`AND id < ${cursor.i}`
+        ? Prisma.sql`AND "Id" > ${cursor.i}`
+        : Prisma.sql`AND "Id" < ${cursor.i}`
       : Prisma.empty;
     const rows = await db.$queryRaw`
-      SELECT id, event, payload, attempt, max_attempts, status, next_attempt_at,
-             last_error, created_at, updated_at
-      FROM webhook_deliveries
-      WHERE webhook_id = ${webhookId}
+      SELECT "Id" AS id, "Event" AS event, "Payload" AS payload, "Attempt" AS attempt,
+             "MaxAttempts" AS max_attempts, "Status" AS status, "NextAttemptAt" AS next_attempt_at,
+             "LastError" AS last_error, "CreatedAt" AS created_at, "UpdatedAt" AS updated_at
+      FROM "WebhookDeliveries"
+      WHERE "WebhookId" = ${webhookId}
         ${keyset}
-      ORDER BY id ${back ? Prisma.raw('ASC') : Prisma.raw('DESC')}
+      ORDER BY "Id" ${back ? Prisma.raw('ASC') : Prisma.raw('DESC')}
       LIMIT ${limit + 1}
     `;
     return rows.map(withStringId);
@@ -285,12 +305,12 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
       // Lock the original row before reading its status, so a worker cannot
       // finish the attempt between the check and the copy.
       const [delivery] = await tx.$queryRaw`
-        SELECT d.status
-        FROM webhook_deliveries d
-        JOIN webhooks w ON w.id = d.webhook_id
-        WHERE d.id = ${deliveryId} AND d.webhook_id = ${webhookId}
-          AND w.namespace = ${namespace}
-          AND w.extension_id IS NOT DISTINCT FROM ${extensionId}
+        SELECT d."Status" AS status
+        FROM "WebhookDeliveries" d
+        JOIN "Webhooks" w ON w."Id" = d."WebhookId"
+        WHERE d."Id" = ${deliveryId} AND d."WebhookId" = ${webhookId}
+          AND w."Namespace" = ${namespace}
+          AND w."ExtensionId" IS NOT DISTINCT FROM ${extensionId}
         FOR UPDATE OF d
       `;
       if (!delivery) throw notFound('No such delivery.');
@@ -302,11 +322,12 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
       // Body and signature are copied verbatim: they were signed with a secret
       // that does not change, and jsonb round-tripping would reorder the payload.
       const [row] = await tx.$queryRaw`
-        INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, max_attempts)
-        SELECT webhook_id, event, payload, body, signature, max_attempts
-        FROM webhook_deliveries WHERE id = ${deliveryId}
-        RETURNING id, event, payload, attempt, max_attempts, status, next_attempt_at,
-                  last_error, created_at, updated_at
+        INSERT INTO "WebhookDeliveries" ("WebhookId", "Event", "Payload", "Body", "Signature", "MaxAttempts")
+        SELECT "WebhookId", "Event", "Payload", "Body", "Signature", "MaxAttempts"
+        FROM "WebhookDeliveries" WHERE "Id" = ${deliveryId}
+        RETURNING "Id" AS id, "Event" AS event, "Payload" AS payload, "Attempt" AS attempt,
+                  "MaxAttempts" AS max_attempts, "Status" AS status, "NextAttemptAt" AS next_attempt_at,
+                  "LastError" AS last_error, "CreatedAt" AS created_at, "UpdatedAt" AS updated_at
       `;
       return withStringId(row);
     });
@@ -317,12 +338,12 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
       // A namespace-wide hook (extension_id IS NULL) is scheduled alongside the
       // hook registered for this exact extension, so one publish feeds both
       // without either having to be registered twice.
-      const hooks = await db.webhooks.findMany({
+      const hooks = await db.Webhooks.findMany({
         where: {
-          namespace,
-          OR: [{ extension_id: extensionId }, { extension_id: null }],
-          active: true,
-          events: { has: event },
+          Namespace: namespace,
+          OR: [{ ExtensionId: extensionId }, { ExtensionId: null }],
+          Active: true,
+          Events: { has: event },
         },
       });
       for (const hook of hooks) {
@@ -349,9 +370,9 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
         // round-trips reorder keys, so re-serializing at delivery time would
         // produce a body that no longer matches the signature.
         const body = JSON.stringify(payload);
-        const signature = signWebhookPayload(hook.secret, body);
-        await db.webhook_deliveries.create({
-          data: { webhook_id: hook.id, event, payload, body, signature },
+        const signature = signWebhookPayload(hook.Secret, body);
+        await db.WebhookDeliveries.create({
+          data: { WebhookId: hook.Id, Event: event, Payload: payload, Body: body, Signature: signature },
         });
       }
     } catch (error) {
@@ -403,22 +424,22 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
 export async function claimDue(db, now = Date.now(), limit = DELIVERY_BATCH) {
   return await db.$queryRaw`
     WITH claimable AS (
-      SELECT d.id
-      FROM webhook_deliveries d
-      WHERE (d.status IN ('pending', 'retrying')
-             AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ${new Date(now).toISOString()}))
-         OR (d.status = 'delivering' AND d.next_attempt_at <= ${new Date(now).toISOString()})
-      ORDER BY d.next_attempt_at NULLS FIRST
+      SELECT d."Id"
+      FROM "WebhookDeliveries" d
+      WHERE (d."Status" IN ('pending', 'retrying')
+             AND (d."NextAttemptAt" IS NULL OR d."NextAttemptAt" <= ${new Date(now).toISOString()}))
+         OR (d."Status" = 'delivering' AND d."NextAttemptAt" <= ${new Date(now).toISOString()})
+      ORDER BY d."NextAttemptAt" NULLS FIRST
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
     )
-    UPDATE webhook_deliveries d
-    SET status = 'delivering',
-        next_attempt_at = ${new Date(now + DELIVERY_LEASE_MS).toISOString()},
-        updated_at = now()
-    FROM claimable, webhooks w
-    WHERE d.id = claimable.id AND w.id = d.webhook_id
-    RETURNING d.*, w.url, w.active
+    UPDATE "WebhookDeliveries" d
+    SET "Status" = 'delivering',
+        "NextAttemptAt" = ${new Date(now + DELIVERY_LEASE_MS).toISOString()},
+        "UpdatedAt" = now()
+    FROM claimable, "Webhooks" w
+    WHERE d."Id" = claimable."Id" AND w."Id" = d."WebhookId"
+    RETURNING d.*, w."Url" AS "Url", w."Active" AS "Active"
   `;
 }
 
@@ -457,10 +478,10 @@ function postToTarget(target, delivery) {
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': USER_AGENT,
-          'X-TwextHub-Event': delivery.event,
-          'X-TwextHub-Signature': delivery.signature,
-          'X-TwextHub-Delivery': String(delivery.id),
-          'Content-Length': Buffer.byteLength(delivery.body),
+          'X-TwextHub-Event': delivery.Event,
+          'X-TwextHub-Signature': delivery.Signature,
+          'X-TwextHub-Delivery': String(delivery.Id),
+          'Content-Length': Buffer.byteLength(delivery.Body),
         },
         // Undefined outside the test receiver, which supplies the CA for its
         // self-signed certificate; the default trust store applies otherwise.
@@ -479,21 +500,21 @@ function postToTarget(target, delivery) {
       req.destroy(new Error(`Delivery timed out after ${DELIVERY_TIMEOUT_MS} ms.`));
     });
     req.on('error', reject);
-    req.end(delivery.body);
+    req.end(delivery.Body);
   });
 }
 
 // `resolveTarget` is a seam for the test receiver, which listens on loopback;
 // the worker always resolves and validates for real.
 export async function attemptDelivery(db, delivery, resolveTarget = resolvePublicWebhookTarget) {
-  const attempt = delivery.attempt + 1;
+  const attempt = delivery.Attempt + 1;
   let error = null;
   let ok = false;
   try {
     // The name passed the check at registration, but DNS answers change, so
     // every attempt resolves it again and connects to the address that answer
     // produced.
-    const target = await resolveTarget(delivery.url);
+    const target = await resolveTarget(delivery.Url);
     const res = await postToTarget(target, delivery);
     ok = res.ok;
     if (!ok) error = `HTTP ${res.status}`;
@@ -501,7 +522,7 @@ export async function attemptDelivery(db, delivery, resolveTarget = resolvePubli
     error = e.message;
   }
 
-  const retrying = !ok && attempt < delivery.max_attempts;
+  const retrying = !ok && attempt < delivery.MaxAttempts;
   const delay = ok ? 0 : (RETRY_DELAYS_MS[attempt] ?? RETRY_DELAYS_MS.at(-1));
   // Read the clock here, where the attempt is over, rather than reusing the
   // claim's: the delay is a wait that starts when the attempt ends. An attempt
@@ -514,32 +535,32 @@ export async function attemptDelivery(db, delivery, resolveTarget = resolvePubli
   // stamped is the holder's proof: if the lease ran out and a peer re-claimed
   // the row, its deadline has moved on, so a late result from the original
   // attempt is dropped instead of overwriting the newer attempt's work.
-  await db.webhook_deliveries
+  await db.WebhookDeliveries
     .updateMany({
       where: {
-        id: delivery.id,
-        status: 'delivering',
-        next_attempt_at: delivery.next_attempt_at,
+        Id: delivery.Id,
+        Status: 'delivering',
+        NextAttemptAt: delivery.NextAttemptAt,
       },
       data: {
-        status: ok ? 'delivered' : retrying ? 'retrying' : 'failed',
-        attempt,
-        last_error: ok ? null : error,
-        next_attempt_at: retrying ? new Date(completedAt + delay) : null,
-        updated_at: new Date(),
+        Status: ok ? 'delivered' : retrying ? 'retrying' : 'failed',
+        Attempt: attempt,
+        LastError: ok ? null : error,
+        NextAttemptAt: retrying ? new Date(completedAt + delay) : null,
+        UpdatedAt: new Date(),
       },
     })
     .catch(() => {});
   if (ok || retrying) {
-    await db.webhooks
+    await db.Webhooks
       .updateMany({
-        where: { id: delivery.webhook_id },
+        where: { Id: delivery.WebhookId },
         data: {
-          last_delivery_status: ok ? 'ok' : 'error',
-          last_delivery_at: new Date(),
+          LastDeliveryStatus: ok ? 'ok' : 'error',
+          LastDeliveryAt: new Date(),
         },
       })
       .catch(() => {});
   }
-  return { id: delivery.id, ok, retrying, error };
+  return { id: delivery.Id, ok, retrying, error };
 }
