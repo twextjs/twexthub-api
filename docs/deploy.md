@@ -37,14 +37,14 @@ The first user account to sign up is automatically promoted to an administrator.
 
 ## ⬆️ Upgrading from the SQL-migration releases
 
-Releases before 2.2 applied their own numbered SQL files and recorded them in `schema_migrations`. The instance now runs Prisma Migrate instead, and adopts such a database rather than rebuilding it.
+Releases before 2.2 applied their own numbered SQL files and recorded them in `schema_migrations`. The instance now runs Prisma Migrate instead, and adopts such a database rather than rebuilding it. This release also renames every table and column the application owns from snake_case to PascalCase, so a tool that reads the database directly must be updated to the new names.
 
 The rules, all enforced at boot inside one transaction that holds an advisory lock:
 
 - If the database has no migration history at all, the baseline is applied: a fresh install needs nothing from you.
-- If `schema_migrations` holds every migration the SQL releases shipped (`0001_init.sql` through `0028_version_warnings.sql`), the baseline is recorded as already applied and the schema is brought up to date by Prisma Migrate — including the per-version download rollup (`0029_version_download_metrics.sql`) that followed those releases. Your existing rows, sequences, and data directory are untouched.
+- If `schema_migrations` holds every migration the SQL releases shipped (`0001_init.sql` through `0028_version_warnings.sql`), the baseline is recorded as already applied and the schema is brought up to date by Prisma Migrate — including the per-version download rollup (`0029_version_download_metrics.sql`) that followed those releases, and the rename of the tables and columns to PascalCase. Your existing rows, sequences, and data directory are preserved; only the identifiers change.
 - If it holds some but not all of them, the instance refuses to start and says so. A partial history cannot be adopted: marking the baseline applied would skip whatever the missing files built, and running it would fail against tables that already exist. Finish the upgrade with the release that owns those files first.
-- If `_prisma_migrations` exists and `schema_migrations` does not, the database is already on Prisma Migrate and pending migrations are applied.
+- If `_prisma_migrations` already holds the baseline, the database is on Prisma Migrate and pending migrations are applied. The legacy `schema_migrations` table is folded into its PascalCase name (`SchemaMigrations`) first.
 
 This is a one-way door. Taking a backup first is not optional — the baseline is a single migration, so there is no partial set of steps to roll back to.
 
