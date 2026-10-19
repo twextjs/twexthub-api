@@ -23,12 +23,12 @@ import { audit } from '../audit.js';
 // They are constant names, never request values, so the raw DELETE that clears
 // each one is safe to splice the table in for.
 const ORG_SCOPED_TABLES = [
-  'dist_tags',
-  'extension_owners',
-  'extension_owner_invites',
-  'download_events',
-  'extension_daily_downloads',
-  'extension_version_daily_downloads',
+  '"DistTags"',
+  '"ExtensionOwners"',
+  '"ExtensionOwnerInvites"',
+  '"DownloadEvents"',
+  '"ExtensionDailyDownloads"',
+  '"ExtensionVersionDailyDownloads"',
 ];
 
 // An organization is a pseudo-account: a namespace that publishes extensions,
@@ -63,8 +63,8 @@ export function makeOrgsRouter({
 
   async function loadOrg(namespace) {
     if (!isValidNamespace(namespace)) throw notFound();
-    const row = await db.users.findFirst({
-      where: { namespace, kind: 'organization' },
+    const row = await db.Users.findFirst({
+      where: { Namespace: namespace, Kind: 'organization' },
     });
     // A namespace that belongs to an account is a 404 here rather than a
     // redirect: /orgs is for organizations, and the account is one click away
@@ -74,10 +74,10 @@ export function makeOrgsRouter({
   }
 
   async function isOrgOwner(user, org) {
-    if (user.role === 'admin') return true;
-    const row = await db.organization_owners.findFirst({
-      where: { user_id: user.id, org_id: org.id },
-      select: { org_id: true },
+    if (user.Role === 'admin') return true;
+    const row = await db.OrganizationOwners.findFirst({
+      where: { UserId: user.Id, OrgId: org.Id },
+      select: { OrgId: true },
     });
     return Boolean(row);
   }
@@ -120,9 +120,9 @@ export function makeOrgsRouter({
     // created on a name a version already publishes under. The unique index
     // settles it either way; this only makes the error a 409 about the name
     // instead of an unhandled constraint violation.
-    const taken = await db.users.findFirst({
-      where: { namespace },
-      select: { id: true },
+    const taken = await db.Users.findFirst({
+      where: { Namespace: namespace },
+      select: { Id: true },
     });
     if (taken) throw conflict('That namespace is already taken.');
 
@@ -135,17 +135,17 @@ export function makeOrgsRouter({
     // accepts is a field an organization accepts, defaults included.
     const { patch } = profilePatch(req.body);
     const columns = {
-      namespace,
-      kind: 'organization',
+      Namespace: namespace,
+      Kind: 'organization',
       ...patch,
-      display_name: effectiveDisplayName,
+      DisplayName: effectiveDisplayName,
     };
     let org;
     try {
       await db.$transaction(async (tx) => {
-        org = await tx.users.create({ data: columns });
-        await tx.organization_owners.create({
-          data: { org_id: org.id, user_id: req.auth.user.id, added_by: req.auth.user.id },
+        org = await tx.Users.create({ data: columns });
+        await tx.OrganizationOwners.create({
+          data: { OrgId: org.Id, UserId: req.auth.user.Id, AddedBy: req.auth.user.Id },
         });
         await audit(
           tx,
@@ -160,7 +160,7 @@ export function makeOrgsRouter({
       throw error;
     }
 
-    res.location(orgPath(org.namespace)).status(201).json(organizationToObject(org, config));
+    res.location(orgPath(org.Namespace)).status(201).json(organizationToObject(org, config));
   });
 
   // The organizations that exist, newest first, alongside accounts in /users.
@@ -170,12 +170,12 @@ export function makeOrgsRouter({
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
-    const rows = await db.users.findMany({
+    const rows = await db.Users.findMany({
       where: {
-        kind: 'organization',
-        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+        Kind: 'organization',
+        ...(cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {}),
       },
-      orderBy: { id: back ? 'asc' : 'desc' },
+      orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
     res.json(
@@ -184,7 +184,7 @@ export function makeOrgsRouter({
         back,
         cursor,
         serialize: (row) => organizationToObject(row, config),
-        keyOf: (row) => ({ i: Number(row.id) }),
+        keyOf: (row) => ({ i: Number(row.Id) }),
       }),
     );
   });
@@ -213,12 +213,12 @@ export function makeOrgsRouter({
     const errors = profileFieldErrors(req.body);
     if (errors.length > 0) throw fieldErrors(errors);
 
-    const updated = await db.users.update({ where: { id: org.id }, data: patch });
+    const updated = await db.Users.update({ where: { Id: org.Id }, data: patch });
     await audit(
       db,
       req.auth.user,
       'org.update',
-      { namespace: org.namespace },
+      { namespace: org.Namespace },
       {
         changed: Object.keys(patch),
       },
@@ -232,28 +232,28 @@ export function makeOrgsRouter({
   router.delete('/:namespace', manageOrgs, termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
     const owned = await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
+      await tx.$queryRaw`SELECT "Id" FROM "Users" WHERE "Id" = ${org.Id} FOR UPDATE`;
       // The digests have to come back with the delete, so this keeps its
       // `RETURNING` rather than going through deleteMany.
       const rows = await tx.$queryRaw`
-        DELETE FROM versions WHERE namespace = ${org.namespace}
-        RETURNING blob_digest, blob_path, source_digest
+        DELETE FROM "Versions" WHERE "Namespace" = ${org.Namespace}
+        RETURNING "BlobDigest", "BlobPath", "SourceDigest"
       `;
-      await tx.webhooks.deleteMany({ where: { namespace: org.namespace } });
+      await tx.Webhooks.deleteMany({ where: { Namespace: org.Namespace } });
       for (const table of ORG_SCOPED_TABLES) {
-        await tx.$executeRaw`DELETE FROM ${Prisma.raw(table)} WHERE namespace = ${org.namespace}`;
+        await tx.$executeRaw`DELETE FROM ${Prisma.raw(table)} WHERE "Namespace" = ${org.Namespace}`;
       }
-      await tx.extension_transfers.deleteMany({
-        where: { OR: [{ namespace: org.namespace }, { to_namespace: org.namespace }] },
+      await tx.ExtensionTransfers.deleteMany({
+        where: { OR: [{ Namespace: org.Namespace }, { ToNamespace: org.Namespace }] },
       });
-      await tx.extension_redirects.deleteMany({
-        where: { OR: [{ from_namespace: org.namespace }, { to_namespace: org.namespace }] },
+      await tx.ExtensionRedirects.deleteMany({
+        where: { OR: [{ FromNamespace: org.Namespace }, { ToNamespace: org.Namespace }] },
       });
-      await tx.users.delete({ where: { id: org.id } });
-      await audit(tx, req.auth.user, 'org.delete', { namespace: org.namespace });
+      await tx.Users.delete({ where: { Id: org.Id } });
+      await audit(tx, req.auth.user, 'org.delete', { namespace: org.Namespace });
       return rows;
     });
-    const profileDigests = [org.avatar_blob_digest, org.banner_blob_digest].filter(Boolean);
+    const profileDigests = [org.AvatarBlobDigest, org.BannerBlobDigest].filter(Boolean);
 
     // Only after the commit: a failed DELETE leaves the rows, and the keeper
     // check keeps any digest another account's version still references. A
@@ -262,30 +262,30 @@ export function makeOrgsRouter({
     const legacyPaths = [
       ...new Set(
         owned
-          .filter((row) => !row.blob_digest)
-          .map((row) => row.blob_path)
+          .filter((row) => !row.BlobDigest)
+          .map((row) => row.BlobPath)
           .filter(Boolean),
       ),
     ];
     try {
       await Promise.all([
         ...owned
-          .map((row) => (row.blob_digest ? removeBlobIfUnused(db, config, row.blob_digest) : null))
+          .map((row) => (row.BlobDigest ? removeBlobIfUnused(db, config, row.BlobDigest) : null))
           .filter(Boolean),
         ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
         ...profileDigests.map((digest) => removeProfileImageBlob(db, config, digest)),
       ]);
     } catch (error) {
-      console.error(`blob cleanup deferred for ${org.namespace}: ${error.message}`);
+      console.error(`blob cleanup deferred for ${org.Namespace}: ${error.message}`);
     }
     try {
       await Promise.all(
-        [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
+        [...new Set(owned.map((row) => row.SourceDigest).filter(Boolean))].map((digest) =>
           removeSourceIfUnused(db, config, digest),
         ),
       );
     } catch (error) {
-      console.error(`source cleanup deferred for ${org.namespace}: ${error.message}`);
+      console.error(`source cleanup deferred for ${org.Namespace}: ${error.message}`);
     }
     res.status(204).end();
   });
@@ -298,19 +298,19 @@ export function makeOrgsRouter({
   router.get('/:namespace/owners', async (req, res) => {
     const org = await loadOrg(req.params.namespace);
     const rows = await db.$queryRaw`
-      SELECT u.namespace, u.display_name, u.created_at, g.added_at,
-        u.avatar_blob_digest, u.avatar_url
-      FROM organization_owners g
-      JOIN users u ON u.id = g.user_id
-      WHERE g.org_id = ${org.id}
-      ORDER BY g.added_at, g.user_id
+      SELECT u."Namespace", u."DisplayName", u."CreatedAt", g."AddedAt",
+        u."AvatarBlobDigest", u."AvatarUrl"
+      FROM "OrganizationOwners" g
+      JOIN "Users" u ON u."Id" = g."UserId"
+      WHERE g."OrgId" = ${org.Id}
+      ORDER BY g."AddedAt", g."UserId"
     `;
     res.json({
       data: rows.map((row) => ({
-        namespace: row.namespace,
-        displayName: row.display_name,
+        namespace: row.Namespace,
+        displayName: row.DisplayName,
         avatarUrl: profileImageUrl(row, 'avatar', config),
-        addedAt: row.added_at.toISOString(),
+        addedAt: row.AddedAt.toISOString(),
       })),
     });
   });
@@ -322,9 +322,9 @@ export function makeOrgsRouter({
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
-    const user = await db.users.findUnique({ where: { namespace: candidate } });
+    const user = await db.Users.findUnique({ where: { Namespace: candidate } });
     if (!user) throw notFound('No such account to add.');
-    if (user.kind === 'organization') {
+    if (user.Kind === 'organization') {
       throw fieldErrors([
         { field: 'namespace', message: 'An organization cannot own another organization.' },
       ]);
@@ -335,26 +335,26 @@ export function makeOrgsRouter({
     // entry commit together, so a failure after the insert cannot leave a
     // co-owner the audit trail never recorded.
     await db.$transaction(async (tx) => {
-      const { count } = await tx.organization_owners.createMany({
-        data: [{ org_id: org.id, user_id: user.id, added_by: req.auth.user.id }],
+      const { count } = await tx.OrganizationOwners.createMany({
+        data: [{ OrgId: org.Id, UserId: user.Id, AddedBy: req.auth.user.Id }],
         skipDuplicates: true,
       });
       if (count === 0) return;
-      if (user.id !== req.auth.user.id) {
+      if (user.Id !== req.auth.user.Id) {
         await notifyUser(
           tx,
-          user.id,
+          user.Id,
           'organization.owner.added',
-          addedAsOrgOwnerMessage(req.auth.user.namespace, org.namespace),
-          { namespace: org.namespace },
+          addedAsOrgOwnerMessage(req.auth.user.Namespace, org.Namespace),
+          { namespace: org.Namespace },
         );
       }
       await audit(
         tx,
         req.auth.user,
         'organization.owner.add',
-        { namespace: org.namespace },
-        { added: user.namespace },
+        { namespace: org.Namespace },
+        { added: user.Namespace },
       );
     });
     res.status(204).end();
@@ -367,15 +367,15 @@ export function makeOrgsRouter({
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
-    const user = await db.users.findUnique({ where: { namespace: candidate } });
+    const user = await db.Users.findUnique({ where: { Namespace: candidate } });
     if (!user) throw notFound('No such account.');
     await db.$transaction(async (tx) => {
-      await tx.$queryRaw`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
-      const { count: deleted } = await tx.organization_owners.deleteMany({
-        where: { org_id: org.id, user_id: user.id },
+      await tx.$queryRaw`SELECT "Id" FROM "Users" WHERE "Id" = ${org.Id} FOR UPDATE`;
+      const { count: deleted } = await tx.OrganizationOwners.deleteMany({
+        where: { OrgId: org.Id, UserId: user.Id },
       });
       if (deleted === 0) throw notFound('That account is not an owner.');
-      const count = await tx.organization_owners.count({ where: { org_id: org.id } });
+      const count = await tx.OrganizationOwners.count({ where: { OrgId: org.Id } });
       if (count === 0) {
         throw conflict(
           'That is the only owner. Add another owner, or delete the organization, before removing it.',
@@ -383,17 +383,17 @@ export function makeOrgsRouter({
       }
       await notifyUser(
         tx,
-        user.id,
+        user.Id,
         'organization.owner.removed',
-        removedAsOrgOwnerMessage(req.auth.user.namespace, org.namespace),
-        { namespace: org.namespace },
+        removedAsOrgOwnerMessage(req.auth.user.Namespace, org.Namespace),
+        { namespace: org.Namespace },
       );
       await audit(
         tx,
         req.auth.user,
         'organization.owner.remove',
-        { namespace: org.namespace },
-        { removed: user.namespace },
+        { namespace: org.Namespace },
+        { removed: user.Namespace },
       );
     });
     res.status(204).end();
@@ -404,7 +404,7 @@ export function makeOrgsRouter({
   // index uses.
   router.get('/:namespace/extensions', async (req, res) => {
     const org = await loadOrg(req.params.namespace);
-    res.json(await listExtensions(req, { namespace: org.namespace }));
+    res.json(await listExtensions(req, { namespace: org.Namespace }));
   });
 
   // Namespace-wide webhooks: one hook that hears every version event under this
@@ -414,7 +414,7 @@ export function makeOrgsRouter({
 
   router.get('/:namespace/webhooks', ...manageChain, async (req, res) => {
     const org = await loadOrgForWrite(req);
-    res.json({ data: await webhooks.list(org.namespace, null) });
+    res.json({ data: await webhooks.list(org.Namespace, null) });
   });
 
   router.post('/:namespace/webhooks', ...manageChain, async (req, res) => {
@@ -422,7 +422,7 @@ export function makeOrgsRouter({
     requireObjectBody(req);
     let created;
     try {
-      created = await webhooks.create(org.namespace, null, req.body);
+      created = await webhooks.create(org.Namespace, null, req.body);
     } catch (error) {
       if (error instanceof WebhookInputError) throw fieldErrors(error.fields);
       throw error;
@@ -431,7 +431,7 @@ export function makeOrgsRouter({
       db,
       req.auth.user,
       'organization.webhook.create',
-      { namespace: org.namespace },
+      { namespace: org.Namespace },
       {
         url: created.url,
         events: created.events,
@@ -444,14 +444,14 @@ export function makeOrgsRouter({
     const org = await loadOrgForWrite(req);
     const id = Number(req.params.webhookId);
     if (!Number.isInteger(id)) throw notFound();
-    if (!(await webhooks.remove(org.namespace, null, id))) {
+    if (!(await webhooks.remove(org.Namespace, null, id))) {
       throw notFound('No such webhook.');
     }
     await audit(
       db,
       req.auth.user,
       'organization.webhook.delete',
-      { namespace: org.namespace },
+      { namespace: org.Namespace },
       {
         id,
       },
@@ -461,7 +461,7 @@ export function makeOrgsRouter({
 
   router.get('/:namespace/webhooks/:webhookId/deliveries', ...manageChain, async (req, res) => {
     const org = await loadOrgForWrite(req);
-    await webhookDeliveries.list(req, res, { namespace: org.namespace, extensionId: null });
+    await webhookDeliveries.list(req, res, { namespace: org.Namespace, extensionId: null });
   });
 
   router.post(
@@ -469,7 +469,7 @@ export function makeOrgsRouter({
     ...manageChain,
     async (req, res) => {
       const org = await loadOrgForWrite(req);
-      await webhookDeliveries.redeliver(req, res, { namespace: org.namespace, extensionId: null });
+      await webhookDeliveries.redeliver(req, res, { namespace: org.Namespace, extensionId: null });
     },
   );
 
@@ -481,7 +481,7 @@ export function makeOrgsRouter({
       db,
       config,
       load: (namespace) => loadOrg(namespace),
-      mayWrite: (row, req) => req.auth.user.id !== undefined && isOrgOwner(req.auth.user, row),
+      mayWrite: (row, req) => req.auth.user.Id !== undefined && isOrgOwner(req.auth.user, row),
       serialize: (row) => organizationToObject(row, config),
     }),
   );

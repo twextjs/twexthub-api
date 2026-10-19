@@ -75,15 +75,15 @@ export function profilePatch(body) {
     patch[column] = value;
     columns.push(column);
   };
-  if (body.displayName !== undefined) set('display_name', body.displayName);
-  if (body.bio !== undefined) set('bio', body.bio ?? '');
-  if (body.website !== undefined) set('website', body.website);
-  if (body.github !== undefined) set('github', body.github);
+  if (body.displayName !== undefined) set('DisplayName', body.displayName);
+  if (body.bio !== undefined) set('Bio', body.bio ?? '');
+  if (body.website !== undefined) set('Website', body.website);
+  if (body.github !== undefined) set('Github', body.github);
   // A URL is recorded whether or not the profile also has an upload. The upload
   // stays the face of the profile and this is the fallback, so clearing the
   // link later never silently discards a file that is still served, and
   // uploading a file never discards a link.
-  if (body.avatarUrl !== undefined) set('avatar_url', body.avatarUrl);
-  if (body.bannerUrl !== undefined) set('banner_url', body.bannerUrl);
+  if (body.avatarUrl !== undefined) set('AvatarUrl', body.avatarUrl);
+  if (body.bannerUrl !== undefined) set('BannerUrl', body.bannerUrl);
   return { patch, columns };
 }
