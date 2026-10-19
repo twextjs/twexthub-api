@@ -60,7 +60,7 @@ export function makeSessionsRouter({ db, config, termsGate, rateLimiter }) {
     const created = await createSession(db, user.Id, sessionTtlMs);
     const root = normalizeApiRoot(config.apiRoot);
     res
-      .location(`${root ? `/${root}` : ''}/sessions/${created.session.id}`)
+      .location(`${root ? `/${root}` : ''}/sessions/${created.session.Id}`)
       .status(201)
       .json({
         session: sessionToObject(created.session),

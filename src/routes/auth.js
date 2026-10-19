@@ -190,7 +190,7 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
 
     const created = await createSession(db, user.Id, sessionTtlMs);
     res
-      .location(mount(`/sessions/${created.session.id}`))
+      .location(mount(`/sessions/${created.session.Id}`))
       .status(201)
       .json({
         session: sessionToObject(created.session),
@@ -343,7 +343,7 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const created = await createSession(db, user.Id, sessionTtlMs);
     await db.OidcFlows.deleteMany({ where: { Id: flow.Id } });
     res
-      .location(mount(`/sessions/${created.session.id}`))
+      .location(mount(`/sessions/${created.session.Id}`))
       .status(201)
       .json({
         session: sessionToObject(created.session),
