@@ -93,7 +93,8 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
     .expect(200);
 
   // Size the account for one of the two publishes still to come.
-  const [afterSeed] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [afterSeed] =
+    await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   const quota = Math.ceil(Number(afterSeed.blob_bytes) * 1.5);
   await db.$executeRaw`UPDATE "Users" SET "BlobBytes" = 0, "MaxBlobBytes" = ${quota} WHERE "Namespace" = ${ns}`;
 
@@ -113,7 +114,8 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
   ]);
   assert.deepEqual([alpha.status, seed.status].sort(), [201, 413]);
 
-  const [account] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [account] =
+    await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   assert.ok(Number(account.blob_bytes) <= quota, `charged ${account.blob_bytes} of ${quota}`);
 });
 

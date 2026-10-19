@@ -148,7 +148,8 @@ test('the baseline builds the objects the application depends on', async () => {
     await db.$executeRaw`
       INSERT INTO "Users" ("Namespace", "PasswordHash", "DisplayName") VALUES ('deleteme', 'x', 'deleteme')
     `;
-    const [{ id }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = 'deleteme'`;
+    const [{ id }] =
+      await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = 'deleteme'`;
     await db.$executeRaw`
       INSERT INTO "ExtensionOwners" ("OwnerId", "Namespace", "ExtensionId", "AddedBy")
       VALUES (${id}, 'deleteme', 'thing', ${id})

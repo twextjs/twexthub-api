@@ -22,7 +22,8 @@ after(async () => {
 });
 
 async function seedNotification(namespace, kind, message, payload = {}, readAt = null) {
-  const [user] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${namespace}`;
+  const [user] =
+    await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${namespace}`;
   const [row] = await db.$queryRaw`
     INSERT INTO "Notifications" ("UserId", "Kind", "Message", "Payload", "ReadAt")
     VALUES (${user.id}, ${kind}, ${message}, ${payload}::jsonb, ${readAt})

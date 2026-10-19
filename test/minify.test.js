@@ -113,7 +113,8 @@ test('approval minifies a pending build and updates digest, integrity, size, and
   assert.equal(createHash('sha256').update(afterBytes).digest('hex'), after.blob_digest);
 
   // The publish charged the unminified build; approval refunded the shaved bytes.
-  const [account] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [account] =
+    await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   assert.equal(Number(account.blob_bytes), Number(after.blob_size) + Number(row.source_size));
 
   // The old unminified file is no longer referenced and is swept.

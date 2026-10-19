@@ -373,8 +373,14 @@ describe('changing an organization', () => {
       .delete(apiPath(`/orgs/${ns}`))
       .set(bearer(owner.token))
       .expect(204);
-    assert.equal((await db.$queryRaw`SELECT 1 FROM "Versions" WHERE "Namespace" = ${ns}`).length, 0);
-    assert.equal((await db.$queryRaw`SELECT 1 FROM "Webhooks" WHERE "Namespace" = ${ns}`).length, 0);
+    assert.equal(
+      (await db.$queryRaw`SELECT 1 FROM "Versions" WHERE "Namespace" = ${ns}`).length,
+      0,
+    );
+    assert.equal(
+      (await db.$queryRaw`SELECT 1 FROM "Webhooks" WHERE "Namespace" = ${ns}`).length,
+      0,
+    );
     assert.equal((await db.$queryRaw`SELECT 1 FROM "WebhookDeliveries"`).length, 0);
     await assert.rejects(stat(blobPathFor(config.dataDir, version.BlobDigest)), {
       code: 'ENOENT',
@@ -535,7 +541,8 @@ describe('owners', () => {
       await approveVersion(app, admin.token, ns, id, '1.0.0');
       await publishProject(app, ns, 'retained', owner.token, { code: 'const retained = 2;' });
     }
-    const removed = await db.$queryRaw`SELECT * FROM "Versions" WHERE "ExtensionId" LIKE 'removed%'`;
+    const removed =
+      await db.$queryRaw`SELECT * FROM "Versions" WHERE "ExtensionId" LIKE 'removed%'`;
     await request(app)
       .delete(apiPath(`/users/${publisher.user.namespace}`))
       .set(bearer(publisher.token))
@@ -544,7 +551,8 @@ describe('owners', () => {
       const rows = await db.$queryRaw`SELECT * FROM "Versions" WHERE "Namespace" = ${ns}`;
       assert.equal(rows.length, 1);
       assert.equal(rows[0].ExtensionId, 'retained');
-      const [account] = await db.$queryRaw`SELECT "BlobBytes" FROM "Users" WHERE "Namespace" = ${ns}`;
+      const [account] =
+        await db.$queryRaw`SELECT "BlobBytes" FROM "Users" WHERE "Namespace" = ${ns}`;
       assert.equal(
         Number(account.BlobBytes),
         Number(rows[0].BlobSize) + Number(rows[0].SourceSize),

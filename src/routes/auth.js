@@ -418,7 +418,8 @@ async function attachIdentity(db, userId, issuer, subject, email) {
 }
 
 async function freeNamespace(tx, base) {
-  const taken = (namespace) => tx.Users.findFirst({ where: { Namespace: namespace }, select: { Id: true } });
+  const taken = (namespace) =>
+    tx.Users.findFirst({ where: { Namespace: namespace }, select: { Id: true } });
   if (base) {
     if (!(await taken(base))) return base;
     for (let suffix = 2; suffix <= 50; suffix += 1) {

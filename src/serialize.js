@@ -138,8 +138,7 @@ function versionLinks(config, row) {
   }
   // Only a version the server still holds the source tarball for can be asked
   // for one.
-  if (row.SourcePath)
-    links.source = sourceUrl(config, row.Namespace, row.ExtensionId, row.Version);
+  if (row.SourcePath) links.source = sourceUrl(config, row.Namespace, row.ExtensionId, row.Version);
   return links;
 }
 

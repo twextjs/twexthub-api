@@ -372,7 +372,13 @@ export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
         const body = JSON.stringify(payload);
         const signature = signWebhookPayload(hook.Secret, body);
         await db.WebhookDeliveries.create({
-          data: { WebhookId: hook.Id, Event: event, Payload: payload, Body: body, Signature: signature },
+          data: {
+            WebhookId: hook.Id,
+            Event: event,
+            Payload: payload,
+            Body: body,
+            Signature: signature,
+          },
         });
       }
     } catch (error) {
@@ -535,32 +541,28 @@ export async function attemptDelivery(db, delivery, resolveTarget = resolvePubli
   // stamped is the holder's proof: if the lease ran out and a peer re-claimed
   // the row, its deadline has moved on, so a late result from the original
   // attempt is dropped instead of overwriting the newer attempt's work.
-  await db.WebhookDeliveries
-    .updateMany({
-      where: {
-        Id: delivery.Id,
-        Status: 'delivering',
-        NextAttemptAt: delivery.NextAttemptAt,
-      },
-      data: {
-        Status: ok ? 'delivered' : retrying ? 'retrying' : 'failed',
-        Attempt: attempt,
-        LastError: ok ? null : error,
-        NextAttemptAt: retrying ? new Date(completedAt + delay) : null,
-        UpdatedAt: new Date(),
-      },
-    })
-    .catch(() => {});
+  await db.WebhookDeliveries.updateMany({
+    where: {
+      Id: delivery.Id,
+      Status: 'delivering',
+      NextAttemptAt: delivery.NextAttemptAt,
+    },
+    data: {
+      Status: ok ? 'delivered' : retrying ? 'retrying' : 'failed',
+      Attempt: attempt,
+      LastError: ok ? null : error,
+      NextAttemptAt: retrying ? new Date(completedAt + delay) : null,
+      UpdatedAt: new Date(),
+    },
+  }).catch(() => {});
   if (ok || retrying) {
-    await db.Webhooks
-      .updateMany({
-        where: { Id: delivery.WebhookId },
-        data: {
-          LastDeliveryStatus: ok ? 'ok' : 'error',
-          LastDeliveryAt: new Date(),
-        },
-      })
-      .catch(() => {});
+    await db.Webhooks.updateMany({
+      where: { Id: delivery.WebhookId },
+      data: {
+        LastDeliveryStatus: ok ? 'ok' : 'error',
+        LastDeliveryAt: new Date(),
+      },
+    }).catch(() => {});
   }
   return { id: delivery.Id, ok, retrying, error };
 }

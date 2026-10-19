@@ -193,7 +193,10 @@ describe('the old address redirects', () => {
 
     const rejected = await publishProject(app, ns, 'hello', owner.token, { version: '2.0.0' }, 409);
     assert.match(rejected.body.detail, /transferred away/);
-    assert.equal((await db.$queryRaw`SELECT 1 FROM "Versions" WHERE "Namespace" = ${ns}`).length, 0);
+    assert.equal(
+      (await db.$queryRaw`SELECT 1 FROM "Versions" WHERE "Namespace" = ${ns}`).length,
+      0,
+    );
     assert.deepEqual(await versionsMoved(ns, 'hello', other.user.namespace), ['1.0.0']);
   });
 
@@ -485,7 +488,8 @@ describe('what the move carries', () => {
             WHERE "Namespace" = ${namespace} AND "ExtensionId" = 'hello'`
         )[0].n,
       );
-    const [charged] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+    const [charged] =
+      await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
     assert.ok(Number(charged.blob_bytes) > 0);
     assert.ok((await events(ns)) > 0);
 
@@ -540,8 +544,10 @@ describe('what the move carries', () => {
 
     // The charge moved with the bytes, so the sender is not billed for storage
     // the recipient is serving and the recipient is not given it for free.
-    const [sender] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
-    const [recipient] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${to}`;
+    const [sender] =
+      await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+    const [recipient] =
+      await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${to}`;
     assert.equal(Number(sender.blob_bytes), 0);
     assert.equal(Number(recipient.blob_bytes), Number(charged.blob_bytes));
   });

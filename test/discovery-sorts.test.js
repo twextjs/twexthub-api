@@ -405,7 +405,8 @@ test('badge colour is derived per package, stays put, and stays readable', async
     'kilo',
     'lima',
   ];
-  const owner = await db.$queryRaw`SELECT "OwnerId" FROM "Versions" WHERE "Namespace" = ${ns} LIMIT 1`;
+  const owner =
+    await db.$queryRaw`SELECT "OwnerId" FROM "Versions" WHERE "Namespace" = ${ns} LIMIT 1`;
   for (const name of names) {
     await db.$executeRaw`INSERT INTO "Versions" ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name",
                                    "License", "Description", "BlobPath", "PublishedAt")

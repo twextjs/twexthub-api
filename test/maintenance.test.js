@@ -243,7 +243,8 @@ test('boot reconciliation decides the status from the namespace account', async 
 test('boot reconciliation refunds the charge when the staging row is dropped', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const ns = owner.user.namespace;
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [{ id: ownerId }] =
+    await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
   await db.$executeRaw`UPDATE "Users" SET "BlobBytes" = 900 WHERE "Namespace" = ${ns}`;
 
   const staging = await insertStaging(ns, ownerId, 'lost', 900, { keepBlob: false });
@@ -251,7 +252,8 @@ test('boot reconciliation refunds the charge when the staging row is dropped', a
 
   const rows = await db.$queryRaw`SELECT "Id" AS id FROM "Versions" WHERE "Id" = ${staging.id}`;
   assert.equal(rows.length, 0, 'an unrecoverable staging row is removed');
-  const [after] = await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [after] =
+    await db.$queryRaw`SELECT "BlobBytes" AS blob_bytes FROM "Users" WHERE "Namespace" = ${ns}`;
   assert.equal(Number(after.blob_bytes), 0, 'the charged bytes come back');
 });
 
@@ -265,7 +267,8 @@ test('boot reconciliation preserves a legacy blob on rollback and re-keys it on 
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [{ id: ownerId }] =
+    await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
   const [row] = await db.$queryRaw`
     INSERT INTO "Versions"
       ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name", "License",
@@ -326,7 +329,8 @@ test('two instances reconciling the same legacy blob do not race each other', as
   fs.mkdirSync(path.dirname(legacyAbs), { recursive: true });
   fs.writeFileSync(legacyAbs, content);
 
-  const [{ id: ownerId }] = await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
+  const [{ id: ownerId }] =
+    await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = ${ns}`;
   const [row] = await db.$queryRaw`
     INSERT INTO "Versions"
       ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name", "License",

@@ -711,7 +711,8 @@ describe('blob collection', () => {
   test('keeps a banner a users row still points at', async () => {
     const ns = await account();
     await put(ns, 'banner', gifBytes(), 'image/gif');
-    const [row] = await db.$queryRaw`SELECT "BannerBlobDigest" AS banner_blob_digest FROM "Users" WHERE "Namespace" = ${ns}`;
+    const [row] =
+      await db.$queryRaw`SELECT "BannerBlobDigest" AS banner_blob_digest FROM "Users" WHERE "Namespace" = ${ns}`;
     const stored = blobPathFor(config.dataDir, row.banner_blob_digest);
     await age([stored]);
 

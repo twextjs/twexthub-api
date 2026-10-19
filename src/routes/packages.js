@@ -398,8 +398,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
             detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
           });
         }
-        const quota =
-          owner.MaxBlobBytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
+        const quota = owner.MaxBlobBytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
         const charge = codeBytes + tarball.length;
         if (Number(owner.BlobBytes ?? 0) + charge > quota) {
           throw new HttpError(413, {
@@ -884,17 +883,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       // Metrics never get in the way of a download, so a failure here costs the
       // event, not the blob.
       const ipHash = await hashDownloadAddress(db, config, req.ip).catch(() => null);
-      void db.DownloadEvents
-        .create({
-          data: {
-            Namespace: row.Namespace,
-            ExtensionId: row.ExtensionId,
-            Version: row.Version,
-            UserAgent: String(req.headers['user-agent'] ?? '').slice(0, 250),
-            IpHash: ipHash,
-          },
-        })
-        .catch(() => {});
+      void db.DownloadEvents.create({
+        data: {
+          Namespace: row.Namespace,
+          ExtensionId: row.ExtensionId,
+          Version: row.Version,
+          UserAgent: String(req.headers['user-agent'] ?? '').slice(0, 250),
+          IpHash: ipHash,
+        },
+      }).catch(() => {});
     } else {
       throw notFound('Compiled output is missing.');
     }
@@ -1402,7 +1399,9 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       // An invitation to manage an extension that no longer exists can never
       // be accepted, and the extension_owners rows survive on purpose, so
       // these have to be cleared here rather than left for a cascade.
-      await tx.ExtensionOwnerInvites.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
+      await tx.ExtensionOwnerInvites.deleteMany({
+        where: { Namespace: namespace, ExtensionId: id },
+      });
       await tx.ExtensionTransfers.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
       // Refund the account's quota for every byte this extension charged.
       const total = found.reduce(
