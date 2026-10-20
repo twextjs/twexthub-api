@@ -35,9 +35,7 @@ export function makeMfaRouter({ db, config, rateLimiter }) {
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
   const settings = webauthnSettings(config);
 
-  // Registration adds to an account's security rather than risking a lockout,
-  // so it needs a session but not a recent one. Removing the last passkey or
-  // replacing the backup codes can strand the account, and does.
+  // Changing the account's factors requires a recent proof of identity.
   const manage = [requireSession];
   const sensitive = [requireSession, requireRecentAuth];
 
@@ -55,7 +53,7 @@ export function makeMfaRouter({ db, config, rateLimiter }) {
     });
   });
 
-  router.post('/passkeys/options', manage, async (req, res) => {
+  router.post('/passkeys/options', sensitive, async (req, res) => {
     const user = req.auth.user;
     const existing = await db.Passkeys.findMany({
       where: { UserId: user.Id },
@@ -78,7 +76,7 @@ export function makeMfaRouter({ db, config, rateLimiter }) {
     res.json({ options });
   });
 
-  router.post('/passkeys', manage, async (req, res) => {
+  router.post('/passkeys', sensitive, async (req, res) => {
     requireObjectBody(req);
     const { response, label } = req.body;
     const user = req.auth.user;
@@ -317,22 +315,29 @@ export function makeMfaRouter({ db, config, rateLimiter }) {
     if (!user) throw unauthorized('Invalid or expired second-factor token.');
     const recordFailures = await loginFailures(req, user.Namespace);
 
-    // Consuming the code and checking it are one statement: a code that has been
-    // spent cannot be spent again, even by a request racing this one. A blank
-    // presentation hashes to something no row holds, so the count stays zero.
-    const consumed = await db.MfaBackupCodes.updateMany({
-      where: { UserId: user.Id, CodeHash: hashBackupCode(code), UsedAt: null },
-      data: { UsedAt: new Date() },
-    });
-    if (consumed.count === 0) {
-      await Promise.all(recordFailures.map((record) => record()));
-      throw unauthorized('That backup code is not valid.');
+    // Claiming the sign-in and spending its code succeed together, so neither
+    // the pending sign-in nor the code can mint a second session in a race.
+    const invalidCode = unauthorized('That backup code is not valid.');
+    let created;
+    try {
+      created = await db.$transaction(async (tx) => {
+        const claimed = await tx.MfaChallenges.deleteMany({ where: { Id: pending.Id } });
+        if (claimed.count === 0) {
+          throw new HttpError(400, { detail: 'That sign-in was already completed.' });
+        }
+        const consumed = await tx.MfaBackupCodes.updateMany({
+          where: { UserId: user.Id, CodeHash: hashBackupCode(code), UsedAt: null },
+          data: { UsedAt: new Date() },
+        });
+        if (consumed.count === 0) throw invalidCode;
+        return createSession(tx, user.Id, sessionTtlMs);
+      });
+    } catch (error) {
+      if (error === invalidCode) {
+        await Promise.all(recordFailures.map((record) => record()));
+      }
+      throw error;
     }
-
-    const created = await db.$transaction(async (tx) => {
-      await tx.MfaChallenges.deleteMany({ where: { Id: pending.Id } });
-      return createSession(tx, user.Id, sessionTtlMs);
-    });
     return sessionBody(created, user);
   }
 

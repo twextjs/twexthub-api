@@ -2,6 +2,8 @@ import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
 import { createAuthenticator } from './fake-authenticator.mjs';
+import { hashToken, newToken } from '../src/auth.js';
+import { CEREMONY_TTL_MS, CHALLENGE_KINDS } from '../src/mfa.js';
 import {
   FIXTURE_PASSWORD,
   TEST_PUBLIC_BASE_URL,
@@ -56,6 +58,24 @@ async function finishWithPasskey(mfaToken, authenticator) {
     .post(apiPath('/auth/mfa/verify'))
     .send({ mfaToken, response: assertion(authenticator, options.body.options.challenge) })
     .expect(201);
+}
+
+// Let both requests read their pending sign-in before either can claim it.
+// The real transaction then has to resolve the competing redemptions.
+function synchronizePendingClaims(t) {
+  const findUnique = db.MfaChallenges.findUnique;
+  const ready = Promise.withResolvers();
+  let reads = 0;
+  // Prisma delegates are proxies without method descriptors for t.mock.method.
+  t.after(() => {
+    db.MfaChallenges.findUnique = findUnique;
+  });
+  db.MfaChallenges.findUnique = async (...args) => {
+    const pending = await findUnique(...args);
+    if (++reads === 2) ready.resolve();
+    await ready.promise;
+    return pending;
+  };
 }
 
 test('the first passkey turns MFA on and shows a set of backup codes once', async () => {
@@ -158,7 +178,86 @@ test('a backup code finishes one sign-in and is then spent', async () => {
     .send({ mfaToken: second.mfaToken, backupCode: code })
     .expect(401);
   assert.match(refused.body.detail, /backup code/);
+  // A bad code rolls back the claim, and its failure is recorded after that
+  // rollback. The same pending sign-in can still be completed with a fresh code.
+  assert.equal(await db.RateLimitEntries.count({ where: { Bucket: { startsWith: 'login:' } } }), 2);
+  await request(app)
+    .post(apiPath('/auth/mfa/verify'))
+    .send({ mfaToken: second.mfaToken, backupCode: registration.backupCodes[1] })
+    .expect(201);
 });
+
+test(
+  'concurrent backup codes can finish a pending sign-in only once',
+  { timeout: 10_000 },
+  async (t) => {
+    const { user, token } = await signupAndAccept(app, uniqNs());
+    const { body: registration } = await registerPasskey(app, token);
+    const pending = await pausedSignin(user.namespace);
+    const sessionsBefore = await db.Sessions.count();
+    synchronizePendingClaims(t);
+
+    const results = await Promise.all(
+      registration.backupCodes
+        .slice(0, 2)
+        .map((backupCode) =>
+          request(app)
+            .post(apiPath('/auth/mfa/verify'))
+            .send({ mfaToken: pending.mfaToken, backupCode }),
+        ),
+    );
+    assert.deepEqual(results.map((result) => result.status).sort(), [201, 400]);
+    assert.match(results.find((result) => result.status === 400).body.detail, /already completed/);
+    assert.equal(await db.Sessions.count(), sessionsBefore + 1);
+    assert.equal(await db.MfaChallenges.count({ where: { Kind: CHALLENGE_KINDS.signin } }), 0);
+    assert.equal(await db.MfaBackupCodes.count({ where: { UsedAt: null } }), 9);
+    assert.equal(
+      await db.RateLimitEntries.count({ where: { Bucket: { startsWith: 'login:' } } }),
+      0,
+    );
+  },
+);
+
+test(
+  'concurrent pending sign-ins can spend a backup code only once',
+  { timeout: 10_000 },
+  async (t) => {
+    const { user, token } = await signupAndAccept(app, uniqNs());
+    const { body: registration } = await registerPasskey(app, token);
+    const first = await pausedSignin(user.namespace);
+    const account = await db.Users.findUnique({ where: { Namespace: user.namespace } });
+    // Normal sign-in replaces an older pending claim. Seed a second live claim
+    // to exercise code consumption independently of the pending-claim check.
+    const secondToken = newToken();
+    await db.MfaChallenges.create({
+      data: {
+        UserId: account.Id,
+        Kind: CHALLENGE_KINDS.signin,
+        SecretHash: hashToken(secondToken),
+        ExpiresAt: new Date(Date.now() + CEREMONY_TTL_MS),
+      },
+    });
+    const sessionsBefore = await db.Sessions.count();
+    synchronizePendingClaims(t);
+
+    const results = await Promise.all(
+      [first.mfaToken, secondToken].map((mfaToken) =>
+        request(app)
+          .post(apiPath('/auth/mfa/verify'))
+          .send({ mfaToken, backupCode: registration.backupCodes[0] }),
+      ),
+    );
+    assert.deepEqual(results.map((result) => result.status).sort(), [201, 401]);
+    assert.match(results.find((result) => result.status === 401).body.detail, /backup code/);
+    assert.equal(await db.Sessions.count(), sessionsBefore + 1);
+    assert.equal(await db.MfaChallenges.count({ where: { Kind: CHALLENGE_KINDS.signin } }), 1);
+    assert.equal(await db.MfaBackupCodes.count({ where: { UsedAt: null } }), 9);
+    assert.equal(
+      await db.RateLimitEntries.count({ where: { Bucket: { startsWith: 'login:' } } }),
+      2,
+    );
+  },
+);
 
 test('backup codes stop being offered once the set is used up', async () => {
   const { user, token } = await signupAndAccept(app, uniqNs());
@@ -193,9 +292,17 @@ test('removing the last passkey turns MFA off and abandons a waiting sign-in', a
   await signin(user.namespace).expect(201);
 });
 
-test('removing a passkey and replacing the codes need a recent sign-in', async () => {
+test('adding or removing a passkey and replacing the codes need a recent sign-in', async () => {
   const { token, session } = await signupAndAccept(app, uniqNs());
   const { authenticator, body: registration } = await registerPasskey(app, token);
+  const registrationOptions = await request(app)
+    .post(apiPath('/auth/mfa/passkeys/options'))
+    .set(bearer(token))
+    .expect(200);
+  const response = createAuthenticator().registrationResponse({
+    challenge: registrationOptions.body.options.challenge,
+    ...ceremony,
+  });
 
   // Still valid, but an hour past the window the reauth check reads.
   await db.Sessions.update({
@@ -208,6 +315,12 @@ test('removing a passkey and replacing the codes need a recent sign-in', async (
     .set(bearer(token))
     .expect(403);
   assert.match(refused.body.detail, /recent/i);
+  await request(app).post(apiPath('/auth/mfa/passkeys/options')).set(bearer(token)).expect(403);
+  await request(app)
+    .post(apiPath('/auth/mfa/passkeys'))
+    .set(bearer(token))
+    .send({ response })
+    .expect(403);
   await request(app).post(apiPath('/auth/mfa/backup-codes')).set(bearer(token)).expect(403);
 
   // The passkey pair refreshes the session's own authentication instead of
@@ -222,6 +335,12 @@ test('removing a passkey and replacing the codes need a recent sign-in', async (
     .send({ response: assertion(authenticator, options.body.options.challenge) })
     .expect(200);
   assert.equal(typeof reauth.body.reauthenticatedAt, 'string');
+  await request(app)
+    .post(apiPath('/auth/mfa/passkeys'))
+    .set(bearer(token))
+    .send({ response })
+    .expect(201);
+  await registerPasskey(app, token, 'After reauthentication');
 
   const codes = await request(app)
     .post(apiPath('/auth/mfa/backup-codes'))

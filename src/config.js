@@ -35,7 +35,7 @@ export const DEFAULTS = {
       rpName: null,
     },
     // How long a session stays "recently authenticated" for the operations
-    // that demand it (removing a passkey, regenerating backup codes).
+    // that demand it (adding/removing a passkey, regenerating backup codes).
     reauthWindowMinutes: 10,
   },
   rateLimits: {
@@ -273,6 +273,16 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
   config.apiRoot = normalizeApiRoot(config.apiRoot);
   normalizeOidc(config);
   normalizeWebauthn(config);
+  const reauthWindow = config.auth.reauthWindowMinutes;
+  const reauthWindowMinutes = Number(reauthWindow);
+  if (
+    !['number', 'string'].includes(typeof reauthWindow) ||
+    !Number.isFinite(reauthWindowMinutes) ||
+    reauthWindowMinutes <= 0
+  ) {
+    throw new Error('auth.reauthWindowMinutes must be a finite positive number');
+  }
+  config.auth.reauthWindowMinutes = reauthWindowMinutes;
   if (!config.database.url) {
     throw new Error(
       `database.url is required (set it in ${configPath}, pass a file via --config, or set TWEXTHUB_DATABASE_URL)`,

@@ -335,9 +335,8 @@ paths:
       operationId: mfaRegistrationOptions
       tags: [Userspace]
       description: >
-        Hands out the WebAuthn options for a registration ceremony. Session
-        required, but not a recent one: adding a passkey strengthens the
-        account rather than risking a lockout. One ceremony per account is kept:
+        Hands out the WebAuthn options for a registration ceremony. Requires
+        a recently authenticated session. One ceremony per account is kept:
         a fresh call replaces whatever the last one left.
       responses:
         '200':
@@ -363,7 +362,7 @@ paths:
         passkey turns MFA on and mints ten backup codes in the same write, so
         MFA never comes on without a way back in; those codes are in this
         response and nowhere else. A later passkey leaves the codes alone and
-        returns `backupCodes: null`. Session required, but not a recent one.
+        returns `backupCodes: null`. Requires a recently authenticated session.
       requestBody:
         required: true
         content:
@@ -529,6 +528,7 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
         '429': { $ref: '#/components/responses/TooManyRequests' }

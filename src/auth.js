@@ -201,8 +201,8 @@ export function requireSession(req, res, next) {
 }
 
 // A session proves who the caller is; this also demands that the proof is
-// recent. It guards the changes that could lock an account out of its own
-// second factor -- removing a passkey, regenerating backup codes -- where a
+// recent. It guards changes to the account's second factor -- adding or
+// removing a passkey, regenerating backup codes -- where a
 // long-lived session stolen from a browser should not be enough on its own. A
 // sign-in counts, so the ordinary path needs nothing extra; a session that has
 // aged past the window refreshes itself with a passkey (POST /auth/mfa/reauth)
