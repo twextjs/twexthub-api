@@ -111,6 +111,11 @@ async function lookupToken(db, hash) {
       // scope. Copied per request so nothing can widen them in place.
       scopes: [...SCOPES],
       lastUsedAt: session.LastUsedAt,
+      // When this credential was last proven to belong to the account: the
+      // moment the session was created, or the last passkey step-up that
+      // refreshed it. Operations that demand a recent authentication read it;
+      // an automation token has none, and those operations refuse it anyway.
+      authenticatedAt: session.ReauthAt ?? session.CreatedAt,
       user: session.Users,
     };
   }
@@ -192,6 +197,27 @@ export function requireSession(req, res, next) {
     throw forbidden('Automation tokens cannot access this endpoint.');
   }
   next();
+}
+
+// A session proves who the caller is; this also demands that the proof is
+// recent. It guards the changes that could lock an account out of its own
+// second factor -- removing a passkey, regenerating backup codes -- where a
+// long-lived session stolen from a browser should not be enough on its own. A
+// sign-in counts, so the ordinary path needs nothing extra; a session that has
+// aged past the window refreshes itself with a passkey (POST /auth/mfa/reauth)
+// or by signing in again.
+export function makeRequireRecentAuth(config) {
+  const windowMs = config.auth.reauthWindowMinutes * 60_000;
+  return function requireRecentAuth(req, res, next) {
+    requireSession(req, res, () => {});
+    const at = req.auth.authenticatedAt;
+    if (!at || Date.now() - at.getTime() > windowMs) {
+      throw forbidden(
+        'This change needs a recent sign-in. Verify a passkey again, or sign out and back in.',
+      );
+    }
+    next();
+  };
 }
 
 // Admin authority is two separate things: the account carries the admin role,

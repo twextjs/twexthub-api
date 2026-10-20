@@ -89,6 +89,17 @@ export function sessionToObject(row) {
   };
 }
 
+// A passkey as its owner sees it: never the public key or the credential id,
+// which are the server's business, only what names it and when it was used.
+export function passkeyToObject(row) {
+  return {
+    id: String(row.Id),
+    label: row.Label,
+    createdAt: row.CreatedAt.toISOString(),
+    lastUsedAt: row.LastUsedAt ? row.LastUsedAt.toISOString() : null,
+  };
+}
+
 export function automationTokenToObject(row) {
   return {
     id: String(row.Id),
