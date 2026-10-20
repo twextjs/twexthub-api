@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { Router } from 'express';
 import { hashToken, requireSession } from '../auth.js';
+import { beginSigninMfa, hasPasskeys } from '../mfa.js';
 import { makeOidcClient, newSecret, oidcEnabled, OidcError } from '../oidc.js';
 import { conflict, fieldErrors, HttpError, notFound } from '../errors.js';
 import { isValidNamespace, normalizeApiRoot } from '../util.js';
@@ -188,6 +189,13 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const user = await db.Users.findUnique({ where: { Id: flow.UserId } });
     if (!user) throw new HttpError(400, { detail: 'That code is invalid or has expired.' });
 
+    // The provider vouched for the first factor only. An account with a
+    // passkey trades the code for a claim on its second factor rather than for
+    // the session, so signing in through the provider does not bypass MFA.
+    if (await hasPasskeys(db, user.Id)) {
+      return res.status(202).json(await beginSigninMfa(db, user.Id));
+    }
+
     const created = await createSession(db, user.Id, sessionTtlMs);
     res
       .location(mount(`/sessions/${created.session.Id}`))
@@ -340,8 +348,12 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
       return res.redirect(target.toString());
     }
 
-    const created = await createSession(db, user.Id, sessionTtlMs);
     await db.OidcFlows.deleteMany({ where: { Id: flow.Id } });
+    if (await hasPasskeys(db, user.Id)) {
+      return res.status(202).json(await beginSigninMfa(db, user.Id));
+    }
+
+    const created = await createSession(db, user.Id, sessionTtlMs);
     res
       .location(mount(`/sessions/${created.session.Id}`))
       .status(201)
