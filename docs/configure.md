@@ -33,6 +33,10 @@ auth:
     clientId: null
     clientSecret: null
     required: false
+  webauthn:
+    rpId: null # defaults to the hostname of publicBaseUrl
+    rpName: null # defaults to the product name
+  reauthWindowMinutes: 10
 
 rateLimits:
   loginAttemptsPerWindow: 5
@@ -80,6 +84,7 @@ cors:
 - [🗄️ Database](#-database)
 - [🔐 Authentication](#-authentication)
   - [Signing in with an identity provider](#signing-in-with-an-identity-provider)
+  - [Signing in with a passkey](#signing-in-with-a-passkey)
 - [🚦 Rate Limits](#-rate-limits)
 - [📄 Pagination](#-pagination)
 - [📦 Size Limits](#-size-limits)
@@ -132,6 +137,9 @@ Migrations are applied by Prisma Migrate. The server runs `prisma migrate deploy
 - `oidc.clientId`: Client identifier registered at the provider. `TWEXTHUB_OIDC_CLIENT_ID`.
 - `oidc.clientSecret`: Client secret for a confidential client. Leave unset for a public client that authenticates with PKCE alone. `TWEXTHUB_OIDC_CLIENT_SECRET`.
 - `oidc.required`: When `true`, password sign-in and registration are refused and the provider is the only way to get an account. Defaults to `false`. `TWEXTHUB_OIDC_REQUIRED`.
+- `webauthn.rpId`: The domain passkeys are scoped to — the hostname of the site that runs the ceremony, without a scheme or port. Defaults to `null`, which uses the hostname of `publicBaseUrl`. Set it explicitly when the web client is served from a parent domain of the API (for example `example.com` with the API on `api.example.com` and the client on `app.example.com`) or from a different host. `TWEXTHUB_WEBAUTHN_RP_ID`.
+- `webauthn.rpName`: The name an authenticator shows when it offers to store a passkey. Defaults to `null`, which uses the product name. `TWEXTHUB_WEBAUTHN_RP_NAME`.
+- `reauthWindowMinutes`: How long a session counts as recently authenticated for the operations that demand it — removing a passkey, regenerating backup codes. Defaults to `10`. `TWEXTHUB_REAUTH_WINDOW_MINUTES`.
 
 `oidc.issuer` and `oidc.clientId` must be set together, and `oidc.required` cannot be turned on without both — the server refuses to start otherwise, so an instance cannot lock itself out of every way in.
 
@@ -157,6 +165,29 @@ The routes are:
 The first account created through the provider becomes an admin, exactly as the first password registration does. An account's namespace comes from the provider's `preferred_username` (or `nickname`/`username`) when it can be one, with a `user-<hash>` fallback. Email is stored for reference and is never used to match or link accounts — only the provider's `iss`/`sub` pair is.
 
 When `oidc.required` is on, `POST /sessions` and `POST /users` return `403`; existing sessions and tokens keep working. Turn it on only after you have signed in through the provider at least once, so the instance always has an admin.
+
+### Signing in with a passkey
+
+Multi-factor authentication is per account and opt-in: an account registers one or more passkeys, and from then on a password (or provider) sign-in stops at a second step until a passkey or a backup code confirms it. An account with no passkeys signs in exactly as before, so an instance that never enables MFA is unaffected.
+
+The ceremony runs in the browser, so the page that calls `navigator.credentials` has to be served from an origin the server trusts. The server accepts the `publicBaseUrl` origin plus every origin in `cors.allowedOrigins` (a `*` there contributes nothing, since the browser sends a concrete origin). Passkeys are scoped to `webauthn.rpId`; its default — the hostname of `publicBaseUrl` — is right when the web client and the API share a site, and needs setting when they do not.
+
+The routes are:
+
+- `GET /auth/mfa` — the account's MFA state: whether it is on, its passkeys, and how many backup codes remain (session required).
+- `POST /auth/mfa/passkeys/options` and `POST /auth/mfa/passkeys` — register a passkey. The first one turns MFA on and returns ten backup codes, shown once.
+- `PATCH /auth/mfa/passkeys/<id>` and `DELETE /auth/mfa/passkeys/<id>` — rename or remove a passkey. Removing the last one turns MFA off and discards the backup codes.
+- `POST /auth/mfa/backup-codes` — replaces every backup code with ten new ones. The old set stops working immediately.
+- `POST /auth/mfa/reauth/options` and `POST /auth/mfa/reauth` — satisfy a recent-authentication check with a passkey, without signing in again.
+
+The second step of a sign-in uses its own pair:
+
+- `POST /auth/mfa/options` — hands out a WebAuthn challenge for the passkeys of the account waiting to sign in.
+- `POST /auth/mfa/verify` — completes the sign-in with either a passkey assertion or a backup code, and returns the session.
+
+Removing a passkey and regenerating backup codes require the session to be recently authenticated: within `reauthWindowMinutes` of a sign-in (or of a completed `POST /auth/mfa/reauth`). A sign-in that just happened counts, so the common path needs nothing extra. Failed second-factor attempts count against the login rate limit, alongside failed passwords.
+
+A sign-in that stops at the second step returns `202` with `{ "mfaRequired": true, "mfaToken": ..., "methods": [...] }` instead of the `201` session. The token is the credential for the `/auth/mfa/options` and `/auth/mfa/verify` calls and is shown once, like a session token. `POST /sessions`, `POST /auth/oidc/exchange`, and the API-client form of `GET /auth/oidc/callback` all answer this way when the account has MFA on.
 
 ## 🚦 Rate Limits
 
