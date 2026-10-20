@@ -316,7 +316,8 @@ export async function resetDb() {
       await db.$executeRawUnsafe(`
         TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications",
         "Users", "LegalDocuments", "DownloadEvents", "ExtensionDailyDownloads", "ExtensionVersionDailyDownloads", "DistTags",
-        "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows"
+        "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows",
+        "Passkeys", "MfaBackupCodes", "MfaChallenges"
         RESTART IDENTITY CASCADE
       `);
       break;

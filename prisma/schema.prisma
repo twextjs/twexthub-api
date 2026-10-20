@@ -192,6 +192,57 @@ model OrganizationOwners {
   @@index([UserId], map: "organization_owners_user_idx")
 }
 
+/// A ceremony the server has to remember between the two halves of it: the
+/// challenge it handed out, and -- for a sign-in waiting on its second factor --
+/// the secret that lets the anonymous half claim the row again.
+model MfaChallenges {
+  Id         BigInt   @id @default(autoincrement())
+  UserId     BigInt
+  Kind       String
+  SecretHash String?
+  Challenge  String?
+  ExpiresAt  DateTime @db.Timestamptz(6)
+  CreatedAt  DateTime @default(now()) @db.Timestamptz(6)
+  Users      Users    @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([SecretHash, Kind])
+  @@index([ExpiresAt])
+  @@index([UserId, Kind])
+}
+
+/// One passkey. `PublicKey` is the COSE key the registration ceremony returned,
+/// base64url-encoded, and `Counter` is the authenticator's sign counter, which
+/// has to grow between assertions.
+model Passkeys {
+  Id           BigInt    @id @default(autoincrement())
+  UserId       BigInt
+  CredentialId String    @unique
+  PublicKey    String
+  Counter      BigInt    @default(0)
+  Label        String
+  Transports   String[]  @default([])
+  CreatedAt    DateTime  @default(now()) @db.Timestamptz(6)
+  LastUsedAt   DateTime? @db.Timestamptz(6)
+  Users        Users     @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([UserId])
+}
+
+/// A backup code, stored as a SHA-256 hash the same way tokens are: the codes
+/// are generated high-entropy, so a slow hash buys nothing an attacker who can
+/// read the table could not already do. `UsedAt` marks one consumed, and the
+/// whole set is replaced when the account regenerates it.
+model MfaBackupCodes {
+  Id        BigInt    @id @default(autoincrement())
+  UserId    BigInt
+  CodeHash  String    @unique
+  UsedAt    DateTime? @db.Timestamptz(6)
+  CreatedAt DateTime  @default(now()) @db.Timestamptz(6)
+  Users     Users     @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([UserId])
+}
+
 model RateLimitEntries {
   Id          BigInt   @id @default(autoincrement())
   Bucket      String
@@ -214,6 +265,7 @@ model Sessions {
   CreatedAt  DateTime  @default(now()) @db.Timestamptz(6)
   ExpiresAt  DateTime  @db.Timestamptz(6)
   LastUsedAt DateTime? @db.Timestamptz(6)
+  ReauthAt   DateTime? @db.Timestamptz(6)
   Users      Users     @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
 
   @@index([ExpiresAt])
@@ -265,11 +317,14 @@ model Users {
   ExtensionOwnersExtensionOwnersAddedByTousers               ExtensionOwners[]       @relation("extension_owners_added_byTousers")
   ExtensionOwnersExtensionOwnersOwnerIdTousers               ExtensionOwners[]       @relation("extension_owners_owner_idTousers")
   ExtensionTransfers                                         ExtensionTransfers[]
+  MfaBackupCodes                                             MfaBackupCodes[]
+  MfaChallenges                                              MfaChallenges[]
   Notifications                                              Notifications[]
   OidcFlows                                                  OidcFlows[]
   OrganizationOwnersOrganizationOwnersAddedByTousers         OrganizationOwners[]    @relation("organization_owners_added_byTousers")
   OrganizationOwnersOrganizationOwnersOrgIdOrgKindTousers    OrganizationOwners[]    @relation("organization_owners_org_id_org_kindTousers")
   OrganizationOwnersOrganizationOwnersUserIdUserKindTousers  OrganizationOwners[]    @relation("organization_owners_user_id_user_kindTousers")
+  Passkeys                                                   Passkeys[]
   Sessions                                                   Sessions[]
   UserIdentities                                             UserIdentities[]
   Versions                                                   Versions[]
