@@ -49,8 +49,8 @@ test('a trusted publish is accepted when minification brings the build under the
   assert.equal(pub.body.status, 'published');
 
   const [row] = await db.$queryRaw`
-    SELECT blob_digest, blob_size FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'big'
+    SELECT "BlobDigest" AS blob_digest, "BlobSize" AS blob_size FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'big'
   `;
   assert.equal(pub.body.dist.digest, `sha256:${row.blob_digest}`);
   assert.ok(Number(row.blob_size) <= 4096, 'the stored blob respects the limit');

@@ -30,20 +30,20 @@ const LAST_USED_THROTTLE_MS = 60_000;
 // The columns a request needs from the authenticated account. Selected rather
 // than read whole so a password hash never rides along in memory.
 const SESSION_USER_FIELDS = {
-  id: true,
-  namespace: true,
-  display_name: true,
-  role: true,
-  has_published: true,
-  terms_accepted_version: true,
-  created_at: true,
-  bio: true,
-  website: true,
-  github: true,
-  avatar_url: true,
-  banner_url: true,
-  avatar_blob_digest: true,
-  banner_blob_digest: true,
+  Id: true,
+  Namespace: true,
+  DisplayName: true,
+  Role: true,
+  HasPublished: true,
+  TermsAcceptedVersion: true,
+  CreatedAt: true,
+  Bio: true,
+  Website: true,
+  Github: true,
+  AvatarUrl: true,
+  BannerUrl: true,
+  AvatarBlobDigest: true,
+  BannerBlobDigest: true,
 };
 
 export function makeAuthenticate(db) {
@@ -71,18 +71,18 @@ export function makeAuthenticate(db) {
     if (found && shouldTouchLastUsed(found.lastUsedAt)) {
       try {
         if (found.tokenType === 'session') {
-          await db.sessions.update({
-            where: { id: found.tokenId },
-            data: { last_used_at: new Date() },
+          await db.Sessions.update({
+            where: { Id: found.tokenId },
+            data: { LastUsedAt: new Date() },
           });
         } else {
-          await db.automation_tokens.update({
-            where: { id: found.tokenId },
-            data: { last_used_at: new Date() },
+          await db.AutomationTokens.update({
+            where: { Id: found.tokenId },
+            data: { LastUsedAt: new Date() },
           });
         }
       } catch (error) {
-        const table = found.tokenType === 'session' ? 'sessions' : 'automation_tokens';
+        const table = found.tokenType === 'session' ? 'Sessions' : 'AutomationTokens';
         console.warn(
           `failed to update last_used_at for ${table} ${found.tokenId}: ${error.message}`,
         );
@@ -98,35 +98,35 @@ function shouldTouchLastUsed(lastUsedAt) {
 }
 
 async function lookupToken(db, hash) {
-  const session = await db.sessions.findUnique({
-    where: { token_hash: hash },
-    include: { users: { select: SESSION_USER_FIELDS } },
+  const session = await db.Sessions.findUnique({
+    where: { TokenHash: hash },
+    include: { Users: { select: SESSION_USER_FIELDS } },
   });
   if (session) {
-    if (session.expires_at && session.expires_at <= new Date()) return null;
+    if (session.ExpiresAt && session.ExpiresAt <= new Date()) return null;
     return {
-      tokenId: session.id,
+      tokenId: session.Id,
       tokenType: 'session',
       // A session is the full authority of the account, so it satisfies every
       // scope. Copied per request so nothing can widen them in place.
       scopes: [...SCOPES],
-      lastUsedAt: session.last_used_at,
-      user: session.users,
+      lastUsedAt: session.LastUsedAt,
+      user: session.Users,
     };
   }
 
-  const token = await db.automation_tokens.findUnique({
-    where: { token_hash: hash },
-    include: { users: { select: SESSION_USER_FIELDS } },
+  const token = await db.AutomationTokens.findUnique({
+    where: { TokenHash: hash },
+    include: { Users: { select: SESSION_USER_FIELDS } },
   });
   if (!token) return null;
-  if (token.expires_at && token.expires_at <= new Date()) return null;
+  if (token.ExpiresAt && token.ExpiresAt <= new Date()) return null;
   return {
-    tokenId: token.id,
+    tokenId: token.Id,
     tokenType: 'automation',
-    scopes: token.scopes,
-    lastUsedAt: token.last_used_at,
-    user: token.users,
+    scopes: token.Scopes,
+    lastUsedAt: token.LastUsedAt,
+    user: token.Users,
   };
 }
 
@@ -144,13 +144,13 @@ export function requireAuth(req, res, next) {
 export async function isExtensionOwner(db, user, namespace, id) {
   const rows = await db.$queryRaw`
     SELECT 1
-    FROM extension_owners o
-    WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
+    FROM "ExtensionOwners" o
+    WHERE o."Namespace" = ${namespace} AND o."ExtensionId" = ${id}
       AND (
-        o.owner_id = ${user.id}
+        o."OwnerId" = ${user.Id}
         OR EXISTS (
-          SELECT 1 FROM organization_owners g
-          WHERE g.org_id = o.owner_id AND g.user_id = ${user.id}
+          SELECT 1 FROM "OrganizationOwners" g
+          WHERE g."OrgId" = o."OwnerId" AND g."UserId" = ${user.Id}
         )
       )
     LIMIT 1
@@ -164,10 +164,10 @@ export async function isExtensionOwner(db, user, namespace, id) {
 export async function isOrganizationOwner(db, user, namespace) {
   const rows = await db.$queryRaw`
     SELECT 1
-    FROM organization_owners g
-    JOIN users org ON org.id = g.org_id
-    WHERE g.user_id = ${user.id} AND org.namespace = ${namespace}
-      AND org.kind = 'organization'
+    FROM "OrganizationOwners" g
+    JOIN "Users" org ON org."Id" = g."OrgId"
+    WHERE g."UserId" = ${user.Id} AND org."Namespace" = ${namespace}
+      AND org."Kind" = 'organization'
     LIMIT 1
   `;
   return rows.length > 0;
@@ -178,12 +178,12 @@ export async function isOrganizationOwner(db, user, namespace) {
 // organization holding an invitation needs to know it is waiting.
 export async function organizationsOwnedBy(db, user) {
   const rows = await db.$queryRaw`
-    SELECT org.namespace
-    FROM organization_owners g
-    JOIN users org ON org.id = g.org_id
-    WHERE g.user_id = ${user.id} AND org.kind = 'organization'
+    SELECT org."Namespace"
+    FROM "OrganizationOwners" g
+    JOIN "Users" org ON org."Id" = g."OrgId"
+    WHERE g."UserId" = ${user.Id} AND org."Kind" = 'organization'
   `;
-  return rows.map((row) => row.namespace);
+  return rows.map((row) => row.Namespace);
 }
 
 export function requireSession(req, res, next) {
@@ -200,14 +200,14 @@ export function requireSession(req, res, next) {
 // has to have been granted `admin` as well, and the role check still runs
 // first, so a normal account cannot mint itself an admin token.
 export function isAdmin(auth) {
-  return Boolean(auth) && auth.user.role === 'admin' && auth.scopes.includes('admin');
+  return Boolean(auth) && auth.user.Role === 'admin' && auth.scopes.includes('admin');
 }
 
 // Throws the specific reason; the callers that have a message of their own to
 // add (a review, say) would rather call this than restate both checks.
 export function assertAdmin(auth) {
   if (!auth) throw unauthorized();
-  if (auth.user.role !== 'admin') {
+  if (auth.user.Role !== 'admin') {
     throw forbidden('Admin privileges are required.');
   }
   if (!auth.scopes.includes('admin')) {
@@ -228,14 +228,14 @@ export function makeRequireTerms(db) {
     requireAuth(req, res, () => {});
     const now = Date.now();
     if (cachedVersion === undefined || cachedVersion === null || now - cachedAt > 60_000) {
-      const terms = await db.legal_documents.findUnique({
-        where: { kind: 'terms' },
-        select: { version: true },
+      const terms = await db.LegalDocuments.findUnique({
+        where: { Kind: 'terms' },
+        select: { Version: true },
       });
-      cachedVersion = terms ? terms.version : null;
+      cachedVersion = terms ? terms.Version : null;
       cachedAt = now;
     }
-    const accepted = req.auth.user.terms_accepted_version;
+    const accepted = req.auth.user.TermsAcceptedVersion;
     // No published terms means nothing to accept yet; the first document can
     // only be created from this un-gated state.
     if (cachedVersion !== null && (!accepted || accepted < cachedVersion)) {

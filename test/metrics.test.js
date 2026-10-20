@@ -48,8 +48,8 @@ async function makePublished() {
 async function waitForEvents(namespace, id, count) {
   for (let i = 0; i < 50; i += 1) {
     const [row] = await db.$queryRaw`
-      SELECT COUNT(*)::int AS n FROM download_events
-      WHERE namespace = ${namespace} AND extension_id = ${id}
+      SELECT COUNT(*)::int AS n FROM "DownloadEvents"
+      WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${id}
     `;
     if (row.n >= count) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -82,12 +82,12 @@ test('downloads roll up per version and appear on version objects', async () => 
 
   // The per-version rollup keeps the versions apart...
   const buckets = await db.$queryRaw`
-    SELECT version, total_downloads FROM extension_version_daily_downloads
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello'
-    ORDER BY version
+    SELECT "Version", "TotalDownloads" FROM "ExtensionVersionDailyDownloads"
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello'
+    ORDER BY "Version"
   `;
   assert.deepEqual(
-    buckets.map((b) => [b.version, Number(b.total_downloads)]),
+    buckets.map((b) => [b.Version, Number(b.TotalDownloads)]),
     [
       ['1.0.0', 2],
       ['2.0.0', 1],
@@ -146,16 +146,16 @@ test('downloads are counted, surfaced, and feed trending', async () => {
     .expect(200);
 
   await db.$executeRawUnsafe(`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash, created_at)
-    SELECT e.namespace, e.extension_id, '1.0.0', 'x', '10.0.0.1',
+    INSERT INTO "DownloadEvents" ("Namespace", "ExtensionId", "Version", "UserAgent", "IpHash", "CreatedAt")
+    SELECT e."Namespace", e."ExtensionId", '1.0.0', 'x', '10.0.0.1',
            now() - INTERVAL '3 days'
-    FROM versions e
-    WHERE e.extension_id = 'widget'
+    FROM "Versions" e
+    WHERE e."ExtensionId" = 'widget'
     UNION ALL
-    SELECT e.namespace, e.extension_id, '2.0.0', 'y', '10.0.0.2',
+    SELECT e."Namespace", e."ExtensionId", '2.0.0', 'y', '10.0.0.2',
            now() - INTERVAL '8 days'
-    FROM versions e
-    WHERE e.extension_id = 'gizmo'
+    FROM "Versions" e
+    WHERE e."ExtensionId" = 'gizmo'
   `);
   for (const days of [3, 8]) {
     await aggregateDay(new Date(Date.now() - days * 86400000));
@@ -164,10 +164,10 @@ test('downloads are counted, surfaced, and feed trending', async () => {
   // the published extension's daily bucket only counts aggregations run so far
   await aggregateDay(new Date());
   const [bucket] = await db.$queryRaw`
-    SELECT * FROM extension_daily_downloads
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello'
+    SELECT * FROM "ExtensionDailyDownloads"
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello'
   `;
-  assert.ok(Number(bucket.total_downloads) >= 2);
+  assert.ok(Number(bucket.TotalDownloads) >= 2);
 
   const detail = await request(app)
     .get(apiPath(`/@${ownerNs}/hello`))
@@ -195,7 +195,7 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
   const sixDaysAgo = new Date(today - 6 * 86400000);
   const sevenDaysAgo = new Date(today - 7 * 86400000);
   await db.$executeRaw`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, created_at)
+    INSERT INTO "DownloadEvents" ("Namespace", "ExtensionId", "Version", "UserAgent", "CreatedAt")
     VALUES (${ownerNs}, 'recent', '1.0.0', 'recent', ${sixDaysAgo.toISOString()}),
            (${ownerNs}, 'old', '1.0.0', 'old', ${sevenDaysAgo.toISOString()})
   `;
@@ -212,15 +212,15 @@ test('trending selects a deprecated version when a newer version was yanked', as
   const { ownerNs, ownerToken } = await makePublished();
   await publishProject(app, ownerNs, 'hello', ownerToken, { version: '2.0.0' });
   await db.$executeRaw`
-    UPDATE versions SET status = 'deprecated'
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '1.0.0'
+    UPDATE "Versions" SET "Status" = 'deprecated'
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello' AND "Version" = '1.0.0'
   `;
   await db.$executeRaw`
-    UPDATE versions SET status = 'yanked'
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '2.0.0'
+    UPDATE "Versions" SET "Status" = 'yanked'
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello' AND "Version" = '2.0.0'
   `;
   await db.$executeRaw`
-    INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
+    INSERT INTO "ExtensionDailyDownloads" ("Namespace", "ExtensionId", "Day", "TotalDownloads")
     VALUES (${ownerNs}, 'hello', CURRENT_DATE, 3)
   `;
 
@@ -239,9 +239,9 @@ test('a download records a keyed hash of the address, never the address', async 
     .expect(200);
 
   const readEvents = () => db.$queryRaw`
-    SELECT ip_hash FROM download_events
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello'
-    ORDER BY id
+    SELECT "IpHash" FROM "DownloadEvents"
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello'
+    ORDER BY "Id"
   `;
   // The route records the event after it answers, so give the insert a moment.
   let events = await readEvents();
@@ -251,18 +251,18 @@ test('a download records a keyed hash of the address, never the address', async 
   }
   assert.equal(events.length, 2);
   for (const event of events) {
-    assert.ok(event.ip_hash, 'the event still identifies the client');
-    assert.ok(!event.ip_hash.includes('127.0.0.1'), 'the raw loopback address is not stored');
-    assert.equal(event.ip_hash.length, 22);
+    assert.ok(event.IpHash, 'the event still identifies the client');
+    assert.ok(!event.IpHash.includes('127.0.0.1'), 'the raw loopback address is not stored');
+    assert.equal(event.IpHash.length, 22);
   }
-  assert.equal(events[0].ip_hash, events[1].ip_hash, 'the same client hashes the same way');
+  assert.equal(events[0].IpHash, events[1].IpHash, 'the same client hashes the same way');
 
   // The hash still serves its purpose: one client, one distinct download.
   await aggregateDay(new Date());
   const [day] = await db.$queryRaw`
-    SELECT distinct_downloads, total_downloads FROM extension_daily_downloads
-    WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND day = CURRENT_DATE
+    SELECT "DistinctDownloads", "TotalDownloads" FROM "ExtensionDailyDownloads"
+    WHERE "Namespace" = ${ownerNs} AND "ExtensionId" = 'hello' AND "Day" = CURRENT_DATE
   `;
-  assert.equal(Number(day.total_downloads), 2);
-  assert.equal(Number(day.distinct_downloads), 1);
+  assert.equal(Number(day.TotalDownloads), 2);
+  assert.equal(Number(day.DistinctDownloads), 1);
 });

@@ -70,16 +70,16 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const binding = newSecret();
     const authorizationUrl = await client.authorizationUrl({ state, nonce, verifier });
 
-    await db.oidc_flows.deleteMany({ where: { expires_at: { lt: new Date() } } });
-    await db.oidc_flows.create({
+    await db.OidcFlows.deleteMany({ where: { ExpiresAt: { lt: new Date() } } });
+    await db.OidcFlows.create({
       data: {
-        kind: 'signin',
-        state_hash: hashToken(state),
-        flow_secret_hash: hashToken(binding),
-        code_verifier: verifier,
-        nonce,
-        return_to: returnTo,
-        expires_at: new Date(Date.now() + FLOW_TTL_MS),
+        Kind: 'signin',
+        StateHash: hashToken(state),
+        FlowSecretHash: hashToken(binding),
+        CodeVerifier: verifier,
+        Nonce: nonce,
+        ReturnTo: returnTo,
+        ExpiresAt: new Date(Date.now() + FLOW_TTL_MS),
       },
     });
     setFlowCookie(res, state, binding);
@@ -111,11 +111,11 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const exchangeCode = newSecret();
     const binding = readCookie(req, flowCookieName(state));
     const [flow] = await db.$queryRaw`
-      UPDATE oidc_flows
-      SET exchange_code_hash = ${hashToken(exchangeCode)}
-      WHERE state_hash = ${hashToken(state)}
-        AND flow_secret_hash = ${hashToken(binding ?? '')}
-        AND exchange_code_hash IS NULL AND expires_at > now()
+      UPDATE "OidcFlows"
+      SET "ExchangeCodeHash" = ${hashToken(exchangeCode)}
+      WHERE "StateHash" = ${hashToken(state)}
+        AND "FlowSecretHash" = ${hashToken(binding ?? '')}
+        AND "ExchangeCodeHash" IS NULL AND "ExpiresAt" > now()
       RETURNING *
     `;
     if (!flow) {
@@ -153,7 +153,7 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
 
     let claims;
     try {
-      claims = await client.redeemCode({ code, verifier: flow.code_verifier, nonce: flow.nonce });
+      claims = await client.redeemCode({ code, verifier: flow.CodeVerifier, nonce: flow.Nonce });
     } catch (error) {
       if (error instanceof OidcError) {
         return failFlow(req, res, flow, error.status, error.slug, error.detail);
@@ -163,7 +163,7 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const issuer = claims.iss;
     const subject = claims.sub;
 
-    if (flow.kind === 'link') {
+    if (flow.Kind === 'link') {
       return finishLink(req, res, flow, { issuer, subject, claims });
     }
     return finishSignin(req, res, flow, exchangeCode, { issuer, subject, claims });
@@ -180,17 +180,17 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
       throw fieldErrors([{ field: 'code', message: 'A code is required.' }]);
     }
     const [flow] = await db.$queryRaw`
-      DELETE FROM oidc_flows
-      WHERE exchange_code_hash = ${hashToken(code)} AND user_id IS NOT NULL AND expires_at > now()
+      DELETE FROM "OidcFlows"
+      WHERE "ExchangeCodeHash" = ${hashToken(code)} AND "UserId" IS NOT NULL AND "ExpiresAt" > now()
       RETURNING *
     `;
     if (!flow) throw new HttpError(400, { detail: 'That code is invalid or has expired.' });
-    const user = await db.users.findUnique({ where: { id: flow.user_id } });
+    const user = await db.Users.findUnique({ where: { Id: flow.UserId } });
     if (!user) throw new HttpError(400, { detail: 'That code is invalid or has expired.' });
 
-    const created = await createSession(db, user.id, sessionTtlMs);
+    const created = await createSession(db, user.Id, sessionTtlMs);
     res
-      .location(mount(`/sessions/${created.session.id}`))
+      .location(mount(`/sessions/${created.session.Id}`))
       .status(201)
       .json({
         session: sessionToObject(created.session),
@@ -213,17 +213,17 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     const binding = newSecret();
     const authorizationUrl = await client.authorizationUrl({ state, nonce, verifier });
 
-    await db.oidc_flows.deleteMany({ where: { expires_at: { lt: new Date() } } });
-    await db.oidc_flows.create({
+    await db.OidcFlows.deleteMany({ where: { ExpiresAt: { lt: new Date() } } });
+    await db.OidcFlows.create({
       data: {
-        kind: 'link',
-        state_hash: hashToken(state),
-        flow_secret_hash: hashToken(binding),
-        code_verifier: verifier,
-        nonce,
-        user_id: req.auth.user.id,
-        return_to: returnTo,
-        expires_at: new Date(Date.now() + FLOW_TTL_MS),
+        Kind: 'link',
+        StateHash: hashToken(state),
+        FlowSecretHash: hashToken(binding),
+        CodeVerifier: verifier,
+        Nonce: nonce,
+        UserId: req.auth.user.Id,
+        ReturnTo: returnTo,
+        ExpiresAt: new Date(Date.now() + FLOW_TTL_MS),
       },
     });
     setFlowCookie(res, state, binding);
@@ -231,10 +231,10 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
   });
 
   router.get('/oidc/identities', requireSession, async (req, res) => {
-    const rows = await db.user_identities.findMany({
-      where: { user_id: req.auth.user.id },
-      select: { id: true, issuer: true, subject: true, email: true, created_at: true },
-      orderBy: { id: 'asc' },
+    const rows = await db.UserIdentities.findMany({
+      where: { UserId: req.auth.user.Id },
+      select: { Id: true, Issuer: true, Subject: true, Email: true, CreatedAt: true },
+      orderBy: { Id: 'asc' },
     });
     res.json({ data: rows.map(identityToObject) });
   });
@@ -247,36 +247,36 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
     await db.$transaction(async (tx) => {
       const [identity] = await tx.$queryRaw`
-        SELECT * FROM user_identities WHERE id = ${id} AND user_id = ${req.auth.user.id} FOR UPDATE
+        SELECT * FROM "UserIdentities" WHERE "Id" = ${id} AND "UserId" = ${req.auth.user.Id} FOR UPDATE
       `;
       if (!identity) throw notFound('No such linked identity.');
       const [user] =
-        await tx.$queryRaw`SELECT * FROM users WHERE id = ${req.auth.user.id} FOR UPDATE`;
-      const count = await tx.user_identities.count({ where: { user_id: req.auth.user.id } });
+        await tx.$queryRaw`SELECT * FROM "Users" WHERE "Id" = ${req.auth.user.Id} FOR UPDATE`;
+      const count = await tx.UserIdentities.count({ where: { UserId: req.auth.user.Id } });
       // Unlinking the last way in would strand the account: a password that
       // still works is a way in, but one the instance no longer accepts is not.
-      const canUsePassword = Boolean(user.password_hash) && !oidc.required;
+      const canUsePassword = Boolean(user.PasswordHash) && !oidc.required;
       if (!canUsePassword && count <= 1) {
         throw conflict(
-          user.password_hash
+          user.PasswordHash
             ? 'Password sign-in is turned off on this instance, so this link is the only way in.'
             : 'This link is the only way into the account. Ask an admin for a password before removing it.',
         );
       }
-      await tx.user_identities.delete({ where: { id } });
+      await tx.UserIdentities.delete({ where: { Id: id } });
       await audit(
         tx,
         user,
         'identity.unlink',
-        { namespace: user.namespace },
-        { issuer: identity.issuer },
+        { namespace: user.Namespace },
+        { issuer: identity.Issuer },
       );
     });
     res.status(204).end();
   });
 
   async function finishLink(req, res, flow, { issuer, subject, claims }) {
-    const user = await db.users.findUnique({ where: { id: flow.user_id } });
+    const user = await db.Users.findUnique({ where: { Id: flow.UserId } });
     if (!user) {
       return failFlow(
         req,
@@ -287,8 +287,8 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
         'The account this link was started for no longer exists.',
       );
     }
-    const identity = await attachIdentity(db, user.id, issuer, subject, claimEmail(claims));
-    if (!identity || Number(identity.user_id) !== Number(user.id)) {
+    const identity = await attachIdentity(db, user.Id, issuer, subject, claimEmail(claims));
+    if (!identity || Number(identity.UserId) !== Number(user.Id)) {
       return failFlow(
         req,
         res,
@@ -299,11 +299,11 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
       );
     }
     if (identity.created) {
-      await audit(db, user, 'identity.link', { namespace: user.namespace }, { issuer });
+      await audit(db, user, 'identity.link', { namespace: user.Namespace }, { issuer });
     }
-    await db.oidc_flows.deleteMany({ where: { id: flow.id } });
+    await db.OidcFlows.deleteMany({ where: { Id: flow.Id } });
     if (wantsHtml(req)) {
-      const target = redirectTarget(flow.return_to, config);
+      const target = redirectTarget(flow.ReturnTo, config);
       target.searchParams.set('oidc_linked', '1');
       return res.redirect(target.toString());
     }
@@ -311,12 +311,12 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
   }
 
   async function finishSignin(req, res, flow, exchangeCode, { issuer, subject, claims }) {
-    const existing = await db.user_identities.findUnique({
-      where: { issuer_subject: { issuer, subject } },
+    const existing = await db.UserIdentities.findUnique({
+      where: { Issuer_Subject: { Issuer: issuer, Subject: subject } },
     });
     let user;
     if (existing) {
-      user = await db.users.findUnique({ where: { id: existing.user_id } });
+      user = await db.Users.findUnique({ where: { Id: existing.UserId } });
     } else {
       user = await createAccountFromClaims(db, rateLimiter, req, {
         issuer,
@@ -331,19 +331,19 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     // A browser cannot read an Authorization header from a redirect, so it is
     // sent back with a one-time code instead and trades that for the session.
     if (wantsHtml(req)) {
-      await db.oidc_flows.update({
-        where: { id: flow.id },
-        data: { user_id: user.id, expires_at: new Date(Date.now() + EXCHANGE_TTL_MS) },
+      await db.OidcFlows.update({
+        where: { Id: flow.Id },
+        data: { UserId: user.Id, ExpiresAt: new Date(Date.now() + EXCHANGE_TTL_MS) },
       });
-      const target = redirectTarget(flow.return_to, config);
+      const target = redirectTarget(flow.ReturnTo, config);
       target.searchParams.set('oidc_code', exchangeCode);
       return res.redirect(target.toString());
     }
 
-    const created = await createSession(db, user.id, sessionTtlMs);
-    await db.oidc_flows.deleteMany({ where: { id: flow.id } });
+    const created = await createSession(db, user.Id, sessionTtlMs);
+    await db.OidcFlows.deleteMany({ where: { Id: flow.Id } });
     res
-      .location(mount(`/sessions/${created.session.id}`))
+      .location(mount(`/sessions/${created.session.Id}`))
       .status(201)
       .json({
         session: sessionToObject(created.session),
@@ -357,7 +357,7 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
   // the problem response its own Accept header asked for.
   function failFlow(req, res, flow, status, slug, detail) {
     if (wantsHtml(req)) {
-      const target = redirectTarget(flow?.return_to, config);
+      const target = redirectTarget(flow?.ReturnTo, config);
       target.searchParams.set('oidc_error', slug);
       return res.redirect(target.toString());
     }
@@ -380,20 +380,20 @@ async function createAccountFromClaims(db, rateLimiter, req, { issuer, subject, 
   return withLocks(db, ['signup-bootstrap'], async (tx) => {
     // Another callback for the same identity may have created the account
     // while this one waited for the lock.
-    const existing = await tx.user_identities.findFirst({
-      where: { issuer, subject },
-      include: { users: true },
+    const existing = await tx.UserIdentities.findFirst({
+      where: { Issuer: issuer, Subject: subject },
+      include: { Users: true },
     });
-    if (existing) return existing.users;
+    if (existing) return existing.Users;
 
-    const count = await tx.users.count();
+    const count = await tx.Users.count();
     const role = count === 0 ? 'admin' : 'normal';
     const namespace = await freeNamespace(tx, base);
-    const user = await tx.users.create({
-      data: { namespace, display_name: displayName, role },
+    const user = await tx.Users.create({
+      data: { Namespace: namespace, DisplayName: displayName, Role: role },
     });
-    await tx.user_identities.create({
-      data: { user_id: user.id, issuer, subject, email: claimEmail(claims) },
+    await tx.UserIdentities.create({
+      data: { UserId: user.Id, Issuer: issuer, Subject: subject, Email: claimEmail(claims) },
     });
     return user;
   });
@@ -406,17 +406,20 @@ async function createAccountFromClaims(db, rateLimiter, req, { issuer, subject, 
 // `RETURNING`.
 async function attachIdentity(db, userId, issuer, subject, email) {
   const inserted = await db.$queryRaw`
-    INSERT INTO user_identities (user_id, issuer, subject, email)
+    INSERT INTO "UserIdentities" ("UserId", "Issuer", "Subject", "Email")
     VALUES (${userId}, ${issuer}, ${subject}, ${email})
-    ON CONFLICT (issuer, subject) DO NOTHING
+    ON CONFLICT ("Issuer", "Subject") DO NOTHING
     RETURNING *
   `;
   if (inserted[0]) return { ...inserted[0], created: true };
-  return db.user_identities.findUnique({ where: { issuer_subject: { issuer, subject } } });
+  return db.UserIdentities.findUnique({
+    where: { Issuer_Subject: { Issuer: issuer, Subject: subject } },
+  });
 }
 
 async function freeNamespace(tx, base) {
-  const taken = (namespace) => tx.users.findFirst({ where: { namespace }, select: { id: true } });
+  const taken = (namespace) =>
+    tx.Users.findFirst({ where: { Namespace: namespace }, select: { Id: true } });
   if (base) {
     if (!(await taken(base))) return base;
     for (let suffix = 2; suffix <= 50; suffix += 1) {
@@ -464,11 +467,11 @@ function claimEmail(claims) {
 
 function identityToObject(row) {
   return {
-    id: String(row.id),
-    issuer: row.issuer,
-    subject: row.subject,
-    email: row.email ?? null,
-    createdAt: row.created_at.toISOString(),
+    id: String(row.Id),
+    issuer: row.Issuer,
+    subject: row.Subject,
+    email: row.Email ?? null,
+    createdAt: row.CreatedAt.toISOString(),
   };
 }
 

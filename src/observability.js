@@ -75,14 +75,14 @@ export function makeRequestTelemetry({ logRequests = false } = {}) {
 // numbers at the gauge.
 export async function renderRegistryMetrics(db, telemetry) {
   const [byStatus, users, extensions, downloads, storage] = await Promise.all([
-    db.$queryRaw`SELECT status, COUNT(*)::bigint AS count FROM versions GROUP BY status`,
-    db.$queryRaw`SELECT COUNT(*)::bigint AS count FROM users`,
-    db.$queryRaw`SELECT COUNT(DISTINCT (namespace, extension_id))::bigint AS count FROM versions
-        WHERE status IN ('published', 'deprecated')`,
-    db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::bigint AS total FROM extension_daily_downloads`,
-    db.$queryRaw`SELECT COALESCE(SUM(blob_size), 0)::bigint AS blob,
-               COALESCE(SUM(source_size), 0)::bigint AS source
-        FROM versions`,
+    db.$queryRaw`SELECT "Status", COUNT(*)::bigint AS count FROM "Versions" GROUP BY "Status"`,
+    db.$queryRaw`SELECT COUNT(*)::bigint AS count FROM "Users"`,
+    db.$queryRaw`SELECT COUNT(DISTINCT ("Namespace", "ExtensionId"))::bigint AS count FROM "Versions"
+        WHERE "Status" IN ('published', 'deprecated')`,
+    db.$queryRaw`SELECT COALESCE(SUM("TotalDownloads"), 0)::bigint AS total FROM "ExtensionDailyDownloads"`,
+    db.$queryRaw`SELECT COALESCE(SUM("BlobSize"), 0)::bigint AS blob,
+               COALESCE(SUM("SourceSize"), 0)::bigint AS source
+        FROM "Versions"`,
   ]);
 
   const lines = [];
@@ -103,7 +103,7 @@ export async function renderRegistryMetrics(db, telemetry) {
       'twexthub_versions_total',
       'Versions by review status.',
       Number(row.count),
-      `{status="${escapeLabel(row.status)}"}`,
+      `{status="${escapeLabel(row.Status)}"}`,
     );
   }
   gauge('twexthub_downloads_total', 'Total recorded downloads.', Number(downloads[0].total));

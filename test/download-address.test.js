@@ -25,7 +25,7 @@ function keyPath(dataDir) {
 async function seedEvent(ipHash) {
   const ns = uniqNs();
   await db.$executeRaw`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
+    INSERT INTO "DownloadEvents" ("Namespace", "ExtensionId", "Version", "UserAgent", "IpHash")
     VALUES (${ns}, 'ext', '1.0.0', 'ua', ${ipHash})
   `;
   return ns;
@@ -42,8 +42,8 @@ test('the first download writes a private key file and clears incomparable hashe
     0o600,
     'the key file is not readable by anyone else',
   );
-  const [row] = await db.$queryRaw`SELECT ip_hash FROM download_events WHERE namespace = ${ns}`;
-  assert.equal(row.ip_hash, null, 'hashes made with the lost key are dropped');
+  const [row] = await db.$queryRaw`SELECT "IpHash" FROM "DownloadEvents" WHERE "Namespace" = ${ns}`;
+  assert.equal(row.IpHash, null, 'hashes made with the lost key are dropped');
 
   // The key is stable for the life of the data directory.
   assert.equal(await downloadAddressKey(db, { dataDir }), key);

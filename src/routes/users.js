@@ -81,17 +81,17 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
       // The bootstrap lock makes "is this the first account, and therefore an
       // admin" a decision only one signup at a time can make.
       await withLocks(db, ['signup-bootstrap'], async (tx) => {
-        const count = await tx.users.count();
+        const count = await tx.Users.count();
         const role = count === 0 ? 'admin' : 'normal';
-        user = await tx.users.create({
+        user = await tx.Users.create({
           data: {
-            namespace,
-            display_name: effectiveDisplayName,
-            password_hash: passwordHash,
-            role,
+            Namespace: namespace,
+            DisplayName: effectiveDisplayName,
+            PasswordHash: passwordHash,
+            Role: role,
           },
         });
-        created = await createSession(tx, user.id, sessionTtlMs);
+        created = await createSession(tx, user.Id, sessionTtlMs);
       });
     } catch (error) {
       if (uniqueViolation(error)) throw conflict('That namespace is already taken.');
@@ -99,7 +99,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     }
 
     res
-      .location(mount(`/users/${user.namespace}`))
+      .location(mount(`/users/${user.Namespace}`))
       .status(201)
       .json({
         user: userToObject(user, config),
@@ -109,11 +109,11 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
   });
 
   function serializePublicUser(row, req) {
-    const isOwner = req.auth?.user.namespace === row.namespace;
+    const isOwner = req.auth?.user.Namespace === row.Namespace;
     // Whether to show another account's role and terms state, not whether the
     // caller may act on it, so this is the role alone and not `isAdmin`.
-    const seesFullProfile = req.auth?.user.role === 'admin';
-    if ((isOwner || seesFullProfile) && row.kind !== 'organization') {
+    const seesFullProfile = req.auth?.user.Role === 'admin';
+    if ((isOwner || seesFullProfile) && row.Kind !== 'organization') {
       return userToObject(row, config);
     }
     // An organization has no role and accepts no terms; whoever runs it is named
@@ -127,9 +127,9 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
 
-    const rows = await db.users.findMany({
-      where: cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {},
-      orderBy: { id: back ? 'asc' : 'desc' },
+    const rows = await db.Users.findMany({
+      where: cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {},
+      orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
 
@@ -139,14 +139,14 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
         back,
         cursor,
         serialize: (user) => serializePublicUser(user, req),
-        keyOf: (user) => ({ i: Number(user.id) }),
+        keyOf: (user) => ({ i: Number(user.Id) }),
       }),
     );
   });
 
   router.get('/:namespace', async (req, res) => {
     if (!isValidNamespace(req.params.namespace)) throw notFound();
-    const user = await db.users.findUnique({ where: { namespace: req.params.namespace } });
+    const user = await db.Users.findUnique({ where: { Namespace: req.params.namespace } });
     if (!user) throw notFound();
     res.json(serializePublicUser(user, req));
   });
@@ -159,7 +159,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
       db,
       config,
       load: (namespace) => loadUserOr404(db, namespace),
-      mayWrite: (row, req) => req.auth.user.id === row.id,
+      mayWrite: (row, req) => req.auth.user.Id === row.Id,
       serialize: (row) => userToObject(row, config),
     }),
   );
@@ -187,13 +187,13 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
 
   router.patch('/:namespace', manageAccount, skipTermsForAcceptance, async (req, res) => {
     const target = await loadUserOr404(db, req.params.namespace);
-    if (target.kind === 'organization') {
-      throw forbidden(`@${target.namespace} is an organization; change it through /orgs.`);
+    if (target.Kind === 'organization') {
+      throw forbidden(`@${target.Namespace} is an organization; change it through /orgs.`);
     }
     // Acting on another account is an administrative act, so it needs both
     // halves: the admin role on this account and the `admin` scope on the
     // credential. Same-account edits only need `manage:account`.
-    if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
+    if (req.auth.user.Namespace !== target.Namespace && !isAdmin(req.auth)) {
       throw forbidden('Only an admin can update another account.');
     }
     requireObjectBody(req);
@@ -242,14 +242,14 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
       const wellFormed =
         (typeof termsAcceptedVersion === 'number' && Number.isInteger(termsAcceptedVersion)) ||
         (typeof termsAcceptedVersion === 'string' && /^\d+$/.test(termsAcceptedVersion));
-      const terms = await db.legal_documents.findUnique({
-        where: { kind: 'terms' },
-        select: { version: true },
+      const terms = await db.LegalDocuments.findUnique({
+        where: { Kind: 'terms' },
+        select: { Version: true },
       });
       if (!terms) {
         throw notFound('There are no terms to accept yet.');
       }
-      currentTermsVersion = Number(terms.version);
+      currentTermsVersion = Number(terms.Version);
       if (!wellFormed || String(termsAcceptedVersion) !== String(currentTermsVersion)) {
         errors.push({
           field: 'termsAcceptedVersion',
@@ -266,8 +266,8 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     const patch = {};
     const { patch: profileColumns } = profilePatch(req.body);
     Object.assign(patch, profileColumns);
-    if (role !== undefined) patch.role = role;
-    if (termsAcceptedVersion !== undefined) patch.terms_accepted_version = currentTermsVersion;
+    if (role !== undefined) patch.Role = role;
+    if (termsAcceptedVersion !== undefined) patch.TermsAcceptedVersion = currentTermsVersion;
     if (password !== undefined) {
       // The current-password confirmation is the self-service path. An admin
       // resetting somebody else's password has no password to confirm, which
@@ -276,7 +276,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
         // An account created through the provider has no password to confirm,
         // and letting a session set one would turn a stolen session into a
         // standing credential, so that stays an admin action.
-        if (!target.password_hash) {
+        if (!target.PasswordHash) {
           throw forbidden(
             'This account signs in with the identity provider. An admin can set a password for it.',
           );
@@ -290,41 +290,41 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
             },
           ]);
         }
-        const valid = await verifyPassword(currentPassword, target.password_hash);
+        const valid = await verifyPassword(currentPassword, target.PasswordHash);
         if (!valid) throw forbidden('Current password is incorrect.');
       }
-      patch.password_hash = await hashPassword(password, config.auth.scrypt);
+      patch.PasswordHash = await hashPassword(password, config.auth.scrypt);
     }
 
     const updated = await db.$transaction(async (tx) => {
-      await tx.users.update({ where: { id: target.id }, data: patch });
+      await tx.Users.update({ where: { Id: target.Id }, data: patch });
       if (password !== undefined) {
-        await tx.sessions.deleteMany({ where: { user_id: target.id } });
-        await tx.automation_tokens.deleteMany({ where: { user_id: target.id } });
-        if (Number(req.auth.user.id) !== Number(target.id)) {
+        await tx.Sessions.deleteMany({ where: { UserId: target.Id } });
+        await tx.AutomationTokens.deleteMany({ where: { UserId: target.Id } });
+        if (Number(req.auth.user.Id) !== Number(target.Id)) {
           await notifyUser(
             tx,
-            target.id,
+            target.Id,
             'tokens.revoked',
-            tokensRevokedMessage(req.auth.user.namespace),
-            { actor: req.auth.user.namespace },
+            tokensRevokedMessage(req.auth.user.Namespace),
+            { actor: req.auth.user.Namespace },
           );
         }
       }
       if (role !== undefined) {
-        await notifyUser(tx, target.id, 'role.changed', roleChangedMessage(role), { role });
+        await notifyUser(tx, target.Id, 'role.changed', roleChangedMessage(role), { role });
         await audit(
           tx,
           req.auth.user,
           'role.change',
-          { namespace: target.namespace },
+          { namespace: target.Namespace },
           {
             role,
-            previousRole: target.role,
+            previousRole: target.Role,
           },
         );
       }
-      return tx.users.findUnique({ where: { id: target.id } });
+      return tx.Users.findUnique({ where: { Id: target.Id } });
     });
     if (!updated) throw notFound();
 
@@ -333,59 +333,59 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
 
   router.delete('/:namespace', manageAccount, async (req, res) => {
     const target = await loadUserOr404(db, req.params.namespace);
-    if (target.kind === 'organization') {
-      throw forbidden(`@${target.namespace} is an organization; delete it through /orgs.`);
+    if (target.Kind === 'organization') {
+      throw forbidden(`@${target.Namespace} is an organization; delete it through /orgs.`);
     }
-    if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
+    if (req.auth.user.Namespace !== target.Namespace && !isAdmin(req.auth)) {
       throw forbidden('Only an admin can delete another account.');
     }
     const owned = await db.$transaction(async (tx) => {
       // Serialize owner removals and account deletions on the organization rows.
       await tx.$queryRaw`
-        SELECT org.id FROM users org
-        JOIN organization_owners g ON g.org_id = org.id
-        WHERE g.user_id = ${target.id}
-        ORDER BY org.id
+        SELECT org."Id" FROM "Users" org
+        JOIN "OrganizationOwners" g ON g."OrgId" = org."Id"
+        WHERE g."UserId" = ${target.Id}
+        ORDER BY org."Id"
         FOR UPDATE OF org
       `;
       const soleOwner = await tx.$queryRaw`
-        SELECT org.namespace
-        FROM organization_owners g
-        JOIN users org ON org.id = g.org_id
-        WHERE g.user_id = ${target.id}
-          AND 1 = (SELECT count(*) FROM organization_owners x WHERE x.org_id = g.org_id)
-        ORDER BY org.namespace
+        SELECT org."Namespace"
+        FROM "OrganizationOwners" g
+        JOIN "Users" org ON org."Id" = g."OrgId"
+        WHERE g."UserId" = ${target.Id}
+          AND 1 = (SELECT count(*) FROM "OrganizationOwners" x WHERE x."OrgId" = g."OrgId")
+        ORDER BY org."Namespace"
       `;
       if (soleOwner.length > 0) {
         throw conflict(
-          `You are the only owner of ${soleOwner.map((row) => `@${row.namespace}`).join(', ')}. Add another owner, or delete the organization, before deleting the account.`,
+          `You are the only owner of ${soleOwner.map((row) => `@${row.Namespace}`).join(', ')}. Add another owner, or delete the organization, before deleting the account.`,
         );
       }
       // Save the digests before the owner_id cascade removes the versions.
-      const rows = await tx.versions.findMany({
-        where: { owner_id: target.id },
-        select: { blob_digest: true, blob_path: true, source_digest: true },
+      const rows = await tx.Versions.findMany({
+        where: { OwnerId: target.Id },
+        select: { BlobDigest: true, BlobPath: true, SourceDigest: true },
       });
       // Delegated publishes charge the namespace account, not the publisher.
       // The refund is one statement against a grouped sum of the rows being
       // removed, which the typed client cannot express.
       await tx.$executeRaw`
-        UPDATE users u SET blob_bytes = GREATEST(u.blob_bytes - removed.bytes, 0)
+        UPDATE "Users" u SET "BlobBytes" = GREATEST(u."BlobBytes" - removed.bytes, 0)
         FROM (
-          SELECT namespace, sum(COALESCE(blob_size, 0) + COALESCE(source_size, 0)) AS bytes
-          FROM versions WHERE owner_id = ${target.id}
-          GROUP BY namespace
+          SELECT "Namespace", sum(COALESCE("BlobSize", 0) + COALESCE("SourceSize", 0)) AS bytes
+          FROM "Versions" WHERE "OwnerId" = ${target.Id}
+          GROUP BY "Namespace"
         ) removed
-        WHERE u.namespace = removed.namespace AND u.id <> ${target.id}
+        WHERE u."Namespace" = removed."Namespace" AND u."Id" <> ${target.Id}
       `;
       // A webhook is keyed on the namespace text with no user foreign key, so
       // deleting the user row would leave its per-extension and account-wide
       // hooks orphaned; take them, and the deliveries they cascade to, with it.
-      await tx.webhooks.deleteMany({ where: { namespace: target.namespace } });
-      await tx.users.delete({ where: { id: target.id } });
+      await tx.Webhooks.deleteMany({ where: { Namespace: target.Namespace } });
+      await tx.Users.delete({ where: { Id: target.Id } });
       return rows;
     });
-    const profileDigests = [target.avatar_blob_digest, target.banner_blob_digest].filter(Boolean);
+    const profileDigests = [target.AvatarBlobDigest, target.BannerBlobDigest].filter(Boolean);
 
     // Only after the commit: a failed DELETE leaves the rows, and the keeper
     // check keeps any digest another account's version still references.
@@ -397,31 +397,31 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     const legacyPaths = [
       ...new Set(
         owned
-          .filter((row) => !row.blob_digest)
-          .map((row) => row.blob_path)
+          .filter((row) => !row.BlobDigest)
+          .map((row) => row.BlobPath)
           .filter(Boolean),
       ),
     ];
     try {
       await Promise.all([
         ...owned
-          .map((row) => (row.blob_digest ? removeBlobIfUnused(db, config, row.blob_digest) : null))
+          .map((row) => (row.BlobDigest ? removeBlobIfUnused(db, config, row.BlobDigest) : null))
           .filter(Boolean),
         ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
         // The row is already gone, so no user can still point at these digests.
         ...profileDigests.map((digest) => removeProfileImageBlob(db, config, digest)),
       ]);
     } catch (error) {
-      console.error(`blob cleanup deferred for ${target.namespace}: ${error.message}`);
+      console.error(`blob cleanup deferred for ${target.Namespace}: ${error.message}`);
     }
     try {
       await Promise.all(
-        [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
+        [...new Set(owned.map((row) => row.SourceDigest).filter(Boolean))].map((digest) =>
           removeSourceIfUnused(db, config, digest),
         ),
       );
     } catch (error) {
-      console.error(`source cleanup deferred for ${target.namespace}: ${error.message}`);
+      console.error(`source cleanup deferred for ${target.Namespace}: ${error.message}`);
     }
     res.status(204).end();
   });
@@ -437,7 +437,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
 
   router.get('/:namespace/webhooks', accountWebhookChain, async (req, res) => {
     const target = await loadUserForWrite(db, req);
-    res.json({ data: await webhooks.list(target.namespace, null) });
+    res.json({ data: await webhooks.list(target.Namespace, null) });
   });
 
   router.post('/:namespace/webhooks', accountWebhookChain, async (req, res) => {
@@ -445,7 +445,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     requireObjectBody(req);
     let created;
     try {
-      created = await webhooks.create(target.namespace, null, req.body);
+      created = await webhooks.create(target.Namespace, null, req.body);
     } catch (error) {
       if (error instanceof WebhookInputError) throw fieldErrors(error.fields);
       throw error;
@@ -454,7 +454,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
       db,
       req.auth.user,
       'account.webhook.create',
-      { namespace: target.namespace },
+      { namespace: target.Namespace },
       {
         url: created.url,
         events: created.events,
@@ -467,14 +467,14 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     const target = await loadUserForWrite(db, req);
     const id = Number(req.params.webhookId);
     if (!Number.isInteger(id)) throw notFound();
-    if (!(await webhooks.remove(target.namespace, null, id))) {
+    if (!(await webhooks.remove(target.Namespace, null, id))) {
       throw notFound('No such webhook.');
     }
     await audit(
       db,
       req.auth.user,
       'account.webhook.delete',
-      { namespace: target.namespace },
+      { namespace: target.Namespace },
       {
         id,
       },
@@ -487,7 +487,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     accountWebhookChain,
     async (req, res) => {
       const target = await loadUserForWrite(db, req);
-      await webhookDeliveries.list(req, res, { namespace: target.namespace, extensionId: null });
+      await webhookDeliveries.list(req, res, { namespace: target.Namespace, extensionId: null });
     },
   );
 
@@ -497,7 +497,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
     async (req, res) => {
       const target = await loadUserForWrite(db, req);
       await webhookDeliveries.redeliver(req, res, {
-        namespace: target.namespace,
+        namespace: target.Namespace,
         extensionId: null,
       });
     },
@@ -508,7 +508,7 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
 
 async function loadUserOr404(db, namespace) {
   if (!isValidNamespace(namespace)) throw notFound();
-  const user = await db.users.findUnique({ where: { namespace } });
+  const user = await db.Users.findUnique({ where: { Namespace: namespace } });
   if (!user) throw notFound();
   return user;
 }
@@ -518,10 +518,10 @@ async function loadUserOr404(db, namespace) {
 // its own namespace-wide webhooks live.
 async function loadUserForWrite(db, req) {
   const target = await loadUserOr404(db, req.params.namespace);
-  if (target.kind === 'organization') {
-    throw forbidden(`@${target.namespace} is an organization; manage its webhooks through /orgs.`);
+  if (target.Kind === 'organization') {
+    throw forbidden(`@${target.Namespace} is an organization; manage its webhooks through /orgs.`);
   }
-  if (req.auth.user.namespace !== target.namespace && !isAdmin(req.auth)) {
+  if (req.auth.user.Namespace !== target.Namespace && !isAdmin(req.auth)) {
     throw forbidden('Only the account or an admin can manage its webhooks.');
   }
   return target;

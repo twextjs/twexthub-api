@@ -76,8 +76,8 @@ test('a queued publish waits for the delete to finish its cleanup', async () => 
   // The publish ran after the cleanup, so its bytes are still on disk — the
   // same path the cleanup would have removed had it run last.
   const [row] = await db.$queryRaw`
-    SELECT blob_digest, blob_path, status FROM versions
-    WHERE namespace = ${ns} AND extension_id = 'hello'
+    SELECT "BlobDigest" AS blob_digest, "BlobPath" AS blob_path, "Status" AS status FROM "Versions"
+    WHERE "Namespace" = ${ns} AND "ExtensionId" = 'hello'
   `;
   assert.equal(row.status, 'published');
   assert.ok(row.blob_digest, 'the surviving version is content-addressed');

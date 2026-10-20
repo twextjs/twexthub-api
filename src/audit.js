@@ -2,17 +2,17 @@
 // action is transactional so the entry commits or rolls back with it; the
 // fire-and-forget form is for actions that already committed (yank, delete).
 // `tx` is either the root client or an interactive-transaction client, both of
-// which expose the same `auditLog` delegate.
+// which expose the same `AuditLog` delegate.
 export async function audit(tx, actor, action, target = {}, detail = {}) {
-  await tx.audit_log.create({
+  await tx.AuditLog.create({
     data: {
-      actor_id: actor?.id ?? null,
-      actor_namespace: actor?.namespace ?? 'system',
-      action,
-      target_namespace: target.namespace ?? null,
-      target_extension_id: target.id ?? null,
-      target_version: target.version ?? null,
-      detail,
+      ActorId: actor?.Id ?? null,
+      ActorNamespace: actor?.Namespace ?? 'system',
+      Action: action,
+      TargetNamespace: target.namespace ?? null,
+      TargetExtensionId: target.id ?? null,
+      TargetVersion: target.version ?? null,
+      Detail: detail,
     },
   });
 }
@@ -27,15 +27,15 @@ export function auditSoon(db, actor, action, target = {}, detail = {}) {
 
 export function auditRowToObject(row) {
   return {
-    id: String(row.id),
-    actor: row.actor_namespace,
-    action: row.action,
+    id: String(row.Id),
+    actor: row.ActorNamespace,
+    action: row.Action,
     target: {
-      namespace: row.target_namespace,
-      id: row.target_extension_id,
-      version: row.target_version,
+      namespace: row.TargetNamespace,
+      id: row.TargetExtensionId,
+      version: row.TargetVersion,
     },
-    detail: row.detail,
-    createdAt: row.created_at.toISOString(),
+    detail: row.Detail,
+    createdAt: row.CreatedAt.toISOString(),
   };
 }

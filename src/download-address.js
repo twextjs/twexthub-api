@@ -61,9 +61,9 @@ export async function downloadAddressKey(db, config) {
     // Losing the key leaves hashes that cannot be compared with new ones, so
     // the rows that used it are cleared. The rollup still counts them; their
     // distinct counts fall back to the user agent.
-    const stale = await db.download_events.updateMany({
-      where: { ip_hash: { not: null } },
-      data: { ip_hash: null },
+    const stale = await db.DownloadEvents.updateMany({
+      where: { IpHash: { not: null } },
+      data: { IpHash: null },
     });
     if (stale.count > 0) {
       console.log(`generated a new download address key; cleared ${stale.count} stale hashes`);

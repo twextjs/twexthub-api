@@ -1,6 +1,6 @@
 {
   "name": "@twextjs/twexthub-api",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
   "description": "A lightweight registry of Twext-compiled extensions (\"Twexts\") for use in TurboWarp",
   "homepage": "https://github.com/twextjs/twexthub#readme",
@@ -57,5 +57,9 @@
     "pg": "^8.23.1",
     "prettier": "^3.9.10",
     "supertest": "^7.3.1"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.10.1": true,
+    "prisma@7.10.1": true
   }
 }

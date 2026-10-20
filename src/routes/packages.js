@@ -110,8 +110,8 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
   // the account's own, or one held by an organization the account is on the
   // owner list of -- makes a co-owner of somebody else's extension.
   async function isExtensionOwner(user, namespace, id) {
-    if (user.role === 'admin') return true;
-    if (user.namespace === namespace) return true;
+    if (user.Role === 'admin') return true;
+    if (user.Namespace === namespace) return true;
     if (await isExtensionOwnerRow(db, user, namespace, id)) return true;
     return isOrganizationOwner(db, user, namespace);
   }
@@ -125,18 +125,18 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (isAdmin(req.auth)) return true;
     const user = req.auth?.user;
     if (!user) return false;
-    if (user.namespace === namespace) return true;
+    if (user.Namespace === namespace) return true;
     if (await isExtensionOwnerRow(db, user, namespace, id)) return true;
     return isOrganizationOwner(db, user, namespace);
   }
 
   async function loadNamespaceAccount(namespace) {
-    return db.users.findUnique({ where: { namespace } });
+    return db.Users.findUnique({ where: { Namespace: namespace } });
   }
 
   async function loadVersion(namespace, id, version) {
-    return db.versions.findFirst({
-      where: { namespace, extension_id: id, version },
+    return db.Versions.findFirst({
+      where: { Namespace: namespace, ExtensionId: id, Version: version },
     });
   }
 
@@ -144,9 +144,9 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
   // deleted extension on purpose, so an empty owner list is not on its own
   // evidence that there is nothing at the address.
   async function extensionExists(namespace, id) {
-    const row = await db.versions.findFirst({
-      where: { namespace, extension_id: id, status: { not: 'rejected' } },
-      select: { id: true },
+    const row = await db.Versions.findFirst({
+      where: { Namespace: namespace, ExtensionId: id, Status: { not: 'rejected' } },
+      select: { Id: true },
     });
     return Boolean(row);
   }
@@ -154,14 +154,14 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
   // `latest` picks the highest published version, falling back to the deprecated
   // ones when nothing is still published.
   async function loadLatestPublished(namespace, id) {
-    const rows = await db.versions.findMany({
-      where: { namespace, extension_id: id, status: { in: ['published', 'deprecated'] } },
+    const rows = await db.Versions.findMany({
+      where: { Namespace: namespace, ExtensionId: id, Status: { in: ['published', 'deprecated'] } },
     });
     if (rows.length === 0) return null;
-    const published = rows.filter((row) => row.status === 'published');
+    const published = rows.filter((row) => row.Status === 'published');
     const pool = published.length > 0 ? published : rows;
-    const ceiling = maxVersionBySemver(pool.map((row) => row.version));
-    return pool.find((row) => row.version === ceiling);
+    const ceiling = maxVersionBySemver(pool.map((row) => row.Version));
+    return pool.find((row) => row.Version === ceiling);
   }
 
   async function resolveVersion(params) {
@@ -172,12 +172,12 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         : await loadVersion(namespace, id, version);
     if (row) return row;
     if (!/^[a-zA-Z0-9-]{1,30}$/.test(version)) throw notFound();
-    const tagRow = await db.dist_tags.findFirst({
-      where: { namespace, extension_id: id, tag: version },
-      select: { version: true },
+    const tagRow = await db.DistTags.findFirst({
+      where: { Namespace: namespace, ExtensionId: id, Tag: version },
+      select: { Version: true },
     });
     if (!tagRow) throw notFound();
-    return await loadVersion(namespace, id, tagRow.version);
+    return await loadVersion(namespace, id, tagRow.Version);
   }
 
   // An address that has been transferred away answers with the address that
@@ -227,15 +227,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
 
     const visibility =
       status === undefined
-        ? Prisma.sql`status IN ('published', 'deprecated')`
-        : Prisma.sql`status = ${status}`;
+        ? Prisma.sql`"Status" IN ('published', 'deprecated')`
+        : Prisma.sql`"Status" = ${status}`;
     const rows = await db.$queryRaw`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id}
+      SELECT * FROM "Versions"
+      WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${id}
         AND ${visibility}
     `;
     const matches = rows
-      .map((row) => ({ row, coerced: semver.valid(row.version) }))
+      .map((row) => ({ row, coerced: semver.valid(row.Version) }))
       .filter(
         (entry) =>
           entry.coerced &&
@@ -254,7 +254,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         offset,
         total: matches.length,
         serialize: (entry) =>
-          versionToObject(entry.row, config, totals.get(entry.row.version) ?? 0n),
+          versionToObject(entry.row, config, totals.get(entry.row.Version) ?? 0n),
       }),
     );
   });
@@ -271,7 +271,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     async (req, res, next) => {
       try {
         // Counted per account, not per IP: CI runners often share egress IPs.
-        await rateLimiter.publishCheck(`publish:${req.auth.user.namespace}`)();
+        await rateLimiter.publishCheck(`publish:${req.auth.user.Namespace}`)();
         next();
       } catch (error) {
         next(error);
@@ -387,7 +387,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         // raw compiler output is larger. The minifier's own input cap is
         // separate: it only bounds the parse, not what is allowed to be stored.
         const shrunk =
-          owner.has_published && config.compiler?.minify !== false
+          owner.HasPublished && config.compiler?.minify !== false
             ? await minifyCode(compiled, { maxBytes: MINIFY_INPUT_MAX_BYTES })
             : null;
         if (shrunk?.ok) compiled = shrunk.code;
@@ -398,13 +398,12 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
             detail: `Compiled output is ${codeBytes} bytes; the limit is ${maxBlob}.`,
           });
         }
-        const quota =
-          owner.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
+        const quota = owner.MaxBlobBytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
         const charge = codeBytes + tarball.length;
-        if (Number(owner.blob_bytes ?? 0) + charge > quota) {
+        if (Number(owner.BlobBytes ?? 0) + charge > quota) {
           throw new HttpError(413, {
             title: 'Payload Too Large',
-            detail: `Publishing ${charge} bytes would exceed the ${quota}-byte storage quota for @${owner.namespace}.`,
+            detail: `Publishing ${charge} bytes would exceed the ${quota}-byte storage quota for @${owner.Namespace}.`,
           });
         }
       } finally {
@@ -420,18 +419,18 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         warnings,
         stagedBy: req.auth.user,
       });
-      if (row.status === 'published') {
+      if (row.Status === 'published') {
         void webhooks.scheduleFor(namespace, id, 'version.published', {
-          version: row.version,
+          version: row.Version,
           occurredAt: new Date().toISOString(),
-          actor: req.auth.user.namespace,
+          actor: req.auth.user.Namespace,
         });
       }
       res.status(201).json({
         ...versionToObject(row, config),
         ...(buildLog ? { buildLog } : {}),
-        ...(row.source_path
-          ? { sourceUrl: sourceUrl(config, row.namespace, row.extension_id, row.version) }
+        ...(row.SourcePath
+          ? { sourceUrl: sourceUrl(config, row.Namespace, row.ExtensionId, row.Version) }
           : {}),
       });
     },
@@ -501,12 +500,12 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, '/tags')) return;
-    const rows = await db.dist_tags.findMany({
-      where: { namespace, extension_id: id },
-      select: { tag: true, version: true },
-      orderBy: { tag: 'asc' },
+    const rows = await db.DistTags.findMany({
+      where: { Namespace: namespace, ExtensionId: id },
+      select: { Tag: true, Version: true },
+      orderBy: { Tag: 'asc' },
     });
-    const tags = Object.fromEntries(rows.map((row) => [row.tag, row.version]));
+    const tags = Object.fromEntries(rows.map((row) => [row.Tag, row.Version]));
     if (Object.keys(tags).length === 0) throw notFound();
     res.json(tags);
   });
@@ -531,22 +530,28 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (!normalized) {
       throw fieldErrors([{ field: 'version', message: 'Must be a valid SemVer string.' }]);
     }
-    const exists = await db.versions.findFirst({
+    const exists = await db.Versions.findFirst({
       where: {
-        namespace,
-        extension_id: id,
-        version: normalized,
-        status: 'published',
+        Namespace: namespace,
+        ExtensionId: id,
+        Version: normalized,
+        Status: 'published',
       },
-      select: { id: true },
+      select: { Id: true },
     });
     if (!exists) throw notFound('Tagged versions must be published.');
     // The unique triple is the conflict target, so the typed upsert knows which
     // row to update.
-    await db.dist_tags.upsert({
-      where: { namespace_extension_id_tag: { namespace, extension_id: id, tag } },
-      create: { owner_id: req.auth.user.id, namespace, extension_id: id, tag, version: normalized },
-      update: { version: normalized, owner_id: req.auth.user.id },
+    await db.DistTags.upsert({
+      where: { Namespace_ExtensionId_Tag: { Namespace: namespace, ExtensionId: id, Tag: tag } },
+      create: {
+        OwnerId: req.auth.user.Id,
+        Namespace: namespace,
+        ExtensionId: id,
+        Tag: tag,
+        Version: normalized,
+      },
+      update: { Version: normalized, OwnerId: req.auth.user.Id },
     });
     auditSoon(db, req.auth.user, 'tag.set', { namespace, id, version: normalized }, { tag });
     res.status(204).end();
@@ -561,8 +566,8 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('Only an owner or an admin can remove tags.');
     }
-    const { count } = await db.dist_tags.deleteMany({
-      where: { namespace, extension_id: id, tag },
+    const { count } = await db.DistTags.deleteMany({
+      where: { Namespace: namespace, ExtensionId: id, Tag: tag },
     });
     if (count === 0) throw notFound();
     auditSoon(db, req.auth.user, 'tag.remove', { namespace, id }, { tag });
@@ -573,7 +578,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (await redirectIfMoved(req, res, `/versions/${req.params.version}`)) return;
     const row = await resolveVersion(req.params);
     const isVisible =
-      row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
+      row.Status === 'published' || row.Status === 'yanked' || row.Status === 'deprecated';
     if (!isVisible && !(await maySeeUnpublished(req, req.params.namespace, req.params.id))) {
       throw notFound();
     }
@@ -581,7 +586,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       versionToObject(
         row,
         config,
-        await versionDownloads(db, row.namespace, row.extension_id, row.version),
+        await versionDownloads(db, row.Namespace, row.ExtensionId, row.Version),
       ),
     );
   });
@@ -595,41 +600,41 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     }
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const row = await db.versions.findFirst({
-      where: { namespace, extension_id: id, version },
+    const row = await db.Versions.findFirst({
+      where: { Namespace: namespace, ExtensionId: id, Version: version },
     });
-    if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
+    if (!row || (row.Status !== 'published' && row.Status !== 'deprecated')) throw notFound();
     const canManage = await isExtensionOwner(req.auth.user, namespace, id);
     if (!canManage) {
       throw forbidden('Only an owner or an admin can deprecate this version.');
     }
-    const updated = await db.versions.update({
-      where: { id: row.id },
+    const updated = await db.Versions.update({
+      where: { Id: row.Id },
       data: {
-        status: message === null ? 'published' : 'deprecated',
-        deprecation_message: message ?? null,
+        Status: message === null ? 'published' : 'deprecated',
+        DeprecationMessage: message ?? null,
       },
     });
     auditSoon(
       db,
       req.auth.user,
       message === null ? 'version.undeprecate' : 'version.deprecate',
-      { namespace, id, version: updated.version },
+      { namespace, id, version: updated.Version },
       { message: message ?? null },
     );
     // A null message puts the version back, so it is not a deprecation.
     if (message !== null) {
       void webhooks.scheduleFor(namespace, id, 'version.deprecated', {
-        version: updated.version,
+        version: updated.Version,
         occurredAt: new Date().toISOString(),
-        actor: req.auth.user.namespace,
+        actor: req.auth.user.Namespace,
       });
     }
     res.json(
       versionToObject(
         updated,
         config,
-        await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+        await versionDownloads(db, updated.Namespace, updated.ExtensionId, updated.Version),
       ),
     );
   }
@@ -641,9 +646,9 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
   // original bytes are still a valid build.
   async function minifyPendingBlob(row) {
     if (config.compiler?.minify === false) return null;
-    const abs = row.blob_digest
-      ? blobPathFor(config.dataDir, row.blob_digest)
-      : path.join(config.dataDir, row.blob_path);
+    const abs = row.BlobDigest
+      ? blobPathFor(config.dataDir, row.BlobDigest)
+      : path.join(config.dataDir, row.BlobPath);
     let original;
     try {
       original = await readFile(abs);
@@ -664,8 +669,8 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     assertAdmin(req.auth);
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const row = await db.versions.findFirst({
-      where: { namespace, extension_id: id, version, status: 'pending' },
+    const row = await db.Versions.findFirst({
+      where: { Namespace: namespace, ExtensionId: id, Version: version, Status: 'pending' },
     });
     if (!row) throw notFound('No pending version matches that address.');
     if (status !== 'approved' && status !== 'rejected') {
@@ -681,23 +686,23 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         // The status guard is part of the update, so a concurrent review that
         // already moved the row is not overwritten.
         const rows = await tx.$queryRaw`
-          UPDATE versions SET status = 'rejected', rejection_reason = ${reason}
-          WHERE id = ${row.id} AND status = 'pending'
+          UPDATE "Versions" SET "Status" = 'rejected', "RejectionReason" = ${reason}
+          WHERE "Id" = ${row.Id} AND "Status" = 'pending'
           RETURNING *
         `;
         if (rows[0]) {
           await notifyUser(
             tx,
-            row.owner_id,
+            row.OwnerId,
             'review.rejected',
-            reviewRejectedMessage(row.extension_id, row.version, reason),
-            { namespace: row.namespace, id: row.extension_id, version: row.version, reason },
+            reviewRejectedMessage(row.ExtensionId, row.Version, reason),
+            { namespace: row.Namespace, id: row.ExtensionId, version: row.Version, reason },
           );
           await audit(
             tx,
             req.auth.user,
             'version.reject',
-            { namespace, id, version: row.version },
+            { namespace, id, version: row.Version },
             { reason },
           );
         }
@@ -707,15 +712,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         throw conflict('That version is no longer pending review.');
       }
       void webhooks.scheduleFor(namespace, id, 'version.rejected', {
-        version: updated.version,
+        version: updated.Version,
         occurredAt: new Date().toISOString(),
-        actor: req.auth.user.namespace,
+        actor: req.auth.user.Namespace,
       });
       return res.json(
         versionToObject(
           updated,
           config,
-          await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+          await versionDownloads(db, updated.Namespace, updated.ExtensionId, updated.Version),
         ),
       );
     }
@@ -734,17 +739,17 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       }
       const rows = stored
         ? await tx.$queryRaw`
-            UPDATE versions
-            SET status = 'published', published_at = now(),
-                blob_path = ${path.join('blobs', stored.digest.slice(0, 2), stored.digest.slice(2))},
-                blob_digest = ${stored.digest}, blob_size = ${stored.size},
-                blob_sha512 = ${stored.sha512}
-            WHERE id = ${row.id} AND status = 'pending'
+            UPDATE "Versions"
+            SET "Status" = 'published', "PublishedAt" = now(),
+                "BlobPath" = ${path.join('blobs', stored.digest.slice(0, 2), stored.digest.slice(2))},
+                "BlobDigest" = ${stored.digest}, "BlobSize" = ${stored.size},
+                "BlobSha512" = ${stored.sha512}
+            WHERE "Id" = ${row.Id} AND "Status" = 'pending'
             RETURNING *
           `
         : await tx.$queryRaw`
-            UPDATE versions SET status = 'published', published_at = now()
-            WHERE id = ${row.id} AND status = 'pending'
+            UPDATE "Versions" SET "Status" = 'published', "PublishedAt" = now()
+            WHERE "Id" = ${row.Id} AND "Status" = 'pending'
             RETURNING *
           `;
       if (rows[0]) {
@@ -753,27 +758,27 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         // reconcile in db.js), and owner_id holds the delegated publisher rather
         // than the namespace, so the flag has to be set by namespace here or a
         // co-owner's first approval would leave the namespace in review forever.
-        await tx.users.update({
-          where: { namespace: row.namespace },
-          data: { has_published: true },
+        await tx.Users.update({
+          where: { Namespace: row.Namespace },
+          data: { HasPublished: true },
         });
         // The publish charged the unminified build; a smaller approved blob
         // hands the difference back to the account's quota.
-        if (stored && Number(row.blob_size) > stored.size) {
-          const refund = Number(row.blob_size) - stored.size;
+        if (stored && Number(row.BlobSize) > stored.size) {
+          const refund = Number(row.BlobSize) - stored.size;
           await tx.$executeRaw`
-            UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${refund}, 0)
-            WHERE namespace = ${row.namespace}
+            UPDATE "Users" SET "BlobBytes" = GREATEST("BlobBytes" - ${refund}, 0)
+            WHERE "Namespace" = ${row.Namespace}
           `;
         }
         await notifyUser(
           tx,
-          row.owner_id,
+          row.OwnerId,
           'review.approved',
-          reviewApprovedMessage(row.namespace, row.extension_id, row.version),
-          { namespace: row.namespace, id: row.extension_id, version: row.version },
+          reviewApprovedMessage(row.Namespace, row.ExtensionId, row.Version),
+          { namespace: row.Namespace, id: row.ExtensionId, version: row.Version },
         );
-        await audit(tx, req.auth.user, 'version.approve', { namespace, id, version: row.version });
+        await audit(tx, req.auth.user, 'version.approve', { namespace, id, version: row.Version });
       }
       return rows[0];
     };
@@ -789,23 +794,23 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     // The unminified digest is no longer referenced once this row points at the
     // minified one, so sweep the old file. A sibling version sharing the
     // original bytes keeps it (see removeBlobIfUnused).
-    if (shrunk && row.blob_digest) {
+    if (shrunk && row.BlobDigest) {
       try {
-        await removeBlobIfUnused(db, config, row.blob_digest, null);
+        await removeBlobIfUnused(db, config, row.BlobDigest, null);
       } catch {
         // The approval is committed. A leftover unminified blob is harmless.
       }
     }
     void webhooks.scheduleFor(namespace, id, 'version.published', {
-      version: updated.version,
+      version: updated.Version,
       occurredAt: new Date().toISOString(),
-      actor: req.auth.user.namespace,
+      actor: req.auth.user.Namespace,
     });
     res.json(
       versionToObject(
         updated,
         config,
-        await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+        await versionDownloads(db, updated.Namespace, updated.ExtensionId, updated.Version),
       ),
     );
   }
@@ -842,16 +847,16 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const row = await resolveVersion(req.params);
-    if (row.status !== 'published' && row.status !== 'deprecated') throw notFound();
+    if (row.Status !== 'published' && row.Status !== 'deprecated') throw notFound();
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('You can only yank your own extensions.');
     }
-    await db.versions.updateMany({ where: { id: row.id }, data: { status: 'yanked' } });
-    auditSoon(db, req.auth.user, 'version.yank', { namespace, id, version: row.version });
+    await db.Versions.updateMany({ where: { Id: row.Id }, data: { Status: 'yanked' } });
+    auditSoon(db, req.auth.user, 'version.yank', { namespace, id, version: row.Version });
     void webhooks.scheduleFor(namespace, id, 'version.yanked', {
-      version: row.version,
+      version: row.Version,
       occurredAt: new Date().toISOString(),
-      actor: req.auth.user.namespace,
+      actor: req.auth.user.Namespace,
     });
     res.status(204).end();
   });
@@ -867,28 +872,26 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (await redirectIfMoved(req, res, `/versions/${req.params.version}/download`)) return;
     const row = await resolveVersion(req.params);
     const isPublished =
-      row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
-    if (!isPublished && !(row.status === 'pending' && isAdmin(req.auth))) throw notFound();
-    const abs = row.blob_digest
-      ? blobPathFor(config.dataDir, row.blob_digest)
-      : path.join(config.dataDir, row.blob_path);
+      row.Status === 'published' || row.Status === 'yanked' || row.Status === 'deprecated';
+    if (!isPublished && !(row.Status === 'pending' && isAdmin(req.auth))) throw notFound();
+    const abs = row.BlobDigest
+      ? blobPathFor(config.dataDir, row.BlobDigest)
+      : path.join(config.dataDir, row.BlobPath);
     if (existsSync(abs)) {
       res.type('application/javascript');
       res.sendFile(abs);
       // Metrics never get in the way of a download, so a failure here costs the
       // event, not the blob.
       const ipHash = await hashDownloadAddress(db, config, req.ip).catch(() => null);
-      void db.download_events
-        .create({
-          data: {
-            namespace: row.namespace,
-            extension_id: row.extension_id,
-            version: row.version,
-            user_agent: String(req.headers['user-agent'] ?? '').slice(0, 250),
-            ip_hash: ipHash,
-          },
-        })
-        .catch(() => {});
+      void db.DownloadEvents.create({
+        data: {
+          Namespace: row.Namespace,
+          ExtensionId: row.ExtensionId,
+          Version: row.Version,
+          UserAgent: String(req.headers['user-agent'] ?? '').slice(0, 250),
+          IpHash: ipHash,
+        },
+      }).catch(() => {});
     } else {
       throw notFound('Compiled output is missing.');
     }
@@ -908,13 +911,13 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         throw forbidden('This token is missing the required "read:source" scope.');
       }
       const row = await resolveVersion(req.params);
-      if (!row.source_path || !row.source_digest) {
+      if (!row.SourcePath || !row.SourceDigest) {
         throw notFound('Source is unavailable for this version.');
       }
-      const abs = sourcePathFor(config.dataDir, row.source_digest);
+      const abs = sourcePathFor(config.dataDir, row.SourceDigest);
       if (!existsSync(abs)) throw notFound('Source is missing.');
       res.type('application/gzip');
-      res.set('Content-Disposition', `attachment; filename="${id}-${row.version}.tgz"`);
+      res.set('Content-Disposition', `attachment; filename="${id}-${row.Version}.tgz"`);
       res.sendFile(abs);
     },
   );
@@ -925,11 +928,12 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (!(await extensionExists(namespace, id))) throw notFound();
     // A two-table join whose output is the response body, kept raw.
     const rows = await db.$queryRaw`
-      SELECT u.namespace, u.display_name, u.role, u.kind, u.created_at, o.added_at
-      FROM extension_owners o
-      JOIN users u ON u.id = o.owner_id
-      WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
-      ORDER BY o.added_at
+      SELECT u."Namespace" AS namespace, u."DisplayName" AS display_name, u."Role" AS role,
+        u."Kind" AS kind, u."CreatedAt" AS created_at, o."AddedAt" AS added_at
+      FROM "ExtensionOwners" o
+      JOIN "Users" u ON u."Id" = o."OwnerId"
+      WHERE o."Namespace" = ${namespace} AND o."ExtensionId" = ${id}
+      ORDER BY o."AddedAt"
     `;
     res.json({ data: rows });
   });
@@ -943,17 +947,18 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const organizations = await organizationsOwnedBy(db, req.auth.user);
     const rows = await db.$queryRaw`
-      SELECT u.namespace, u.display_name, u.kind, i.created_at,
-        a.namespace AS invited_by_namespace
-      FROM extension_owner_invites i
-      JOIN users u ON u.id = i.owner_id
-      LEFT JOIN users a ON a.id = i.invited_by
-      WHERE i.namespace = ${namespace} AND i.extension_id = ${id}
+      SELECT u."Namespace" AS namespace, u."DisplayName" AS display_name, u."Kind" AS kind,
+        i."CreatedAt" AS created_at,
+        a."Namespace" AS invited_by_namespace
+      FROM "ExtensionOwnerInvites" i
+      JOIN "Users" u ON u."Id" = i."OwnerId"
+      LEFT JOIN "Users" a ON a."Id" = i."InvitedBy"
+      WHERE i."Namespace" = ${namespace} AND i."ExtensionId" = ${id}
         AND (
-          i.owner_id = ${req.auth.user.id}
-          OR u.namespace = ANY (${organizations}::text[])
+          i."OwnerId" = ${req.auth.user.Id}
+          OR u."Namespace" = ANY (${organizations}::text[])
         )
-      ORDER BY i.created_at
+      ORDER BY i."CreatedAt"
     `;
     res.json({
       data: rows.map((row) => ({
@@ -969,8 +974,8 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
   router.put('/@:namespace/:id/owners/:ownerNamespace', ownerChain, async (req, res) => {
     const { namespace: targetNamespace, id, ownerNamespace: candidate } = req.params;
     if (
-      req.auth.user.namespace !== targetNamespace &&
-      req.auth.user.role !== 'admin' &&
+      req.auth.user.Namespace !== targetNamespace &&
+      req.auth.user.Role !== 'admin' &&
       !(await isOrganizationOwner(db, req.auth.user, targetNamespace))
     ) {
       throw forbidden('Only an existing owner or an admin can add owners.');
@@ -982,9 +987,9 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     ) {
       throw notFound();
     }
-    const existing = await db.versions.findFirst({
-      where: { namespace: targetNamespace, extension_id: id, status: { not: 'rejected' } },
-      select: { id: true },
+    const existing = await db.Versions.findFirst({
+      where: { Namespace: targetNamespace, ExtensionId: id, Status: { not: 'rejected' } },
+      select: { Id: true },
     });
     if (!existing) throw notFound();
     if (candidate === targetNamespace) {
@@ -992,17 +997,17 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         { field: 'namespace', message: 'The namespace account already owns this extension.' },
       ]);
     }
-    const candidateUser = await db.users.findUnique({ where: { namespace: candidate } });
+    const candidateUser = await db.Users.findUnique({ where: { Namespace: candidate } });
     if (!candidateUser) throw notFound('No such account to invite.');
-    const alreadyOwner = await db.extension_owners.findFirst({
-      where: { namespace: targetNamespace, extension_id: id, owner_id: candidateUser.id },
-      select: { owner_id: true },
+    const alreadyOwner = await db.ExtensionOwners.findFirst({
+      where: { Namespace: targetNamespace, ExtensionId: id, OwnerId: candidateUser.Id },
+      select: { OwnerId: true },
     });
     if (alreadyOwner) {
       // Nothing to invite, and clearing a leftover invitation keeps the two from
       // disagreeing about whether it took.
-      await db.extension_owner_invites.deleteMany({
-        where: { namespace: targetNamespace, extension_id: id, owner_id: candidateUser.id },
+      await db.ExtensionOwnerInvites.deleteMany({
+        where: { Namespace: targetNamespace, ExtensionId: id, OwnerId: candidateUser.Id },
       });
       res.status(204).end();
       return;
@@ -1010,13 +1015,13 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     // An invitation is idempotent rather than an error, so a retried request does
     // not need to know whether the first attempt landed.
     const invited = await db.$transaction(async (tx) => {
-      const { count } = await tx.extension_owner_invites.createMany({
+      const { count } = await tx.ExtensionOwnerInvites.createMany({
         data: [
           {
-            namespace: targetNamespace,
-            extension_id: id,
-            owner_id: candidateUser.id,
-            invited_by: req.auth.user.id,
+            Namespace: targetNamespace,
+            ExtensionId: id,
+            OwnerId: candidateUser.Id,
+            InvitedBy: req.auth.user.Id,
           },
         ],
         skipDuplicates: true,
@@ -1026,7 +1031,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
           tx,
           candidateUser,
           'extension.owner.invited',
-          invitedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          invitedAsOwnerMessage(req.auth.user.Namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
         );
         await audit(
@@ -1034,15 +1039,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
           req.auth.user,
           'owner.invite',
           { namespace: targetNamespace, id },
-          { invited: candidateUser.namespace },
+          { invited: candidateUser.Namespace },
         );
       }
       return count > 0;
     });
     if (invited) {
       void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
-        actor: req.auth.user.namespace,
-        invited: candidateUser.namespace,
+        actor: req.auth.user.Namespace,
+        invited: candidateUser.Namespace,
         occurredAt: new Date().toISOString(),
       });
     }
@@ -1066,14 +1071,14 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         throw notFound();
       }
       const [invite] = await db.$queryRaw`
-          SELECT i.owner_id, u.kind
-          FROM extension_owner_invites i
-          JOIN users u ON u.id = i.owner_id
-          WHERE i.namespace = ${targetNamespace} AND i.extension_id = ${id}
-            AND u.namespace = ${candidate}
+          SELECT i."OwnerId" AS owner_id, u."Kind" AS kind
+          FROM "ExtensionOwnerInvites" i
+          JOIN "Users" u ON u."Id" = i."OwnerId"
+          WHERE i."Namespace" = ${targetNamespace} AND i."ExtensionId" = ${id}
+            AND u."Namespace" = ${candidate}
         `;
       if (!invite) throw notFound('There is no pending invitation to accept.');
-      const mine = invite.owner_id === req.auth.user.id;
+      const mine = invite.owner_id === req.auth.user.Id;
       if (!mine && invite.kind !== 'organization') {
         throw forbidden('Only the invited account can accept this invitation.');
       }
@@ -1081,17 +1086,17 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         throw forbidden('Only an owner of the invited organization can accept this invitation.');
       }
       await db.$transaction(async (tx) => {
-        const { count: claimed } = await tx.extension_owner_invites.deleteMany({
-          where: { namespace: targetNamespace, extension_id: id, owner_id: invite.owner_id },
+        const { count: claimed } = await tx.ExtensionOwnerInvites.deleteMany({
+          where: { Namespace: targetNamespace, ExtensionId: id, OwnerId: invite.owner_id },
         });
         if (claimed === 0) throw notFound('There is no pending invitation to accept.');
-        await tx.extension_owners.createMany({
+        await tx.ExtensionOwners.createMany({
           data: [
             {
-              owner_id: invite.owner_id,
-              namespace: targetNamespace,
-              extension_id: id,
-              added_by: req.auth.user.id,
+              OwnerId: invite.owner_id,
+              Namespace: targetNamespace,
+              ExtensionId: id,
+              AddedBy: req.auth.user.Id,
             },
           ],
           skipDuplicates: true,
@@ -1099,16 +1104,16 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         // The account that accepted knows already; the partners on an
         // organization's owner list do not, so they are the ones told.
         if (invite.kind === 'organization') {
-          const partners = await tx.organization_owners.findMany({
-            where: { org_id: invite.owner_id, user_id: { not: req.auth.user.id } },
-            select: { user_id: true },
+          const partners = await tx.OrganizationOwners.findMany({
+            where: { OrgId: invite.owner_id, UserId: { not: req.auth.user.Id } },
+            select: { UserId: true },
           });
           for (const row of partners) {
             await notifyUser(
               tx,
-              row.user_id,
+              row.UserId,
               'extension.owner.added',
-              addedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+              addedAsOwnerMessage(req.auth.user.Namespace, targetNamespace, id),
               { namespace: targetNamespace, id },
             );
           }
@@ -1122,7 +1127,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         );
       });
       void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
-        actor: req.auth.user.namespace,
+        actor: req.auth.user.Namespace,
         added: candidate,
         occurredAt: new Date().toISOString(),
       });
@@ -1140,15 +1145,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       throw notFound();
     }
     if (
-      req.auth.user.namespace !== targetNamespace &&
-      req.auth.user.role !== 'admin' &&
+      req.auth.user.Namespace !== targetNamespace &&
+      req.auth.user.Role !== 'admin' &&
       !(await isOrganizationOwner(db, req.auth.user, targetNamespace))
     ) {
       throw forbidden('Only an owner or an admin can remove owners.');
     }
-    const account = await db.versions.findFirst({
-      where: { namespace: targetNamespace, extension_id: id, status: { not: 'rejected' } },
-      select: { id: true },
+    const account = await db.Versions.findFirst({
+      where: { Namespace: targetNamespace, ExtensionId: id, Status: { not: 'rejected' } },
+      select: { Id: true },
     });
     if (!account) throw notFound();
     if (target === targetNamespace) {
@@ -1159,18 +1164,18 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         },
       ]);
     }
-    const candidateUser = await db.users.findUnique({ where: { namespace: target } });
+    const candidateUser = await db.Users.findUnique({ where: { Namespace: target } });
     if (!candidateUser) throw notFound('No such account.');
 
     // Withdrawing an invitation and removing a grant are one request from the
     // namespace account's side, and the invitation is looked for first so that
     // reporting which of the two happened is not a guess.
     const withdrawn = await db.$transaction(async (tx) => {
-      const { count } = await tx.extension_owner_invites.deleteMany({
+      const { count } = await tx.ExtensionOwnerInvites.deleteMany({
         where: {
-          owner_id: candidateUser.id,
-          namespace: targetNamespace,
-          extension_id: id,
+          OwnerId: candidateUser.Id,
+          Namespace: targetNamespace,
+          ExtensionId: id,
         },
       });
       if (count > 0) {
@@ -1178,7 +1183,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
           tx,
           candidateUser,
           'extension.owner.withdrawn',
-          withdrawnAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          withdrawnAsOwnerMessage(req.auth.user.Namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
         );
         await audit(
@@ -1186,14 +1191,14 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
           req.auth.user,
           'owner.withdraw',
           { namespace: targetNamespace, id },
-          { withdrawn: candidateUser.namespace },
+          { withdrawn: candidateUser.Namespace },
         );
       }
       return count > 0;
     });
     if (withdrawn) {
       void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
-        actor: req.auth.user.namespace,
+        actor: req.auth.user.Namespace,
         withdrawn: target,
         occurredAt: new Date().toISOString(),
       });
@@ -1202,15 +1207,15 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     }
 
     const deleted = await db.$transaction(async (tx) => {
-      const { count } = await tx.extension_owners.deleteMany({
-        where: { owner_id: candidateUser.id, namespace: targetNamespace, extension_id: id },
+      const { count } = await tx.ExtensionOwners.deleteMany({
+        where: { OwnerId: candidateUser.Id, Namespace: targetNamespace, ExtensionId: id },
       });
       if (count > 0) {
         await notifyOwnerCandidate(
           tx,
           candidateUser,
           'extension.owner.removed',
-          removedAsOwnerMessage(req.auth.user.namespace, targetNamespace, id),
+          removedAsOwnerMessage(req.auth.user.Namespace, targetNamespace, id),
           { namespace: targetNamespace, id },
         );
         await audit(
@@ -1218,14 +1223,14 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
           req.auth.user,
           'owner.remove',
           { namespace: targetNamespace, id },
-          { removed: candidateUser.namespace },
+          { removed: candidateUser.Namespace },
         );
       }
       return count > 0;
     });
     if (!deleted) throw notFound('That account is not an owner.');
     void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
-      actor: req.auth.user.namespace,
+      actor: req.auth.user.Namespace,
       removed: target,
       occurredAt: new Date().toISOString(),
     });
@@ -1255,7 +1260,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     }
     const recipient = await loadTransferRecipient(db, to);
     if (!recipient) throw notFound('No such account to transfer to.');
-    if (recipient.kind === 'organization' && !(await hasOrgOwner(db, recipient.id))) {
+    if (recipient.Kind === 'organization' && !(await hasOrgOwner(db, recipient.Id))) {
       throw conflict('An organization with no owners cannot receive an extension.');
     }
     await db.$transaction(async (tx) => {
@@ -1309,7 +1314,7 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       // a subscriber that wanted to hear about this extension is now the new
       // owner's.
       void webhooks.scheduleFor(to, id, 'extension.transferred', {
-        actor: req.auth.user.namespace,
+        actor: req.auth.user.Namespace,
         from,
         to,
         id,
@@ -1345,17 +1350,17 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res)) return;
-    const rows = await db.versions.findMany({
-      where: { namespace, extension_id: id, status: { in: ['published', 'deprecated'] } },
-      orderBy: [{ created_at: 'desc' }],
+    const rows = await db.Versions.findMany({
+      where: { Namespace: namespace, ExtensionId: id, Status: { in: ['published', 'deprecated'] } },
+      orderBy: [{ CreatedAt: 'desc' }],
     });
     if (rows.length === 0) throw notFound();
-    const versions = [...rows].sort((a, b) => compareSemver(b.version, a.version));
-    const top = versions.find((row) => row.status === 'published') ?? versions[0];
+    const versions = [...rows].sort((a, b) => compareSemver(b.Version, a.Version));
+    const top = versions.find((row) => row.Status === 'published') ?? versions[0];
     const totals = await versionDownloadTotals(db, namespace, id);
     const summary = extensionDetailFromRow(
       top,
-      versions.map((row) => versionToObject(row, config, totals.get(row.version) ?? 0n)),
+      versions.map((row) => versionToObject(row, config, totals.get(row.Version) ?? 0n)),
     );
     summary.downloads = await totalDownloads(db, namespace, id);
     res.json(summary);
@@ -1375,41 +1380,43 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
       if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
         throw forbidden('You can only delete your own extensions.');
       }
-      const found = await tx.versions.findMany({
-        where: { namespace, extension_id: id },
+      const found = await tx.Versions.findMany({
+        where: { Namespace: namespace, ExtensionId: id },
         select: {
-          blob_digest: true,
-          blob_path: true,
-          status: true,
-          blob_size: true,
-          source_digest: true,
-          source_size: true,
+          BlobDigest: true,
+          BlobPath: true,
+          Status: true,
+          BlobSize: true,
+          SourceDigest: true,
+          SourceSize: true,
         },
       });
       if (found.length === 0) throw notFound();
-      if (found.some((row) => row.status === 'staging')) {
+      if (found.some((row) => row.Status === 'staging')) {
         throw conflict('A publish is in progress for this extension.');
       }
-      await tx.versions.deleteMany({ where: { namespace, extension_id: id } });
+      await tx.Versions.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
       // An invitation to manage an extension that no longer exists can never
       // be accepted, and the extension_owners rows survive on purpose, so
       // these have to be cleared here rather than left for a cascade.
-      await tx.extension_owner_invites.deleteMany({ where: { namespace, extension_id: id } });
-      await tx.extension_transfers.deleteMany({ where: { namespace, extension_id: id } });
+      await tx.ExtensionOwnerInvites.deleteMany({
+        where: { Namespace: namespace, ExtensionId: id },
+      });
+      await tx.ExtensionTransfers.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
       // Refund the account's quota for every byte this extension charged.
       const total = found.reduce(
-        (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
+        (sum, row) => sum + Number(row.BlobSize ?? 0) + Number(row.SourceSize ?? 0),
         0,
       );
       if (total > 0) {
-        const account = await tx.users.findUnique({
-          where: { namespace },
-          select: { id: true },
+        const account = await tx.Users.findUnique({
+          where: { Namespace: namespace },
+          select: { Id: true },
         });
         if (account) {
           await tx.$executeRaw`
-              UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${total}, 0)
-              WHERE id = ${account.id}
+              UPDATE "Users" SET "BlobBytes" = GREATEST("BlobBytes" - ${total}, 0)
+              WHERE "Id" = ${account.Id}
             `;
         }
       }
@@ -1425,13 +1432,13 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
     try {
       await withLocks(db, [lockKey, BLOB_GC_LOCK_KEY], async (tx) => {
         for (const version of rows) {
-          if (version.blob_digest) {
-            await removeBlobIfUnusedInTx(tx, config, version.blob_digest, null);
-          } else if (version.blob_path) {
-            await rm(path.join(config.dataDir, version.blob_path), { force: true });
+          if (version.BlobDigest) {
+            await removeBlobIfUnusedInTx(tx, config, version.BlobDigest, null);
+          } else if (version.BlobPath) {
+            await rm(path.join(config.dataDir, version.BlobPath), { force: true });
           }
         }
-        const dedupedSources = new Set(rows.map((row) => row.source_digest).filter(Boolean));
+        const dedupedSources = new Set(rows.map((row) => row.SourceDigest).filter(Boolean));
         for (const digest of dedupedSources) {
           await removeSourceIfUnusedInTx(tx, config, digest);
         }
@@ -1473,17 +1480,17 @@ async function publishVersion(
   const tmpDir = path.join(config.dataDir, 'tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmpPath = path.join(tmpDir, `upload-${randomBytes(8).toString('hex')}.tmp`);
-  const lockKey = `${owner.namespace}/${id}`;
+  const lockKey = `${owner.Namespace}/${id}`;
   const credentialOwner = stagedBy ?? owner;
 
   const searchText = buildSearchText({
     name,
     id,
-    namespace: owner.namespace,
+    namespace: owner.Namespace,
     description: manifest.description,
   });
 
-  const finalStatus = owner.has_published ? 'published' : 'pending';
+  const finalStatus = owner.HasPublished ? 'published' : 'pending';
 
   try {
     await writeFile(tmpPath, codeBuffer);
@@ -1494,57 +1501,62 @@ async function publishVersion(
     await withLocks(db, [lockKey], async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
-      if (await redirectFor(tx, owner.namespace, id)) {
+      if (await redirectFor(tx, owner.Namespace, id)) {
         throw conflict('This extension address has been transferred away.');
       }
 
-      const pending = await tx.versions.findFirst({
-        where: { owner_id: credentialOwner.id, status: { in: ['staging', 'pending'] } },
-        select: { id: true },
+      const pending = await tx.Versions.findFirst({
+        where: { OwnerId: credentialOwner.Id, Status: { in: ['staging', 'pending'] } },
+        select: { Id: true },
       });
       if (pending) {
         throw forbidden('The owner already has a version awaiting review.');
       }
 
-      const existing = await tx.versions.findMany({
-        where: { namespace: owner.namespace, extension_id: id },
-        select: { version: true },
+      const existing = await tx.Versions.findMany({
+        where: { Namespace: owner.Namespace, ExtensionId: id },
+        select: { Version: true },
       });
-      const ceiling = maxVersionBySemver(existing.map((row) => row.version));
+      const ceiling = maxVersionBySemver(existing.map((row) => row.Version));
       if (ceiling && !semver.gt(version, ceiling)) {
         throw new HttpError(422, {
           detail: `Version ${version} is not strictly greater than the current highest version (${ceiling}).`,
         });
       }
 
-      const recorded = await tx.versions.create({
+      const recorded = await tx.Versions.create({
         data: {
-          owner_id: credentialOwner.id,
-          namespace: owner.namespace,
-          extension_id: id,
-          version,
-          status: 'staging',
-          name,
-          license: manifest.license,
-          description: manifest.description,
-          author: manifest.author ?? null,
-          color1: manifest.color1 ?? null,
-          color2: manifest.color2 ?? null,
-          color3: manifest.color3 ?? null,
-          is_unsandboxed: manifest.isUnsandboxed ?? null,
-          blob_path: blobRelative,
-          blob_digest: digest,
-          blob_size: codeBuffer.length,
-          blob_sha512: sha512,
-          search_text: searchText,
-          source_size: sourceBuffer.length,
-          build_log: buildLog,
-          warnings,
+          OwnerId: credentialOwner.Id,
+          Namespace: owner.Namespace,
+          ExtensionId: id,
+          Version: version,
+          Status: 'staging',
+          Name: name,
+          License: manifest.license,
+          Description: manifest.description,
+          Author: manifest.author ?? null,
+          Color1: manifest.color1 ?? null,
+          Color2: manifest.color2 ?? null,
+          Color3: manifest.color3 ?? null,
+          IsUnsandboxed: manifest.isUnsandboxed ?? null,
+          BlobPath: blobRelative,
+          BlobDigest: digest,
+          BlobSize: codeBuffer.length,
+          BlobSha512: sha512,
+          SearchText: searchText,
+          SourceSize: sourceBuffer.length,
+          BuildLog: buildLog,
+          Warnings: warnings,
         },
       });
-      await tx.extension_owners.createMany({
+      await tx.ExtensionOwners.createMany({
         data: [
-          { owner_id: owner.id, namespace: owner.namespace, extension_id: id, added_by: owner.id },
+          {
+            OwnerId: owner.Id,
+            Namespace: owner.Namespace,
+            ExtensionId: id,
+            AddedBy: owner.Id,
+          },
         ],
         skipDuplicates: true,
       });
@@ -1555,21 +1567,21 @@ async function publishVersion(
       // re-read under a row lock: publishes to sibling extensions queue here
       // instead of both charging against the same ceiling.
       const [account] = await tx.$queryRaw`
-        SELECT blob_bytes, max_blob_bytes FROM users WHERE id = ${owner.id} FOR UPDATE
+        SELECT "BlobBytes", "MaxBlobBytes" AS max_blob_bytes FROM "Users" WHERE "Id" = ${owner.Id} FOR UPDATE
       `;
       if (account) {
         const accountQuota =
           account.max_blob_bytes ?? config.limits?.maxAccountBlobBytes ?? 64 * 1024 * 1024;
-        if (Number(account.blob_bytes ?? 0) + charge > accountQuota) {
+        if (Number(account.BlobBytes ?? 0) + charge > accountQuota) {
           throw new HttpError(413, {
             title: 'Payload Too Large',
-            detail: `Publishing ${charge} bytes would exceed the ${accountQuota}-byte storage quota for @${owner.namespace}.`,
+            detail: `Publishing ${charge} bytes would exceed the ${accountQuota}-byte storage quota for @${owner.Namespace}.`,
           });
         }
       }
-      await tx.users.update({
-        where: { id: owner.id },
-        data: { blob_bytes: { increment: charge } },
+      await tx.Users.update({
+        where: { Id: owner.Id },
+        data: { BlobBytes: { increment: charge } },
       });
       staged = recorded;
     });
@@ -1584,19 +1596,19 @@ async function publishVersion(
       // digest commits, so cleanup cannot unlink a source another publish is
       // about to reference.
       const stored = await storeSource(config.dataDir, sourceBuffer);
-      await tx.versions.update({
-        where: { id: staged.id },
-        data: { source_path: stored.path, source_digest: stored.digest },
+      await tx.Versions.update({
+        where: { Id: staged.Id },
+        data: { SourcePath: stored.path, SourceDigest: stored.digest },
       });
     });
     const row = await withLocks(db, [{ key: BLOB_GC_LOCK_KEY, shared: true }], async (tx) => {
       // GC holds the exclusive lock; publishers share it through promotion.
       await storeBlob(config.dataDir, tmpPath, codeBuffer);
-      const promoted = await tx.versions.update({
-        where: { id: staged.id },
+      const promoted = await tx.Versions.update({
+        where: { Id: staged.Id },
         data: {
-          status: finalStatus,
-          published_at: finalStatus === 'published' ? new Date() : null,
+          Status: finalStatus,
+          PublishedAt: finalStatus === 'published' ? new Date() : null,
         },
       });
       // The audit commits with the promotion so a pending publish is never
@@ -1605,7 +1617,7 @@ async function publishVersion(
         tx,
         stagedBy,
         'version.publish',
-        { namespace: owner.namespace, id, version: staged.version },
+        { namespace: owner.Namespace, id, version: staged.Version },
         {
           status: finalStatus,
           bytes: codeBuffer.length,

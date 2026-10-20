@@ -110,17 +110,17 @@ export async function removeBlobIfUnusedInTx(tx, config, digest, exceptId) {
   if (!digest) return false;
   // `id != NULL` is never true in SQL, so a null exceptId has to drop the
   // clause entirely rather than filter on it.
-  const keeper = await tx.versions.findFirst({
+  const keeper = await tx.Versions.findFirst({
     where: {
-      blob_digest: digest,
-      ...(exceptId === null || exceptId === undefined ? {} : { id: { not: exceptId } }),
+      BlobDigest: digest,
+      ...(exceptId === null || exceptId === undefined ? {} : { Id: { not: exceptId } }),
     },
-    select: { id: true },
+    select: { Id: true },
   });
   if (keeper) return false;
-  const profile = await tx.users.findFirst({
-    where: { OR: [{ avatar_blob_digest: digest }, { banner_blob_digest: digest }] },
-    select: { id: true },
+  const profile = await tx.Users.findFirst({
+    where: { OR: [{ AvatarBlobDigest: digest }, { BannerBlobDigest: digest }] },
+    select: { Id: true },
   });
   if (profile) return false;
   try {

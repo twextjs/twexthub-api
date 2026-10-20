@@ -21,26 +21,26 @@ export function makeBlobsRouter({ db, config }) {
     const [, digest] = digestMatch;
     const abs = blobPathFor(config.dataDir, digest);
     if (!existsSync(abs)) throw notFound();
-    const rows = await db.versions.findMany({
-      where: { blob_digest: digest },
-      select: { namespace: true, extension_id: true, status: true, blob_size: true },
-      orderBy: { id: 'desc' },
+    const rows = await db.Versions.findMany({
+      where: { BlobDigest: digest },
+      select: { Namespace: true, ExtensionId: true, Status: true, BlobSize: true },
+      orderBy: { Id: 'desc' },
     });
     if (rows.length === 0) throw notFound();
     const [row] = rows;
-    const isPublic = rows.some((candidate) => PUBLIC_STATUSES.has(candidate.status));
+    const isPublic = rows.some((candidate) => PUBLIC_STATUSES.has(candidate.Status));
     if (isPublic) {
       res.set('Cache-Control', 'public, max-age=31536000, immutable');
     } else {
       // Same status rule as the download route: the newest row is the one that
       // was checked out, so an unreviewed version's bytes are for the moderation
       // queue rather than for whoever holds the digest.
-      if (!PUBLIC_STATUSES.has(row.status) && !(row.status === 'pending' && isAdmin(req.auth)))
+      if (!PUBLIC_STATUSES.has(row.Status) && !(row.Status === 'pending' && isAdmin(req.auth)))
         throw notFound();
       res.set('Cache-Control', 'private, no-store');
     }
-    if (row.blob_size !== null && row.blob_size !== undefined) {
-      if (statSync(abs).size !== Number(row.blob_size)) {
+    if (row.BlobSize !== null && row.BlobSize !== undefined) {
+      if (statSync(abs).size !== Number(row.BlobSize)) {
         throw notFound('Blob integrity check failed.');
       }
     }

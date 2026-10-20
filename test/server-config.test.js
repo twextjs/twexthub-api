@@ -63,7 +63,7 @@ after(async () => {
 
 async function admin() {
   const account = await signupAndAccept(app, uniqNs());
-  await db.$executeRaw`UPDATE users SET role = 'admin' WHERE namespace = ${account.user.namespace}`;
+  await db.$executeRaw`UPDATE "Users" SET "Role" = 'admin' WHERE "Namespace" = ${account.user.namespace}`;
   return account;
 }
 
@@ -71,7 +71,7 @@ async function admin() {
 // an ordinary account says so rather than depending on the signup order.
 async function ordinary() {
   const account = await signupAndAccept(app, uniqNs());
-  await db.$executeRaw`UPDATE users SET role = 'normal' WHERE namespace = ${account.user.namespace}`;
+  await db.$executeRaw`UPDATE "Users" SET "Role" = 'normal' WHERE "Namespace" = ${account.user.namespace}`;
   return account;
 }
 
@@ -445,7 +445,7 @@ describe('PUT /admin/config', () => {
     // by the time the response lands. A fire-and-forget audit would leave the
     // read to race the insert.
     const [row] = await db.$queryRaw`
-      SELECT action, detail FROM audit_log WHERE action = 'config.update'
+      SELECT "Action" AS action, "Detail" AS detail FROM "AuditLog" WHERE "Action" = 'config.update'
     `;
     assert.ok(row, 'expected a config.update audit row');
     assert.equal(row.detail.changed['pagination.maxLimit'].after, 60);

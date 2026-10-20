@@ -300,11 +300,11 @@ for (const ownership of ['co-owner', 'organization co-owner', 'organization owne
     );
     if (ownership === 'organization owner') {
       // Exercise namespace authority without an extension ownership row.
-      await db.$executeRaw`DELETE FROM extension_owners WHERE namespace = ${ns} AND extension_id = 'ranger'`;
+      await db.$executeRaw`DELETE FROM "ExtensionOwners" WHERE "Namespace" = ${ns} AND "ExtensionId" = 'ranger'`;
     } else {
       await db.$executeRaw`
-        INSERT INTO extension_owners (owner_id, namespace, extension_id)
-        SELECT id, ${ns}, 'ranger' FROM users WHERE namespace = ${grant.namespace}
+        INSERT INTO "ExtensionOwners" ("OwnerId", "Namespace", "ExtensionId")
+        SELECT "Id", ${ns}, 'ranger' FROM "Users" WHERE "Namespace" = ${grant.namespace}
       `;
     }
 

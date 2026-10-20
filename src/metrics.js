@@ -24,43 +24,43 @@ export function aggregateDayLoader(db) {
     await db.$executeRaw`
       WITH events AS (
         SELECT
-          namespace,
-          extension_id,
-          version,
-          COALESCE(ip_hash, user_agent, '') AS client
-        FROM download_events
-        WHERE created_at >= ${dayStart}
-          AND created_at < ${dayEnd}
+          "Namespace",
+          "ExtensionId",
+          "Version",
+          COALESCE("IpHash", "UserAgent", '') AS client
+        FROM "DownloadEvents"
+        WHERE "CreatedAt" >= ${dayStart}
+          AND "CreatedAt" < ${dayEnd}
       ),
       "extension" AS (
-        INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads, distinct_downloads)
+        INSERT INTO "ExtensionDailyDownloads" ("Namespace", "ExtensionId", "Day", "TotalDownloads", "DistinctDownloads")
         SELECT
-          namespace,
-          extension_id,
-          ${dayStart}::date AS day,
-          COUNT(*)::bigint AS total_downloads,
-          COUNT(DISTINCT client)::bigint AS distinct_downloads
+          "Namespace",
+          "ExtensionId",
+          ${dayStart}::date AS "Day",
+          COUNT(*)::bigint AS "TotalDownloads",
+          COUNT(DISTINCT client)::bigint AS "DistinctDownloads"
         FROM events
-        GROUP BY namespace, extension_id
-        ON CONFLICT (namespace, extension_id, day)
+        GROUP BY "Namespace", "ExtensionId"
+        ON CONFLICT ("Namespace", "ExtensionId", "Day")
         DO UPDATE SET
-          total_downloads = EXCLUDED.total_downloads,
-          distinct_downloads = EXCLUDED.distinct_downloads
+          "TotalDownloads" = EXCLUDED."TotalDownloads",
+          "DistinctDownloads" = EXCLUDED."DistinctDownloads"
       )
-      INSERT INTO extension_version_daily_downloads (namespace, extension_id, version, day, total_downloads, distinct_downloads)
+      INSERT INTO "ExtensionVersionDailyDownloads" ("Namespace", "ExtensionId", "Version", "Day", "TotalDownloads", "DistinctDownloads")
       SELECT
-        namespace,
-        extension_id,
-        version,
-        ${dayStart}::date AS day,
-        COUNT(*)::bigint AS total_downloads,
-        COUNT(DISTINCT client)::bigint AS distinct_downloads
+        "Namespace",
+        "ExtensionId",
+        "Version",
+        ${dayStart}::date AS "Day",
+        COUNT(*)::bigint AS "TotalDownloads",
+        COUNT(DISTINCT client)::bigint AS "DistinctDownloads"
       FROM events
-      GROUP BY namespace, extension_id, version
-      ON CONFLICT (namespace, extension_id, version, day)
+      GROUP BY "Namespace", "ExtensionId", "Version"
+      ON CONFLICT ("Namespace", "ExtensionId", "Version", "Day")
       DO UPDATE SET
-        total_downloads = EXCLUDED.total_downloads,
-        distinct_downloads = EXCLUDED.distinct_downloads
+        "TotalDownloads" = EXCLUDED."TotalDownloads",
+        "DistinctDownloads" = EXCLUDED."DistinctDownloads"
     `;
   };
 }
@@ -110,9 +110,9 @@ export function dailyAggregationJob(db) {
 // and a typed aggregate would still be one round trip each.
 export async function totalDownloads(db, namespace, extensionId) {
   const rows = await db.$queryRaw`
-    SELECT COALESCE(SUM(total_downloads), 0)::bigint AS total
-    FROM extension_daily_downloads
-    WHERE namespace = ${namespace} AND extension_id = ${extensionId}
+    SELECT COALESCE(SUM("TotalDownloads"), 0)::bigint AS total
+    FROM "ExtensionDailyDownloads"
+    WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${extensionId}
   `;
   return normalizeValue(rows[0]?.total ?? 0n);
 }
@@ -120,36 +120,36 @@ export async function totalDownloads(db, namespace, extensionId) {
 export async function trendingExtensions(db, { limit = 10 } = {}) {
   const rows = await db.$queryRaw`
     WITH latest AS (
-      SELECT v.namespace, v.extension_id,
+      SELECT v."Namespace", v."ExtensionId",
         row_number() OVER (
-          PARTITION BY v.namespace, v.extension_id
-          ORDER BY CASE WHEN v.status = 'published' THEN 0 ELSE 1 END,
-                   v.published_at DESC, v.id DESC
+          PARTITION BY v."Namespace", v."ExtensionId"
+          ORDER BY CASE WHEN v."Status" = 'published' THEN 0 ELSE 1 END,
+                   v."PublishedAt" DESC, v."Id" DESC
         ) AS rn
-      FROM versions v
-      WHERE v.status IN ('published', 'deprecated')
+      FROM "Versions" v
+      WHERE v."Status" IN ('published', 'deprecated')
     )
-    SELECT d.namespace, d.extension_id,
-           COALESCE(SUM(d.total_downloads), 0)::bigint AS downloads
-    FROM extension_daily_downloads d
-    JOIN latest s ON s.namespace = d.namespace AND s.extension_id = d.extension_id AND s.rn = 1
-    WHERE d.day >= ${new Date(utcMidnight(new Date()).getTime() - 6 * DAY_MS)}::date
-    GROUP BY d.namespace, d.extension_id
-    ORDER BY downloads DESC, d.namespace ASC, d.extension_id ASC
+    SELECT d."Namespace", d."ExtensionId",
+           COALESCE(SUM(d."TotalDownloads"), 0)::bigint AS downloads
+    FROM "ExtensionDailyDownloads" d
+    JOIN latest s ON s."Namespace" = d."Namespace" AND s."ExtensionId" = d."ExtensionId" AND s.rn = 1
+    WHERE d."Day" >= ${new Date(utcMidnight(new Date()).getTime() - 6 * DAY_MS)}::date
+    GROUP BY d."Namespace", d."ExtensionId"
+    ORDER BY downloads DESC, d."Namespace" ASC, d."ExtensionId" ASC
     LIMIT ${limit}
   `;
   return rows.map((row) => ({
-    namespace: row.namespace,
-    id: row.extension_id,
+    namespace: row.Namespace,
+    id: row.ExtensionId,
     downloads: normalizeValue(row.downloads),
   }));
 }
 
 export async function versionDownloads(db, namespace, extensionId, version) {
   const rows = await db.$queryRaw`
-    SELECT COALESCE(SUM(total_downloads), 0)::bigint AS total
-    FROM extension_version_daily_downloads
-    WHERE namespace = ${namespace} AND extension_id = ${extensionId} AND version = ${version}
+    SELECT COALESCE(SUM("TotalDownloads"), 0)::bigint AS total
+    FROM "ExtensionVersionDailyDownloads"
+    WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${extensionId} AND "Version" = ${version}
   `;
   return normalizeValue(rows[0]?.total ?? 0n);
 }
@@ -158,10 +158,10 @@ export async function versionDownloads(db, namespace, extensionId, version) {
 // does not issue one statement per entry.
 export async function versionDownloadTotals(db, namespace, extensionId) {
   const rows = await db.$queryRaw`
-    SELECT version, COALESCE(SUM(total_downloads), 0)::bigint AS total
-    FROM extension_version_daily_downloads
-    WHERE namespace = ${namespace} AND extension_id = ${extensionId}
-    GROUP BY version
+    SELECT "Version", COALESCE(SUM("TotalDownloads"), 0)::bigint AS total
+    FROM "ExtensionVersionDailyDownloads"
+    WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${extensionId}
+    GROUP BY "Version"
   `;
-  return new Map(rows.map((row) => [row.version, row.total]));
+  return new Map(rows.map((row) => [row.Version, row.total]));
 }

@@ -12,7 +12,7 @@ before(async () => {
 });
 beforeEach(async () => {
   await db.$executeRawUnsafe(`
-    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications, users, legal_documents
+    TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications", "Users", "LegalDocuments"
     RESTART IDENTITY CASCADE
   `);
 });

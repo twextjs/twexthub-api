@@ -4,8 +4,8 @@ import { Prisma } from '../prisma/generated/client/index.js';
 // the caller's transaction so a notification can never outlive the event that
 // produced it. `tx` is the root client or an interactive-transaction client.
 export async function notifyUser(tx, userId, kind, message, payload = {}) {
-  await tx.notifications.create({
-    data: { user_id: userId, kind, message, payload },
+  await tx.Notifications.create({
+    data: { UserId: userId, Kind: kind, Message: message, Payload: payload },
   });
 }
 
@@ -16,8 +16,8 @@ export async function notifyUser(tx, userId, kind, message, payload = {}) {
 // `Prisma.sql` fragment (possibly `Prisma.empty`).
 export async function notifyUsersMatching(tx, where, kind, message, payload = {}) {
   const rows = await tx.$queryRaw`
-    INSERT INTO notifications (user_id, kind, message, payload)
-    SELECT id, ${kind}, ${message}, ${payload}::jsonb FROM users ${where}
+    INSERT INTO "Notifications" ("UserId", "Kind", "Message", "Payload")
+    SELECT "Id", ${kind}, ${message}, ${payload}::jsonb FROM "Users" ${where}
     RETURNING 1
   `;
   return rows.length;
@@ -27,13 +27,13 @@ export async function notifyUsersMatching(tx, where, kind, message, payload = {}
 // to the accounts on its owner list -- each of which can act for it, and each of
 // which is the one that would have to accept an invitation.
 export async function notifyOwnerCandidate(tx, candidate, kind, message, payload = {}) {
-  if (candidate.kind !== 'organization') {
-    await notifyUser(tx, candidate.id, kind, message, payload);
+  if (candidate.Kind !== 'organization') {
+    await notifyUser(tx, candidate.Id, kind, message, payload);
     return 1;
   }
   return notifyUsersMatching(
     tx,
-    Prisma.sql`WHERE id IN (SELECT user_id FROM organization_owners WHERE org_id = ${candidate.id})`,
+    Prisma.sql`WHERE "Id" IN (SELECT "UserId" FROM "OrganizationOwners" WHERE "OrgId" = ${candidate.Id})`,
     kind,
     message,
     payload,

@@ -69,14 +69,14 @@ test('the baseline builds the objects the application depends on', async () => {
       await db.$queryRaw`SELECT tablename FROM pg_tables WHERE schemaname = 'public'`
     ).map((row) => row.tablename);
     for (const table of [
-      'versions',
-      'users',
-      'dist_tags',
-      'webhook_deliveries',
-      'extension_owner_invites',
-      'extension_transfers',
-      'oidc_flows',
-      'extension_daily_downloads',
+      'Versions',
+      'Users',
+      'DistTags',
+      'WebhookDeliveries',
+      'ExtensionOwnerInvites',
+      'ExtensionTransfers',
+      'OidcFlows',
+      'ExtensionDailyDownloads',
     ]) {
       assert.ok(tables.includes(table), `the baseline should create ${table}`);
     }
@@ -91,7 +91,7 @@ test('the baseline builds the objects the application depends on', async () => {
       SELECT indexdef FROM pg_indexes WHERE indexname = 'versions_search_text_trgm_idx'
     `;
     assert.equal(trigram.length, 1, 'the trigram index exists');
-    assert.match(trigram[0].indexdef, /USING gin \(search_text gin_trgm_ops\)/);
+    assert.match(trigram[0].indexdef, /USING gin \("SearchText" gin_trgm_ops\)/);
 
     // Partial indexes: one plain, one unique.
     const partial = (
@@ -129,7 +129,7 @@ test('the baseline builds the objects the application depends on', async () => {
     // password is exactly what `users_password_matches_kind` refuses.
     await assert.rejects(
       db.$executeRaw`
-        INSERT INTO users (namespace, password_hash, display_name, kind)
+        INSERT INTO "Users" ("Namespace", "PasswordHash", "DisplayName", "Kind")
         VALUES ('enforced', 'x', 'enforced', 'organization')
       `,
       /violates check constraint "users_password_matches_kind"/,
@@ -137,7 +137,7 @@ test('the baseline builds the objects the application depends on', async () => {
 
     const [events] = await db.$queryRaw`
       SELECT is_nullable FROM information_schema.columns
-      WHERE table_name = 'webhooks' AND column_name = 'events'
+      WHERE table_name = 'Webhooks' AND column_name = 'Events'
     `;
     assert.equal(events.is_nullable, 'NO', 'webhooks.events is NOT NULL');
 
@@ -146,22 +146,23 @@ test('the baseline builds the objects the application depends on', async () => {
     // decides which check runs first, so this is a behavioral assertion rather
     // than a name comparison.
     await db.$executeRaw`
-      INSERT INTO users (namespace, password_hash, display_name) VALUES ('deleteme', 'x', 'deleteme')
+      INSERT INTO "Users" ("Namespace", "PasswordHash", "DisplayName") VALUES ('deleteme', 'x', 'deleteme')
     `;
-    const [{ id }] = await db.$queryRaw`SELECT id FROM users WHERE namespace = 'deleteme'`;
+    const [{ id }] =
+      await db.$queryRaw`SELECT "Id" AS id FROM "Users" WHERE "Namespace" = 'deleteme'`;
     await db.$executeRaw`
-      INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
+      INSERT INTO "ExtensionOwners" ("OwnerId", "Namespace", "ExtensionId", "AddedBy")
       VALUES (${id}, 'deleteme', 'thing', ${id})
     `;
-    await db.$executeRaw`DELETE FROM users WHERE id = ${id}`;
+    await db.$executeRaw`DELETE FROM "Users" WHERE "Id" = ${id}`;
     const [{ remaining }] = await db.$queryRaw`
-      SELECT count(*)::int AS remaining FROM extension_owners WHERE owner_id = ${id}
+      SELECT count(*)::int AS remaining FROM "ExtensionOwners" WHERE "OwnerId" = ${id}
     `;
     assert.equal(remaining, 0, 'the owner row went with the account');
 
     // Sequence-backed ids.
     const [{ sequence }] = await db.$queryRaw`
-      SELECT pg_get_serial_sequence('versions', 'id') AS sequence
+      SELECT pg_get_serial_sequence('"Versions"', 'Id') AS sequence
     `;
     assert.ok(sequence, 'versions.id is backed by a sequence');
 
@@ -173,7 +174,7 @@ test('the baseline builds the objects the application depends on', async () => {
       `;
     const notifications = functions.find((row) => row.proname === 'prune_notifications');
     assert.ok(notifications, 'prune_notifications exists');
-    assert.match(notifications.body, /pg_advisory_xact_lock\(NEW\.user_id\)/);
+    assert.match(notifications.body, /pg_advisory_xact_lock\(NEW\."UserId"\)/);
     assert.match(notifications.body, /OFFSET 200/);
     const deliveries = functions.find((row) => row.proname === 'prune_webhook_deliveries');
     assert.ok(deliveries, 'prune_webhook_deliveries exists');
@@ -181,7 +182,7 @@ test('the baseline builds the objects the application depends on', async () => {
 
     const triggers = (
       await db.$queryRaw`
-        SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = 'notifications'::regclass
+        SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgrelid = '"Notifications"'::regclass
       `
     ).map((row) => row.tgname);
     assert.ok(triggers.includes('notifications_prune'), 'the retention trigger is installed');
@@ -193,6 +194,9 @@ test('a complete legacy history is adopted in place', async () => {
     const files = await legacyFiles();
     assert.equal(files.length, 29, 'the archive holds the 29 SQL migrations the releases wrote');
     await applyLegacyMigrations(db, files);
+    // The database is still the legacy snake_case one at this point: the
+    // rename happens inside runMigrations below, so this row is written the
+    // way the legacy releases wrote it and then has to survive the rename.
     await db.$executeRaw`
       INSERT INTO users (namespace, password_hash, display_name)
       VALUES ('sentinel', 'x', 'sentinel')
@@ -205,13 +209,15 @@ test('a complete legacy history is adopted in place', async () => {
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case'],
       'the baseline is recorded as applied, without its DDL running again',
     );
-    const [kept] = await db.$queryRaw`SELECT namespace FROM users WHERE namespace = 'sentinel'`;
+    const [kept] = await db.$queryRaw`
+      SELECT "Namespace" AS namespace FROM "Users" WHERE "Namespace" = 'sentinel'
+    `;
     assert.equal(kept.namespace, 'sentinel', 'the existing rows are untouched');
     // The migrated database is the one the application queries.
-    assert.equal(await db.versions.count(), 0);
+    assert.equal(await db.Versions.count(), 0);
   });
 });
 
@@ -233,12 +239,12 @@ test('a history that stops before the download rollup is adopted and gets the ta
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case'],
       'the baseline is marked applied and the rollup is run after it',
     );
     const [{ present }] = await db.$queryRaw`
       SELECT count(*)::int AS present FROM pg_tables
-      WHERE schemaname = 'public' AND tablename = 'extension_version_daily_downloads'
+      WHERE schemaname = 'public' AND tablename = 'ExtensionVersionDailyDownloads'
     `;
     assert.equal(present, 1, 'Prisma Migrate created the per-version download rollup');
   });
@@ -272,7 +278,7 @@ test('two bootstraps racing for one database serialize', async () => {
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case'],
       'the baseline is applied exactly once',
     );
   });

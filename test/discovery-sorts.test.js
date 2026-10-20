@@ -66,7 +66,7 @@ async function seedExtensions() {
 
 async function downloadNs(client, ns, id) {
   await client.$executeRaw`
-    INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
+    INSERT INTO "DownloadEvents" ("Namespace", "ExtensionId", "Version", "UserAgent", "IpHash")
     VALUES (${ns}, ${id}, '1.0.0', 'test', '10.0.0.9')
   `;
 }
@@ -188,8 +188,8 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
   // download count is set to a realistic figure first, because a badge whose
   // message reads "1 download" flatters the combined width -- the digits and the
   // word "downloads" are most of what makes it long.
-  await db.$executeRaw`UPDATE extension_daily_downloads SET total_downloads = 48213
-            WHERE namespace = ${ns} AND extension_id = 'zoo'`;
+  await db.$executeRaw`UPDATE "ExtensionDailyDownloads" SET "TotalDownloads" = 48213
+            WHERE "Namespace" = ${ns} AND "ExtensionId" = 'zoo'`;
   const combined = await get(apiPath(`/badge/@${ns}/zoo`));
   const combinedWidth = svgWidth(combined);
   for (const [name, markup] of [
@@ -405,11 +405,12 @@ test('badge colour is derived per package, stays put, and stays readable', async
     'kilo',
     'lima',
   ];
-  const owner = await db.$queryRaw`SELECT owner_id FROM versions WHERE namespace = ${ns} LIMIT 1`;
+  const owner =
+    await db.$queryRaw`SELECT "OwnerId" FROM "Versions" WHERE "Namespace" = ${ns} LIMIT 1`;
   for (const name of names) {
-    await db.$executeRaw`INSERT INTO versions (owner_id, namespace, extension_id, version, status, name,
-                                   license, description, blob_path, published_at)
-               VALUES (${owner[0].owner_id}, ${ns}, ${name}, '1.0.0', 'published', ${name},
+    await db.$executeRaw`INSERT INTO "Versions" ("OwnerId", "Namespace", "ExtensionId", "Version", "Status", "Name",
+                                   "License", "Description", "BlobPath", "PublishedAt")
+               VALUES (${owner[0].OwnerId}, ${ns}, ${name}, '1.0.0', 'published', ${name},
                        'MIT', '', ${`badge/${name}.tgz`}, now())`;
   }
   const colours = new Set();

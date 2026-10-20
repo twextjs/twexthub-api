@@ -83,7 +83,7 @@ The first account to sign up on a fresh database becomes the admin, which is wor
 | `src/blobs.js`, `src/sources.js`             | The content-addressed stores under `dataDir` for compiled output and retained sources.                                                               |
 | `src/maintenance.js`                         | Blob garbage collection, the daily integrity sweep that re-hashes stored files, and the startup cleanup of stale temp files.                         |
 | `src/observability.js`                       | Request counts and timings, the optional per-request JSON log, and the Prometheus endpoint at `/admin/metrics`.                                      |
-| `src/metrics.js`                             | The daily download rollup into `extension_daily_downloads`, and the distinct-download hashing.                                                       |
+| `src/metrics.js`                             | The daily download rollup into `ExtensionDailyDownloads`, and the distinct-download hashing.                                                         |
 | `src/download-address.js`                    | The key that hashes client addresses for those statistics — read from the environment or `dataDir/secrets/`.                                         |
 | `src/webhooks.js`                            | Webhook signing, delivery, and retries.                                                                                                              |
 | `src/notify.js`, `src/audit.js`              | Notification inserts (they join their caller's transaction) and the append-only audit trail.                                                         |

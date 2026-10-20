@@ -20,19 +20,19 @@ export function makeNotificationsRouter({ db, config }) {
       throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid unread.' });
     }
 
-    const rows = await db.notifications.findMany({
+    const rows = await db.Notifications.findMany({
       where: {
-        user_id: req.auth.user.id,
-        ...(unread === 'true' ? { read_at: null } : {}),
-        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+        UserId: req.auth.user.Id,
+        ...(unread === 'true' ? { ReadAt: null } : {}),
+        ...(cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {}),
       },
-      orderBy: { id: back ? 'asc' : 'desc' },
+      orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
 
     // Only the unread tally is read out; a filtered count keeps it one column.
-    const unreadCount = await db.notifications.count({
-      where: { user_id: req.auth.user.id, read_at: null },
+    const unreadCount = await db.Notifications.count({
+      where: { UserId: req.auth.user.Id, ReadAt: null },
     });
 
     res.json(
@@ -41,7 +41,7 @@ export function makeNotificationsRouter({ db, config }) {
         back,
         cursor,
         serialize: notificationToObject,
-        keyOf: (row) => ({ i: Number(row.id) }),
+        keyOf: (row) => ({ i: Number(row.Id) }),
         extra: { unreadCount },
       }),
     );
@@ -63,9 +63,9 @@ export function makeNotificationsRouter({ db, config }) {
       if (all !== true) {
         throw fieldErrors([{ field: 'all', message: 'Must be true when provided.' }]);
       }
-      const updated = await db.notifications.updateMany({
-        where: { user_id: req.auth.user.id, read_at: null },
-        data: { read_at: new Date() },
+      const updated = await db.Notifications.updateMany({
+        where: { UserId: req.auth.user.Id, ReadAt: null },
+        data: { ReadAt: new Date() },
       });
       return res.json({ updated: updated.count });
     }
@@ -84,9 +84,9 @@ export function makeNotificationsRouter({ db, config }) {
       parsed.push(n);
     }
 
-    const updated = await db.notifications.updateMany({
-      where: { user_id: req.auth.user.id, id: { in: parsed }, read_at: null },
-      data: { read_at: new Date() },
+    const updated = await db.Notifications.updateMany({
+      where: { UserId: req.auth.user.Id, Id: { in: parsed }, ReadAt: null },
+      data: { ReadAt: new Date() },
     });
     res.json({ updated: updated.count });
   });
@@ -94,12 +94,12 @@ export function makeNotificationsRouter({ db, config }) {
   router.patch('/:id', guard, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
-    const updated = await db.notifications.updateMany({
-      where: { id, user_id: req.auth.user.id },
-      data: { read_at: new Date() },
+    const updated = await db.Notifications.updateMany({
+      where: { Id: id, UserId: req.auth.user.Id },
+      data: { ReadAt: new Date() },
     });
     if (updated.count === 0) throw notFound();
-    const row = await db.notifications.findUnique({ where: { id } });
+    const row = await db.Notifications.findUnique({ where: { Id: id } });
     res.json(notificationToObject(row));
   });
 
