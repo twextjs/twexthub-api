@@ -65,6 +65,7 @@ export function makeAuthenticate(db) {
           tokenType: found.tokenType,
           scopes: found.scopes,
           tokenId: found.tokenId,
+          authenticatedAt: found.authenticatedAt,
         }
       : null;
 

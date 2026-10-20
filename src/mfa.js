@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
+import { hashToken, newToken } from './auth.js';
 import { product } from './product.js';
 
 // The characters a backup code is drawn from: no `0`/`O`, `1`/`I`/`L`, or
@@ -22,8 +23,24 @@ export const CHALLENGE_KINDS = {
   signin: 'signin',
 };
 
+// The stored hash is of the code's normalized form, not the grouped form it is
+// shown in. A code is read off paper and typed back by hand, so the hyphens are
+// presentation: hashing the normalized form means any way of retyping it --
+// lower case, spaces instead of hyphens, the hyphens dropped -- finds the row.
 export function hashBackupCode(code) {
-  return createHash('sha256').update(code).digest('hex');
+  return createHash('sha256').update(normalizeBackupCode(code)).digest('hex');
+}
+
+// A passkey's COSE public key is bytes, and the library hands registration one
+// as a `Uint8Array` while the column is text. Base64url is the encoding
+// WebAuthn already uses for every other binary field, so it is what the column
+// holds between the two ceremonies.
+export function encodePublicKey(bytes) {
+  return Buffer.from(bytes).toString('base64url');
+}
+
+export function decodePublicKey(encoded) {
+  return new Uint8Array(Buffer.from(encoded, 'base64url'));
 }
 
 // Accept a code however it was typed back: case-folded and with the grouping
@@ -92,4 +109,27 @@ export async function unusedBackupCodeCount(db, userId) {
 // render. Backup codes stop being listed once the set is exhausted.
 export function mfaMethods(unusedCodes) {
   return unusedCodes > 0 ? ['passkey', 'backup_code'] : ['passkey'];
+}
+
+// The answer to a sign-in that passed its first factor and stopped at the
+// second. The token is the claim on the pending challenge: the requests that
+// finish the sign-in are anonymous, so it is all they carry to name the
+// account. Only its hash is stored, like a session token, and the account's
+// earlier pending sign-in is dropped with it, so a token handed out before
+// stops working.
+export async function beginSigninMfa(db, userId) {
+  const token = newToken();
+  await db.$transaction([
+    db.MfaChallenges.deleteMany({ where: { UserId: userId, Kind: CHALLENGE_KINDS.signin } }),
+    db.MfaChallenges.create({
+      data: {
+        UserId: userId,
+        Kind: CHALLENGE_KINDS.signin,
+        SecretHash: hashToken(token),
+        ExpiresAt: new Date(Date.now() + CEREMONY_TTL_MS),
+      },
+    }),
+  ]);
+  const unusedCodes = await unusedBackupCodeCount(db, userId);
+  return { mfaRequired: true, mfaToken: token, methods: mfaMethods(unusedCodes) };
 }
