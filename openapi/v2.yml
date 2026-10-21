@@ -172,6 +172,13 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthSession' }
+        '202':
+          description: >
+            An API client signed in an account with MFA on: the provider vouched
+            for the identity, and the second factor is still to come.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaRequired' }
         '200':
           description: The identity that was linked
           content:
@@ -218,6 +225,11 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthSession' }
+        '202':
+          description: The provider vouched for the account, but it has MFA on and the second factor is still to come
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaRequired' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '404': { $ref: '#/components/responses/NotFound' }
 
@@ -297,6 +309,288 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  # -------------------------------------------------- Multi-factor auth
+  /auth/mfa:
+    get:
+      summary: The account's MFA state
+      operationId: getMfaState
+      tags: [Userspace]
+      description: >
+        Whether MFA is on for the account, the passkeys it has registered, and
+        how many backup codes are left. Session-authenticated: a passkey is
+        something only the person at the keyboard can add, and an automation
+        token cannot.
+      responses:
+        '200':
+          description: The account's MFA state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Passkeys' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/mfa/passkeys/options:
+    post:
+      summary: Start registering a passkey
+      operationId: mfaRegistrationOptions
+      tags: [Userspace]
+      description: >
+        Hands out the WebAuthn options for a registration ceremony. Requires
+        a recently authenticated session. One ceremony per account is kept:
+        a fresh call replaces whatever the last one left.
+      responses:
+        '200':
+          description: Options for `navigator.credentials.create`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [options]
+                properties:
+                  options: { $ref: '#/components/schemas/WebAuthnOptions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/mfa/passkeys:
+    post:
+      summary: Register a passkey
+      operationId: mfaRegisterPasskey
+      tags: [Userspace]
+      description: >
+        Verifies the registration ceremony started by
+        `POST /auth/mfa/passkeys/options` and stores the credential. The first
+        passkey turns MFA on and mints ten backup codes in the same write, so
+        MFA never comes on without a way back in; those codes are in this
+        response and nowhere else. A later passkey leaves the codes alone and
+        returns `backupCodes: null`. Requires a recently authenticated session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [response]
+              properties:
+                response:
+                  type: object
+                  description: The `PublicKeyCredential` from `navigator.credentials.create`.
+                  additionalProperties: true
+                label: { type: string, maxLength: 80, description: A name for the passkey. }
+      responses:
+        '201':
+          description: The stored passkey, and backup codes when this turned MFA on
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [passkey, backupCodes]
+                properties:
+                  passkey: { $ref: '#/components/schemas/Passkey' }
+                  backupCodes:
+                    type: ['array', 'null']
+                    items: { type: string }
+                    description: The ten new codes, only when this passkey turned MFA on.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/mfa/passkeys/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9]+$' }
+        description: Passkey id, as a string so it survives a JSON parser that keeps numbers exact.
+    patch:
+      summary: Rename a passkey
+      operationId: renamePasskey
+      tags: [Userspace]
+      description: Changes the label only; the credential itself is untouched.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [label]
+              properties:
+                label: { type: string, maxLength: 80 }
+      responses:
+        '200':
+          description: The renamed passkey
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Passkey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      summary: Remove a passkey
+      operationId: deletePasskey
+      tags: [Userspace]
+      description: >
+        Removing the last passkey turns MFA off and discards the backup codes
+        and any sign-in waiting on its second factor. Needs a recent sign-in
+        (within `auth.reauthWindowMinutes`), because a session stolen out of a
+        browser should not be able to strip the account's second factor.
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /auth/mfa/backup-codes:
+    post:
+      summary: Replace the account's backup codes
+      operationId: regenerateBackupCodes
+      tags: [Userspace]
+      description: >
+        Replaces every backup code with ten new ones; the old set stops working
+        immediately. Needs a recent sign-in, for the same reason removing a
+        passkey does.
+      responses:
+        '201':
+          description: The new codes, shown only here
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BackupCodes' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/mfa/options:
+    post:
+      summary: Start finishing a sign-in that stopped at the second factor
+      operationId: mfaSigninOptions
+      tags: [Open]
+      security: []
+      description: >
+        Hands out the WebAuthn options for the passkeys of the account waiting
+        to sign in. Anonymous: the `mfaToken` from the sign-in is what names the
+        account. The challenge it returns is answered by
+        `POST /auth/mfa/verify`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken]
+              properties:
+                mfaToken: { type: string }
+      responses:
+        '200':
+          description: Options for `navigator.credentials.get`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [options]
+                properties:
+                  options: { $ref: '#/components/schemas/WebAuthnOptions' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/mfa/verify:
+    post:
+      summary: Finish a sign-in with a passkey or a backup code
+      operationId: mfaVerify
+      tags: [Open]
+      security: []
+      description: >
+        Completes the sign-in the `mfaToken` claims, with either a passkey
+        assertion or a backup code (not both). A backup code is spent as it is
+        checked, so it works exactly once; a passkey assertion answers the
+        challenge from `POST /auth/mfa/options`, which is consumed with it.
+        Failed attempts count against the same login rate limit as a wrong
+        password.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken]
+              properties:
+                mfaToken: { type: string }
+                response:
+                  type: object
+                  description: The `PublicKeyCredential` from `navigator.credentials.get`.
+                  additionalProperties: true
+                backupCode:
+                  type: string
+                  description: A backup code, in any case and with or without the grouping.
+      responses:
+        '201':
+          description: The session that was created, its owner, and its one-time token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /auth/mfa/reauth/options:
+    post:
+      summary: Start refreshing a session's authentication
+      operationId: mfaReauthOptions
+      tags: [Userspace]
+      description: >
+        Hands out the WebAuthn options for a passkey step-up on the current
+        session, so an account whose session has aged past the recent-auth
+        window can satisfy the check without signing in again. A `403` when the
+        account has no passkey to verify with.
+      responses:
+        '200':
+          description: Options for `navigator.credentials.get`
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [options]
+                properties:
+                  options: { $ref: '#/components/schemas/WebAuthnOptions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /auth/mfa/reauth:
+    post:
+      summary: Refresh the session's authentication with a passkey
+      operationId: mfaReauth
+      tags: [Userspace]
+      description: >
+        Verifies the assertion for `POST /auth/mfa/reauth/options` and marks the
+        current session as freshly authenticated, which is what the recent-auth
+        checks read.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [response]
+              properties:
+                response:
+                  type: object
+                  description: The `PublicKeyCredential` from `navigator.credentials.get`.
+                  additionalProperties: true
+      responses:
+        '200':
+          description: When the session now counts as authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reauthenticatedAt]
+                properties:
+                  reauthenticatedAt: { type: string, format: date-time }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
   # ---------------------------------------------- Sessions & automation tokens
   /sessions:
     post:
@@ -339,6 +633,11 @@ paths:
                   session: { $ref: '#/components/schemas/Session' }
                   user: { $ref: '#/components/schemas/User' }
                   token: { type: string }
+        '202':
+          description: The password was right, but the account has MFA on and the second factor is still to come
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MfaRequired' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
@@ -3158,6 +3457,72 @@ components:
         token:
           type: string
           description: The bearer token secret. Shown only in this one response.
+
+    MfaRequired:
+      type: object
+      description: >
+        What a sign-in returns instead of a session when the account has MFA
+        on: the password or the provider proved the first factor, and a passkey
+        or a backup code still has to prove the second. The `mfaToken` is the
+        claim on the pending sign-in and is shown only in this one response,
+        like a session token.
+      required: [mfaRequired, mfaToken, methods]
+      properties:
+        mfaRequired: { type: boolean, enum: [true] }
+        mfaToken:
+          type: string
+          description: Credential for `POST /auth/mfa/options` and `POST /auth/mfa/verify`.
+        methods:
+          type: array
+          items: { type: string, enum: [passkey, backup_code] }
+          description: >
+            What the waiting sign-in can still be finished with. `backup_code`
+            drops off the list once every code has been used.
+
+    Passkey:
+      type: object
+      description: A registered passkey, as its owner sees it.
+      required: [id, label, createdAt, lastUsedAt]
+      properties:
+        id: { type: string, description: "The passkey row's own id." }
+        label: { type: string, description: What the account named it. }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt: { type: ['string', 'null'], format: date-time }
+
+    Passkeys:
+      type: object
+      required: [enabled, passkeys, backupCodesRemaining]
+      properties:
+        enabled:
+          type: boolean
+          description: True once the account has at least one passkey.
+        passkeys:
+          type: array
+          items: { $ref: '#/components/schemas/Passkey' }
+        backupCodesRemaining:
+          type: integer
+          description: How many backup codes have not been used yet.
+
+    WebAuthnOptions:
+      type: object
+      description: >
+        The options the client hands to `navigator.credentials`. Pass it back
+        as the `options` value in the `create` or `get` call for the ceremony
+        the endpoint name says -- registration through `POST /auth/mfa/passkeys`
+        or an assertion through `POST /auth/mfa/verify` or `POST /auth/mfa/reauth`.
+      additionalProperties: true
+
+    BackupCodes:
+      type: object
+      required: [backupCodes]
+      properties:
+        backupCodes:
+          type: array
+          items: { type: string }
+          description: >
+            Ten codes, grouped as `XXXX-XXXX-XXXX`. Shown only in this one
+            response; the server stores hashes, and a code may be typed back in
+            any case, with or without the grouping.
 
     AuthDescriptor:
       type: object

@@ -26,6 +26,17 @@ export const DEFAULTS = {
       clientSecret: null,
       required: false,
     },
+    webauthn: {
+      // The domain a passkey is scoped to. Null means the hostname of
+      // publicBaseUrl, which is right whenever the web client and the API are
+      // served from the same site.
+      rpId: null,
+      // The name an authenticator shows when it asks to store the passkey.
+      rpName: null,
+    },
+    // How long a session stays "recently authenticated" for the operations
+    // that demand it (adding/removing a passkey, regenerating backup codes).
+    reauthWindowMinutes: 10,
   },
   rateLimits: {
     loginAttemptsPerWindow: 5,
@@ -108,6 +119,9 @@ const ENV_OVERRIDES = [
   ['auth.oidc.clientId', 'TWEXTHUB_OIDC_CLIENT_ID'],
   ['auth.oidc.clientSecret', 'TWEXTHUB_OIDC_CLIENT_SECRET'],
   ['auth.oidc.required', 'TWEXTHUB_OIDC_REQUIRED'],
+  ['auth.webauthn.rpId', 'TWEXTHUB_WEBAUTHN_RP_ID'],
+  ['auth.webauthn.rpName', 'TWEXTHUB_WEBAUTHN_RP_NAME'],
+  ['auth.reauthWindowMinutes', 'TWEXTHUB_REAUTH_WINDOW_MINUTES'],
   ['rateLimits.loginAttemptsPerWindow', 'TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW'],
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
@@ -202,6 +216,28 @@ function normalizeOidc(config) {
   }
 }
 
+// A WebAuthn relying party is an origin's host, so the RP ID is a bare
+// hostname: a scheme, a port, or a path in it would be accepted here and then
+// silently never match what the browser sends. The name is free text shown by
+// the authenticator.
+function normalizeWebauthn(config) {
+  const webauthn = config.auth.webauthn;
+  if (webauthn.rpId === undefined || webauthn.rpId === null || webauthn.rpId === '') {
+    webauthn.rpId = null;
+  } else {
+    webauthn.rpId = String(webauthn.rpId).trim().toLowerCase().replace(/\.$/, '');
+    if (!/^[a-z0-9.-]+$/.test(webauthn.rpId) || webauthn.rpId.includes('..')) {
+      throw new Error(
+        `auth.webauthn.rpId must be a bare hostname, like "example.com" (got "${webauthn.rpId}")`,
+      );
+    }
+  }
+  webauthn.rpName =
+    webauthn.rpName === undefined || webauthn.rpName === null || webauthn.rpName === ''
+      ? null
+      : String(webauthn.rpName);
+}
+
 function applyEnvOverrides(config) {
   for (const [key, envName] of ENV_OVERRIDES) {
     const raw = process.env[envName];
@@ -236,6 +272,17 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
   applyEnvOverrides(config);
   config.apiRoot = normalizeApiRoot(config.apiRoot);
   normalizeOidc(config);
+  normalizeWebauthn(config);
+  const reauthWindow = config.auth.reauthWindowMinutes;
+  const reauthWindowMinutes = Number(reauthWindow);
+  if (
+    !['number', 'string'].includes(typeof reauthWindow) ||
+    !Number.isFinite(reauthWindowMinutes) ||
+    reauthWindowMinutes <= 0
+  ) {
+    throw new Error('auth.reauthWindowMinutes must be a finite positive number');
+  }
+  config.auth.reauthWindowMinutes = reauthWindowMinutes;
   if (!config.database.url) {
     throw new Error(
       `database.url is required (set it in ${configPath}, pass a file via --config, or set TWEXTHUB_DATABASE_URL)`,

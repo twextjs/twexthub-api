@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireScope, requireSession } from '../auth.js';
+import { beginSigninMfa, hasPasskeys } from '../mfa.js';
 import { hashPassword, verifyPassword } from '../password.js';
 import { forbidden, notFound, unauthorized } from '../errors.js';
 import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
@@ -55,6 +56,13 @@ export function makeSessionsRouter({ db, config, termsGate, rateLimiter }) {
     if (!user || !ok) {
       await Promise.all(recordFailures.map((record) => record()));
       throw unauthorized('Invalid namespace or password.');
+    }
+
+    // The password is the first factor. An account with a passkey stops here
+    // with a claim on the pending second factor instead of a session; one
+    // without signs in exactly as it always has.
+    if (await hasPasskeys(db, user.Id)) {
+      return res.status(202).json(await beginSigninMfa(db, user.Id));
     }
 
     const created = await createSession(db, user.Id, sessionTtlMs);

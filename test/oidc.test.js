@@ -1,7 +1,16 @@
 import { test, before, beforeEach, after } from 'node:test';
 import assert from 'node:assert/strict';
 import request from 'supertest';
-import { boot, resetDb, apiPath, bearer, signupAndAccept, uniqNs } from './helpers.mjs';
+import {
+  boot,
+  resetDb,
+  apiPath,
+  bearer,
+  registerPasskey,
+  signupAndAccept,
+  uniqNs,
+  TEST_PUBLIC_BASE_URL,
+} from './helpers.mjs';
 import { roundTripProvider, startFakeIdp } from './fake-idp.mjs';
 
 let app;
@@ -264,4 +273,74 @@ test('a passwordless account cannot unlink its only way in', async () => {
     .delete(apiPath(`/auth/oidc/identities/${list.body.data[0].id}`))
     .set(bearer(token))
     .expect(409);
+});
+
+const site = new URL(TEST_PUBLIC_BASE_URL);
+
+// What the second step of a sign-in looks like once the provider has done its
+// half: options, then the assertion that answers them.
+async function finishMfa(mfaToken, authenticator) {
+  const options = await request(app)
+    .post(apiPath('/auth/mfa/options'))
+    .send({ mfaToken })
+    .expect(200);
+  return request(app)
+    .post(apiPath('/auth/mfa/verify'))
+    .send({
+      mfaToken,
+      response: authenticator.authenticationResponse({
+        challenge: options.body.options.challenge,
+        origin: site.origin,
+        rpId: site.hostname,
+      }),
+    })
+    .expect(201);
+}
+
+test('a provider sign-in for an account with a passkey stops at the second factor', async () => {
+  const first = await signIn({ sub: 'sub-mfa', preferred_username: 'mfa-owner' });
+  assert.equal(first.status, 201);
+  const { authenticator } = await registerPasskey(app, first.body.token);
+
+  // The provider vouched for the identity, not for the person at the keyboard.
+  const paused = await signIn({ sub: 'sub-mfa', preferred_username: 'mfa-owner' });
+  assert.equal(paused.status, 202, JSON.stringify(paused.body));
+  assert.equal(paused.body.mfaRequired, true);
+  assert.deepEqual(paused.body.methods, ['passkey', 'backup_code']);
+
+  const verified = await finishMfa(paused.body.mfaToken, authenticator);
+  assert.equal(verified.body.user.namespace, 'mfa-owner');
+  assert.equal(typeof verified.body.token, 'string');
+});
+
+test('a browser exchange answers with the second factor rather than a session', async () => {
+  const first = await signIn({ sub: 'sub-mfa-web', preferred_username: 'mfa-web' });
+  assert.equal(first.status, 201);
+  const { authenticator } = await registerPasskey(app, first.body.token);
+
+  const agent = browser();
+  const authorize = await agent
+    .get(apiPath('/auth/oidc/authorize'))
+    .query({ returnTo: '/welcome' })
+    .set('Accept', 'text/html')
+    .redirects(0)
+    .expect(302);
+  const { code, state } = await roundTripProvider(authorize.headers.location);
+  const callback = await agent
+    .get(apiPath('/auth/oidc/callback'))
+    .query({ code, state })
+    .set('Accept', 'text/html')
+    .redirects(0)
+    .expect(302);
+  const oidcCode = new URL(callback.headers.location).searchParams.get('oidc_code');
+  assert.ok(oidcCode);
+
+  const exchange = await request(app)
+    .post(apiPath('/auth/oidc/exchange'))
+    .send({ code: oidcCode })
+    .expect(202);
+  assert.equal(exchange.body.mfaRequired, true);
+
+  const verified = await finishMfa(exchange.body.mfaToken, authenticator);
+  assert.equal(verified.body.user.namespace, 'mfa-web');
 });

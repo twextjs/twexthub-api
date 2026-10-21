@@ -10,6 +10,7 @@ import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
 import { makeMeRouter } from './routes/me.js';
 import { makeAuthRouter } from './routes/auth.js';
+import { makeMfaRouter } from './routes/mfa.js';
 import { makeSessionsRouter } from './routes/sessions.js';
 import { makeTokensRouter } from './routes/tokens.js';
 import { makeUsersRouter } from './routes/users.js';
@@ -80,6 +81,9 @@ export function createApp(opts = {}) {
   const discovery = makeDiscoveryRouter(shared);
 
   app.use(mount('/sessions'), makeSessionsRouter(shared));
+  // Before the auth router: `/auth/mfa` is a longer prefix of the same mount
+  // point, and Express tries routers in the order they are registered.
+  app.use(mount('/auth/mfa'), makeMfaRouter(shared));
   app.use(mount('/auth'), makeAuthRouter(shared));
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));

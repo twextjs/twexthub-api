@@ -10,6 +10,7 @@ import { bootstrap } from '../src/server.js';
 import { createTarballBuffer } from '../src/tarball.js';
 import { DEFAULTS } from '../src/config.js';
 import { normalizeApiRoot } from '../src/util.js';
+import { createAuthenticator } from './fake-authenticator.mjs';
 
 // Every test builds its URL from the API root the product actually ships with
 // (product.yml -> defaults.apiRoot) instead of restating a literal, so moving
@@ -17,6 +18,10 @@ import { normalizeApiRoot } from '../src/util.js';
 // the suite.
 const configuredRoot = normalizeApiRoot(DEFAULTS.apiRoot);
 const apiRootPrefix = configuredRoot ? `/${configuredRoot}` : '';
+
+// Every test app is served from this origin, so it is also the origin and RP ID
+// a software authenticator has to present for a WebAuthn ceremony to verify.
+export const TEST_PUBLIC_BASE_URL = 'http://hub.test:8080';
 
 export function apiPath(suffix = '') {
   return `${apiRootPrefix}${suffix}`;
@@ -104,7 +109,7 @@ export function makeConfig(overrides = {}) {
   const config = mergeOverrides(structuredClone(DEFAULTS), {
     port: 0,
     dataDir,
-    publicBaseUrl: 'http://hub.test:8080',
+    publicBaseUrl: TEST_PUBLIC_BASE_URL,
     requireHttps: false,
     trustProxy: false,
     database: { url: PROCESS_DATABASE_URL, maxConnections: 6 },
@@ -316,7 +321,8 @@ export async function resetDb() {
       await db.$executeRawUnsafe(`
         TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications",
         "Users", "LegalDocuments", "DownloadEvents", "ExtensionDailyDownloads", "ExtensionVersionDailyDownloads", "DistTags",
-        "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows"
+        "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows",
+        "Passkeys", "MfaBackupCodes", "MfaChallenges"
         RESTART IDENTITY CASCADE
       `);
       break;
@@ -382,6 +388,29 @@ export async function signupAndAccept(app, namespace, password = FIXTURE_PASSWOR
 }
 
 export const signupAccept = signupAndAccept;
+
+// Runs a whole registration ceremony for the account behind `token` with a
+// software authenticator (test/fake-authenticator.mjs) and returns the
+// authenticator alongside the created passkey and backup codes.
+export async function registerPasskey(app, token, label = 'Test passkey') {
+  const url = new URL(TEST_PUBLIC_BASE_URL);
+  const authenticator = createAuthenticator();
+  const options = await request(app)
+    .post(apiPath('/auth/mfa/passkeys/options'))
+    .set(bearer(token))
+    .expect(200);
+  const response = authenticator.registrationResponse({
+    challenge: options.body.options.challenge,
+    origin: url.origin,
+    rpId: url.hostname,
+  });
+  const registered = await request(app)
+    .post(apiPath('/auth/mfa/passkeys'))
+    .set(bearer(token))
+    .send({ response, label })
+    .expect(201);
+  return { authenticator, body: registered.body };
+}
 
 export async function approveVersion(app, adminToken, ns, id, version) {
   const r = await request(app)
