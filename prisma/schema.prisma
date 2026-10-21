@@ -176,6 +176,30 @@ model OidcFlows {
   @@index([ExpiresAt])
 }
 
+model Reports {
+  Id              BigInt    @id @default(autoincrement())
+  ReporterId      BigInt
+  TargetType      String
+  TargetNamespace String?
+  TargetExtensionId String?
+  TargetUserId    BigInt?
+  Reason          String
+  Description     String
+  Status          String    @default("open")
+  ReviewedBy      BigInt?
+  ReviewedAt      DateTime? @db.Timestamptz(6)
+  ResolutionNote  String?
+  CreatedAt       DateTime  @default(now()) @db.Timestamptz(6)
+  UpdatedAt       DateTime  @default(now()) @db.Timestamptz(6)
+  Reporter        Users     @relation("reports_reporter", fields: [ReporterId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
+  Reviewer        Users?    @relation("reports_reviewer", fields: [ReviewedBy], references: [Id], onUpdate: NoAction)
+
+  @@index([Status, CreatedAt])
+  @@index([ReporterId])
+  @@index([TargetType, TargetNamespace, TargetExtensionId])
+  @@index([TargetUserId])
+}
+
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
 model OrganizationOwners {
   OrgId                                        BigInt
@@ -328,6 +352,8 @@ model Users {
   Sessions                                                   Sessions[]
   UserIdentities                                             UserIdentities[]
   Versions                                                   Versions[]
+  ReportsReporter                                            Reports[]               @relation("reports_reporter")
+  ReportsReviewer                                            Reports[]               @relation("reports_reviewer")
 
   @@unique([Id, Kind])
   @@index([AvatarBlobDigest], map: "users_avatar_blob_idx", where: raw("(\"AvatarBlobDigest\" IS NOT NULL)"))
