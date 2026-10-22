@@ -148,3 +148,4 @@ vite.config.ts.timestamp-*
 # TwextHub runtime data
 data/
 *.db
+/prisma/generated/
