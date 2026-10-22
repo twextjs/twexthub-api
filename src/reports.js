@@ -46,10 +46,8 @@ export const MAX_REPORT_RESOLUTION_NOTE = 2000;
 // quietly recorded as something else.
 const ACCOUNT_KINDS = { user: 'user', organization: 'organization' };
 
-// The version states that mean an extension is there. A version that was
-// rejected is not one of them: nothing was ever published under that address,
-// so there is nothing there to report.
-const EXISTING_VERSION_STATUSES = ['published', 'deprecated', 'pending', 'yanked'];
+// Only versions that have been public make an extension reportable.
+const EXISTING_VERSION_STATUSES = ['published', 'deprecated', 'yanked'];
 
 // The target a report is about, resolved to the address it lives at now and to
 // the row it is held by.

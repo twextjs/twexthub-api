@@ -261,17 +261,29 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
     WHERE "Namespace" = ${toNamespace} AND "ExtensionId" = ${id}
   `;
 
-  // A report is about the extension, not about the address it happened to be
-  // published under, so the reports filed against the old address move with
-  // the extension. Left behind, they would point a reviewer at an address that
-  // holds nothing, and the complaint would look like it had been made about
-  // whoever took the address over. The table is not one of the address-keyed
-  // ones above because its columns are named after the target rather than
-  // after the address.
-  await tx.Reports.updateMany({
-    where: { TargetType: 'extension', TargetNamespace: namespace, TargetExtensionId: id },
-    data: { TargetNamespace: toNamespace, UpdatedAt: new Date() },
-  });
+  // Move only reports linked to this identity, leaving reports about deleted
+  // extensions at their original address. An open report that would collide
+  // at the destination keeps its address and identity link. If earlier moves
+  // left multiple open reports from one reporter linked here, move the oldest.
+  // The correlated conflict check cannot be expressed by the typed client.
+  await tx.$executeRaw`
+    UPDATE "Reports" r SET "TargetNamespace" = ${toNamespace}, "UpdatedAt" = now()
+    WHERE r."TargetExtensionRefId" = (
+      SELECT "Id" FROM "Extensions"
+      WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${id}
+    )
+      AND (r."Status" <> 'open' OR NOT EXISTS (
+        SELECT 1 FROM "Reports" existing
+        WHERE existing."ReporterId" = r."ReporterId"
+          AND existing."TargetType" = r."TargetType"
+          AND existing."TargetExtensionId" = r."TargetExtensionId"
+          AND existing."Status" = 'open'
+          AND (
+            existing."TargetNamespace" = ${toNamespace}
+            OR (existing."TargetExtensionRefId" = r."TargetExtensionRefId" AND existing."Id" < r."Id")
+          )
+      ))
+  `;
 
   // The extension's identity row moves with it: the address it is published
   // under is now the destination's. The row keeps its id, so the reports filed

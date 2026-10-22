@@ -105,6 +105,26 @@ test('a report has to be about something that is there', async () => {
   }).expect(422);
 });
 
+test('an extension awaiting its first approval cannot be reported', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  const body = {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'spam',
+    description: 'Spam.',
+  };
+
+  await fileReport(reporter.token, body).expect(404);
+  assert.equal(await db.Reports.count(), 0);
+
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  await fileReport(reporter.token, body).expect(201);
+});
+
 test('an organization is a target of its own', async () => {
   const owner = await signupAndAccept(app, uniqNs());
   const org = uniqNs();
@@ -573,6 +593,63 @@ test('a reported extension can still be deleted by hand', async () => {
   assert.equal(report.TargetExtensionId, 'hello');
 });
 
+test('account deletion preserves reported extensions with surviving co-owner versions', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const coowner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'hello', owner.token);
+  await approveVersion(app, admin.token, ns, 'hello', '1.0.0');
+  await request(app)
+    .put(apiPath(`/@${ns}/hello/owners/${coowner.user.namespace}`))
+    .set(bearer(owner.token))
+    .expect(204);
+  await request(app)
+    .post(apiPath(`/@${ns}/hello/owners/${coowner.user.namespace}/accept`))
+    .set(bearer(coowner.token))
+    .expect(200);
+  await publishProject(app, ns, 'hello', coowner.token, { version: '2.0.0' });
+  await publishProject(app, ns, 'solo', owner.token);
+
+  const reports = [];
+  for (const id of ['hello', 'solo']) {
+    const created = await fileReport(reporter.token, {
+      targetType: 'extension',
+      targetNamespace: ns,
+      targetExtensionId: id,
+      reason: 'spam',
+      description: 'Spam.',
+    }).expect(201);
+    reports.push(await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } }));
+  }
+
+  await request(app)
+    .delete(apiPath(`/users/${ns}`))
+    .set(bearer(admin.token))
+    .expect(204);
+
+  const remaining = await db.Versions.findMany({ where: { Namespace: ns } });
+  assert.deepEqual(
+    remaining.map((row) => row.Version),
+    ['2.0.0'],
+  );
+  const identity = await db.Extensions.findUnique({
+    where: { Id: reports[0].TargetExtensionRefId },
+  });
+  assert.ok(identity, 'the co-owner still uses the extension identity');
+  assert.equal(identity.NamespaceId, null);
+  const shared = await db.Reports.findUnique({ where: { Id: reports[0].Id } });
+  assert.equal(shared.TargetExtensionRefId, identity.Id);
+  assert.equal(
+    await db.Extensions.findUnique({ where: { Id: reports[1].TargetExtensionRefId } }),
+    null,
+  );
+  const solo = await db.Reports.findUnique({ where: { Id: reports[1].Id } });
+  assert.equal(solo.TargetExtensionRefId, null);
+  assert.equal(solo.TargetNamespace, ns);
+});
+
 test('the link follows the extension through a transfer', async () => {
   const admin = await adminAccount();
   const owner = await signupAndAccept(app, uniqNs());
@@ -613,4 +690,100 @@ test('the link follows the extension through a transfer', async () => {
     where: { Namespace: recipient.user.namespace },
   });
   assert.equal(identity.NamespaceId, recipientAccount.Id);
+});
+
+test('a transfer preserves reports when an open destination report conflicts', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const historicalReporter = await signupAndAccept(app, uniqNs());
+  const body = {
+    targetType: 'extension',
+    targetExtensionId: 'hello',
+    reason: 'spam',
+    description: 'Spam.',
+  };
+
+  // Both addresses previously held a different extension with the same id.
+  const historical = [];
+  for (const [account, token] of [
+    [recipient, reporter.token],
+    [owner, historicalReporter.token],
+  ]) {
+    await publishProject(app, account.user.namespace, 'hello', account.token);
+    await approveVersion(app, admin.token, account.user.namespace, 'hello', '1.0.0');
+    const created = await fileReport(token, {
+      ...body,
+      targetNamespace: account.user.namespace,
+    }).expect(201);
+    await request(app)
+      .delete(apiPath(`/@${account.user.namespace}/hello`))
+      .set(bearer(account.token))
+      .expect(204);
+    historical.push(await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } }));
+  }
+
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  const sourceBody = { ...body, targetNamespace: owner.user.namespace };
+  const resolved = await fileReport(reporter.token, sourceBody).expect(201);
+  await decide(admin.token, resolved.body.id, { status: 'resolved', note: 'Reviewed.' }).expect(
+    200,
+  );
+  const open = await fileReport(reporter.token, sourceBody).expect(201);
+  const before = await db.Reports.findUnique({ where: { Id: BigInt(open.body.id) } });
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  const identity = await db.Extensions.findUnique({ where: { Id: before.TargetExtensionRefId } });
+  assert.equal(identity.Namespace, recipient.user.namespace);
+  assert.equal(await db.Versions.count({ where: { Namespace: recipient.user.namespace } }), 1);
+
+  const skipped = await db.Reports.findUnique({ where: { Id: before.Id } });
+  assert.deepEqual(skipped, before, 'the conflicting open report keeps its link and address');
+  const moved = await db.Reports.findUnique({ where: { Id: BigInt(resolved.body.id) } });
+  assert.equal(moved.TargetNamespace, recipient.user.namespace);
+  assert.equal(moved.TargetExtensionRefId, identity.Id);
+  for (const report of historical) {
+    assert.equal(report.TargetExtensionRefId, null);
+    assert.deepEqual(await db.Reports.findUnique({ where: { Id: report.Id } }), report);
+  }
+
+  // A later report and transfer must also handle the earlier skipped report.
+  await decide(admin.token, String(historical[0].Id), {
+    status: 'resolved',
+    note: 'Reviewed.',
+  }).expect(200);
+  const later = await fileReport(reporter.token, {
+    ...body,
+    targetNamespace: recipient.user.namespace,
+  }).expect(201);
+  await request(app)
+    .post(apiPath(`/@${recipient.user.namespace}/hello/transfers`))
+    .set(bearer(recipient.token))
+    .send({ to: admin.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${recipient.user.namespace}/hello/transfers/${admin.user.namespace}/accept`))
+    .set(bearer(admin.token))
+    .expect(200);
+
+  const openReports = await db.Reports.findMany({
+    where: { TargetExtensionRefId: identity.Id, Status: 'open' },
+  });
+  assert.equal(openReports.length, 2);
+  assert.equal(openReports.filter((row) => row.TargetNamespace === admin.user.namespace).length, 1);
+  const laterReport = await db.Reports.findUnique({ where: { Id: BigInt(later.body.id) } });
+  assert.equal(laterReport.TargetExtensionRefId, identity.Id);
+  assert.equal(laterReport.TargetNamespace, recipient.user.namespace);
+  const earlierReport = await db.Reports.findUnique({ where: { Id: before.Id } });
+  assert.equal(earlierReport.TargetNamespace, admin.user.namespace);
 });
