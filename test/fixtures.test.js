@@ -28,7 +28,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 async function approveFixture(adminToken, ns, id, version) {

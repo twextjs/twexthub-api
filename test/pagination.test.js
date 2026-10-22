@@ -31,7 +31,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 // An owner may hold one queued version at a time, so a queue of N is N owners.

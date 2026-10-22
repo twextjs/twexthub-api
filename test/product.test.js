@@ -11,7 +11,7 @@ before(async () => {
   ({ app } = await boot());
 });
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('product.yml loads with required fields', () => {

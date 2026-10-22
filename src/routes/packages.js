@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import express, { Router } from 'express';
 import semver from 'semver';
 import YAML from 'yaml';
+import { Prisma } from '../../prisma/generated/client/index.js';
 import {
   assertAdmin,
   isAdmin,
@@ -14,7 +15,9 @@ import {
   requireAuth,
   requireScope,
 } from '../auth.js';
-import { conflict, forbidden, HttpError, fieldErrors, notFound } from '../errors.js';
+import { uniqueViolation } from '../db.js';
+import { withLocks } from '../locks.js';
+import { conflict, forbidden, HttpError, fieldErrors, notFound, unauthorized } from '../errors.js';
 import {
   buildSearchText,
   compareSemver,
@@ -51,29 +54,50 @@ import {
   BLOB_GC_LOCK_KEY,
   blobPathFor,
   removeBlobIfUnused,
+  removeBlobIfUnusedInTx,
   sha256Hex,
   sha512Base64,
   storeBlob,
   storeBlobBuffer,
 } from '../blobs.js';
-import { sourcePathFor, removeSourceIfUnused, storeSource } from '../sources.js';
+import { sourcePathFor, removeSourceIfUnusedInTx, storeSource } from '../sources.js';
 import { manifestFromProject } from '../project-manifest.js';
 import { extractTarballBuffer } from '../tarball.js';
 import { compileProject } from '../compiler.js';
+import { scanSourceWarnings } from '../risky-patterns.js';
 import { minifyCode, MINIFY_INPUT_MAX_BYTES } from '../minify.js';
-import { totalDownloads, hashDownloadAddress } from '../metrics.js';
+import {
+  totalDownloads,
+  versionDownloads,
+  versionDownloadTotals,
+  hashDownloadAddress,
+} from '../metrics.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
+import { makeWebhookDeliveryRoutes } from './webhook-deliveries.js';
 import { audit, auditSoon } from '../audit.js';
 import { decodeCursor, offsetPage, parseLimit } from '../pagination.js';
 
-export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
+// Every state a version row can hold (the CHECK in 0001_init.sql plus 0007's
+// deprecated). A stranger only ever reads the public pair; the rest are what
+// the list endpoint's status filter opens to the address's owners and admins.
+const VERSION_STATUSES = new Set([
+  'staging',
+  'pending',
+  'published',
+  'rejected',
+  'yanked',
+  'deprecated',
+]);
+
+export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolveTarget }) {
   const router = Router();
   const root = normalizeApiRoot(config.apiRoot);
   // normalizeApiRoot strips the surrounding slashes, so the prefix is rebuilt
   // here: a Location header needs exactly one leading slash or the client
   // resolves it against the wrong origin.
   const mount = (path) => `${root ? `/${root}` : ''}${path}`;
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ db, resolveTarget });
+  const webhookDeliveries = makeWebhookDeliveryRoutes({ webhooks, config });
 
   const yankChain = [requireAuth, termsGate, requireScope('yank')];
   const ownerChain = [requireAuth, termsGate];
@@ -88,43 +112,51 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   async function isExtensionOwner(user, namespace, id) {
     if (user.role === 'admin') return true;
     if (user.namespace === namespace) return true;
-    if (await isExtensionOwnerRow(sql, user, namespace, id)) return true;
-    return isOrganizationOwner(sql, user, namespace);
+    if (await isExtensionOwnerRow(db, user, namespace, id)) return true;
+    return isOrganizationOwner(db, user, namespace);
+  }
+
+  // Reading an unpublished version is the same authority the single-version
+  // endpoint asks for before it hands back a pending or rejected build: the
+  // owner half is every holder of the address, and the admin half is the role
+  // plus the `admin` scope, because a role on its own is not permission to
+  // walk the moderation queue.
+  async function maySeeUnpublished(req, namespace, id) {
+    if (isAdmin(req.auth)) return true;
+    const user = req.auth?.user;
+    if (!user) return false;
+    if (user.namespace === namespace) return true;
+    if (await isExtensionOwnerRow(db, user, namespace, id)) return true;
+    return isOrganizationOwner(db, user, namespace);
   }
 
   async function loadNamespaceAccount(namespace) {
-    const [owner] = await sql`SELECT * FROM users WHERE namespace = ${namespace}`;
-    return owner;
+    return db.users.findUnique({ where: { namespace } });
   }
 
   async function loadVersion(namespace, id, version) {
-    const [row] = await sql`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
-    `;
-    return row;
+    return db.versions.findFirst({
+      where: { namespace, extension_id: id, version },
+    });
   }
 
   // Whether the address has ever held a version. The owner rows outlive a
   // deleted extension on purpose, so an empty owner list is not on its own
   // evidence that there is nothing at the address.
   async function extensionExists(namespace, id) {
-    const [row] = await sql`
-      SELECT 1 FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND status <> 'rejected'
-      LIMIT 1
-    `;
+    const row = await db.versions.findFirst({
+      where: { namespace, extension_id: id, status: { not: 'rejected' } },
+      select: { id: true },
+    });
     return Boolean(row);
   }
 
   // `latest` picks the highest published version, falling back to the deprecated
   // ones when nothing is still published.
   async function loadLatestPublished(namespace, id) {
-    const rows = await sql`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id}
-        AND status IN ('published', 'deprecated')
-    `;
+    const rows = await db.versions.findMany({
+      where: { namespace, extension_id: id, status: { in: ['published', 'deprecated'] } },
+    });
     if (rows.length === 0) return null;
     const published = rows.filter((row) => row.status === 'published');
     const pool = published.length > 0 ? published : rows;
@@ -140,10 +172,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         : await loadVersion(namespace, id, version);
     if (row) return row;
     if (!/^[a-zA-Z0-9-]{1,30}$/.test(version)) throw notFound();
-    const [tagRow] = await sql`
-      SELECT version FROM dist_tags
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND tag = ${version}
-    `;
+    const tagRow = await db.dist_tags.findFirst({
+      where: { namespace, extension_id: id, tag: version },
+      select: { version: true },
+    });
     if (!tagRow) throw notFound();
     return await loadVersion(namespace, id, tagRow.version);
   }
@@ -152,7 +184,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   // replaced it, so a pinned `@old/id` keeps resolving.
   async function redirectIfMoved(req, res, suffix = '') {
     const { namespace, id } = req.params;
-    const moved = await redirectFor(sql, namespace, id);
+    const moved = await redirectFor(db, namespace, id);
     if (!moved) return false;
     const query = req.originalUrl.includes('?')
       ? `?${req.originalUrl.slice(req.originalUrl.indexOf('?') + 1)}`
@@ -168,9 +200,22 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, '/versions')) return;
-    const { range } = req.query;
+    const { range, status } = req.query;
     if (range !== undefined && (typeof range !== 'string' || !semver.validRange(range.trim()))) {
       throw fieldErrors([{ field: 'range', message: 'Must be a valid SemVer range.' }]);
+    }
+    // The pair a stranger sees. Naming any other status is how an owner or an
+    // admin reads their own moderation state -- most often the build that is
+    // still waiting on review -- so it takes the same authority the
+    // single-version endpoint asks for to hand back an unpublished row.
+    if (status !== undefined) {
+      if (typeof status !== 'string' || !VERSION_STATUSES.has(status)) {
+        throw fieldErrors([{ field: 'status', message: 'Must be a valid version status.' }]);
+      }
+      if (!req.auth) throw unauthorized();
+      if (!(await maySeeUnpublished(req, namespace, id))) {
+        throw forbidden('Only an owner or an admin can filter by status.');
+      }
     }
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { o: 'int' });
@@ -180,10 +225,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // `dir` on the request is meaningless here and ignored.
     const offset = cursor ? cursor.o - 1 : 0;
 
-    const rows = await sql`
+    const visibility =
+      status === undefined
+        ? Prisma.sql`status IN ('published', 'deprecated')`
+        : Prisma.sql`status = ${status}`;
+    const rows = await db.$queryRaw`
       SELECT * FROM versions
       WHERE namespace = ${namespace} AND extension_id = ${id}
-        AND status IN ('published', 'deprecated')
+        AND ${visibility}
     `;
     const matches = rows
       .map((row) => ({ row, coerced: semver.valid(row.version) }))
@@ -198,12 +247,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // here over the versions already filtered.
     matches.sort((a, b) => semver.rcompare(a.coerced, b.coerced));
 
+    const totals = await versionDownloadTotals(db, namespace, id);
     res.json(
       offsetPage(req, matches.slice(offset, offset + limit), {
         limit,
         offset,
         total: matches.length,
-        serialize: (entry) => versionToObject(entry.row, config),
+        serialize: (entry) =>
+          versionToObject(entry.row, config, totals.get(entry.row.version) ?? 0n),
       }),
     );
   });
@@ -254,7 +305,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         throw forbidden('You can only publish to an extension you own.');
       }
 
-      if (await redirectFor(sql, namespace, id)) {
+      if (await redirectFor(db, namespace, id)) {
         throw conflict('This extension address has been transferred away.');
       }
 
@@ -270,11 +321,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       let manifest;
       let buildLog;
       let compiled;
+      let warnings;
       try {
         const projectDir = path.join(jobDir, 'project');
         await mkdir(projectDir, { recursive: true });
+        let files;
         try {
-          await extractTarballBuffer(tarball, projectDir, {
+          files = await extractTarballBuffer(tarball, projectDir, {
             maxTotalBytes: maxSource * 16,
           });
         } catch (error) {
@@ -283,6 +336,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
             detail: error.message,
           });
         }
+        warnings = await scanSourceWarnings(projectDir, files);
 
         let projectText;
         try {
@@ -357,12 +411,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         await rm(jobDir, { recursive: true, force: true });
       }
 
-      const row = await publishVersion(sql, config, owner, {
+      const row = await publishVersion(db, config, owner, {
         id,
         manifest,
         code: compiled,
         sourceBuffer: tarball,
         buildLog,
+        warnings,
         stagedBy: req.auth.user,
       });
       if (row.status === 'published') {
@@ -420,15 +475,37 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     res.status(204).end();
   });
 
+  router.get('/@:namespace/:id/webhooks/:webhookId/deliveries', publishChain, async (req, res) => {
+    const { namespace, id } = req.params;
+    if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+    if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+      throw forbidden('Only an owner or an admin can view webhook deliveries.');
+    }
+    await webhookDeliveries.list(req, res, { namespace, extensionId: id });
+  });
+
+  router.post(
+    '/@:namespace/:id/webhooks/:webhookId/deliveries/:deliveryId/redeliver',
+    publishChain,
+    async (req, res) => {
+      const { namespace, id } = req.params;
+      if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
+      if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+        throw forbidden('Only an owner or an admin can redeliver a webhook.');
+      }
+      await webhookDeliveries.redeliver(req, res, { namespace, extensionId: id });
+    },
+  );
+
   router.get('/@:namespace/:id/tags', async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res, '/tags')) return;
-    const rows = await sql`
-      SELECT tag, version FROM dist_tags
-      WHERE namespace = ${namespace} AND extension_id = ${id}
-      ORDER BY tag
-    `;
+    const rows = await db.dist_tags.findMany({
+      where: { namespace, extension_id: id },
+      select: { tag: true, version: true },
+      orderBy: { tag: 'asc' },
+    });
     const tags = Object.fromEntries(rows.map((row) => [row.tag, row.version]));
     if (Object.keys(tags).length === 0) throw notFound();
     res.json(tags);
@@ -454,19 +531,24 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (!normalized) {
       throw fieldErrors([{ field: 'version', message: 'Must be a valid SemVer string.' }]);
     }
-    const [exists] = await sql`
-        SELECT 1 FROM versions
-        WHERE namespace = ${namespace} AND extension_id = ${id}
-          AND version = ${normalized} AND status = 'published'
-      `;
+    const exists = await db.versions.findFirst({
+      where: {
+        namespace,
+        extension_id: id,
+        version: normalized,
+        status: 'published',
+      },
+      select: { id: true },
+    });
     if (!exists) throw notFound('Tagged versions must be published.');
-    await sql`
-        INSERT INTO dist_tags (owner_id, namespace, extension_id, tag, version)
-        VALUES (${req.auth.user.id}, ${namespace}, ${id}, ${tag}, ${normalized})
-        ON CONFLICT (namespace, extension_id, tag)
-        DO UPDATE SET version = EXCLUDED.version, owner_id = EXCLUDED.owner_id
-      `;
-    auditSoon(sql, req.auth.user, 'tag.set', { namespace, id, version: normalized }, { tag });
+    // The unique triple is the conflict target, so the typed upsert knows which
+    // row to update.
+    await db.dist_tags.upsert({
+      where: { namespace_extension_id_tag: { namespace, extension_id: id, tag } },
+      create: { owner_id: req.auth.user.id, namespace, extension_id: id, tag, version: normalized },
+      update: { version: normalized, owner_id: req.auth.user.id },
+    });
+    auditSoon(db, req.auth.user, 'tag.set', { namespace, id, version: normalized }, { tag });
     res.status(204).end();
   });
 
@@ -479,13 +561,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('Only an owner or an admin can remove tags.');
     }
-    const [deleted] = await sql`
-      DELETE FROM dist_tags
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND tag = ${tag}
-      RETURNING 1
-    `;
-    if (!deleted) throw notFound();
-    auditSoon(sql, req.auth.user, 'tag.remove', { namespace, id }, { tag });
+    const { count } = await db.dist_tags.deleteMany({
+      where: { namespace, extension_id: id, tag },
+    });
+    if (count === 0) throw notFound();
+    auditSoon(db, req.auth.user, 'tag.remove', { namespace, id }, { tag });
     res.status(204).end();
   });
 
@@ -494,14 +574,16 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const row = await resolveVersion(req.params);
     const isVisible =
       row.status === 'published' || row.status === 'yanked' || row.status === 'deprecated';
-    if (!isVisible) {
-      const isOwner = req.auth?.user.namespace === req.params.namespace;
-      // An unreviewed version's metadata is as much part of the moderation
-      // queue as the queue listing itself, so an admin reaches it the same way:
-      // admin role and `admin` scope together. The owner still sees their own.
-      if (!isOwner && !isAdmin(req.auth)) throw notFound();
+    if (!isVisible && !(await maySeeUnpublished(req, req.params.namespace, req.params.id))) {
+      throw notFound();
     }
-    res.json(versionToObject(row, config));
+    res.json(
+      versionToObject(
+        row,
+        config,
+        await versionDownloads(db, row.namespace, row.extension_id, row.version),
+      ),
+    );
   });
 
   // A deprecation and a moderation decision are both edits to the version's own
@@ -513,24 +595,23 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     }
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const [row] = await sql`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
-    `;
+    const row = await db.versions.findFirst({
+      where: { namespace, extension_id: id, version },
+    });
     if (!row || (row.status !== 'published' && row.status !== 'deprecated')) throw notFound();
     const canManage = await isExtensionOwner(req.auth.user, namespace, id);
     if (!canManage) {
       throw forbidden('Only an owner or an admin can deprecate this version.');
     }
-    const [updated] = await sql`
-        UPDATE versions
-        SET status = ${message === null ? 'published' : 'deprecated'},
-            deprecation_message = ${message ?? null}
-        WHERE id = ${row.id}
-        RETURNING *
-      `;
+    const updated = await db.versions.update({
+      where: { id: row.id },
+      data: {
+        status: message === null ? 'published' : 'deprecated',
+        deprecation_message: message ?? null,
+      },
+    });
     auditSoon(
-      sql,
+      db,
       req.auth.user,
       message === null ? 'version.undeprecate' : 'version.deprecate',
       { namespace, id, version: updated.version },
@@ -544,7 +625,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         actor: req.auth.user.namespace,
       });
     }
-    res.json(versionToObject(updated, config));
+    res.json(
+      versionToObject(
+        updated,
+        config,
+        await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+      ),
+    );
   }
 
   // A version awaiting approval is stored as the compiler produced it, so a
@@ -577,11 +664,9 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     assertAdmin(req.auth);
     const { namespace, id, version } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const [row] = await sql`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id} AND version = ${version}
-        AND status = 'pending'
-    `;
+    const row = await db.versions.findFirst({
+      where: { namespace, extension_id: id, version, status: 'pending' },
+    });
     if (!row) throw notFound('No pending version matches that address.');
     if (status !== 'approved' && status !== 'rejected') {
       throw fieldErrors([{ field: 'status', message: 'Must be "approved" or "rejected".' }]);
@@ -592,8 +677,10 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (typeof reason !== 'string' || reason.trim().length === 0) {
         throw fieldErrors([{ field: 'reason', message: 'A reason is required when rejecting.' }]);
       }
-      const updated = await sql.begin(async (tx) => {
-        const rows = await tx`
+      const updated = await db.$transaction(async (tx) => {
+        // The status guard is part of the update, so a concurrent review that
+        // already moved the row is not overwritten.
+        const rows = await tx.$queryRaw`
           UPDATE versions SET status = 'rejected', rejection_reason = ${reason}
           WHERE id = ${row.id} AND status = 'pending'
           RETURNING *
@@ -624,7 +711,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         occurredAt: new Date().toISOString(),
         actor: req.auth.user.namespace,
       });
-      return res.json(versionToObject(updated, config));
+      return res.json(
+        versionToObject(
+          updated,
+          config,
+          await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+        ),
+      );
     }
 
     // Minify before the transaction so the CPU-bound pass does not hold the row
@@ -632,16 +725,15 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // the status race writes the same bytes and is harmless.
     const shrunk = await minifyPendingBlob(row);
 
-    const updated = await sql.begin(async (tx) => {
+    const promote = async (tx) => {
       let stored = null;
       if (shrunk) {
         // GC holds the exclusive lock; the promotion shares it until the new
         // digest commits, so a sweep cannot unlink the bytes being promoted.
-        await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
         stored = await storeBlobBuffer(config.dataDir, shrunk.code);
       }
       const rows = stored
-        ? await tx`
+        ? await tx.$queryRaw`
             UPDATE versions
             SET status = 'published', published_at = now(),
                 blob_path = ${path.join('blobs', stored.digest.slice(0, 2), stored.digest.slice(2))},
@@ -650,7 +742,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
             WHERE id = ${row.id} AND status = 'pending'
             RETURNING *
           `
-        : await tx`
+        : await tx.$queryRaw`
             UPDATE versions SET status = 'published', published_at = now()
             WHERE id = ${row.id} AND status = 'pending'
             RETURNING *
@@ -661,12 +753,15 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         // reconcile in db.js), and owner_id holds the delegated publisher rather
         // than the namespace, so the flag has to be set by namespace here or a
         // co-owner's first approval would leave the namespace in review forever.
-        await tx`UPDATE users SET has_published = true WHERE namespace = ${row.namespace}`;
+        await tx.users.update({
+          where: { namespace: row.namespace },
+          data: { has_published: true },
+        });
         // The publish charged the unminified build; a smaller approved blob
         // hands the difference back to the account's quota.
         if (stored && Number(row.blob_size) > stored.size) {
           const refund = Number(row.blob_size) - stored.size;
-          await tx`
+          await tx.$executeRaw`
             UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${refund}, 0)
             WHERE namespace = ${row.namespace}
           `;
@@ -681,7 +776,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         await audit(tx, req.auth.user, 'version.approve', { namespace, id, version: row.version });
       }
       return rows[0];
-    });
+    };
+
+    // The shared blob-gc lock is only needed when a new digest is written; the
+    // no-minify path takes a plain transaction.
+    const updated = shrunk
+      ? await withLocks(db, [{ key: BLOB_GC_LOCK_KEY, shared: true }], promote)
+      : await db.$transaction(promote);
     if (!updated) {
       throw conflict('That version is no longer pending review.');
     }
@@ -690,7 +791,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     // original bytes keeps it (see removeBlobIfUnused).
     if (shrunk && row.blob_digest) {
       try {
-        await removeBlobIfUnused(sql, config, row.blob_digest, null);
+        await removeBlobIfUnused(db, config, row.blob_digest, null);
       } catch {
         // The approval is committed. A leftover unminified blob is harmless.
       }
@@ -700,7 +801,13 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       occurredAt: new Date().toISOString(),
       actor: req.auth.user.namespace,
     });
-    res.json(versionToObject(updated, config));
+    res.json(
+      versionToObject(
+        updated,
+        config,
+        await versionDownloads(db, updated.namespace, updated.extension_id, updated.version),
+      ),
+    );
   }
 
   router.patch('/@:namespace/:id/versions/:version', requireAuth, termsGate, async (req, res) => {
@@ -739,8 +846,8 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
       throw forbidden('You can only yank your own extensions.');
     }
-    await sql`UPDATE versions SET status = 'yanked' WHERE id = ${row.id}`;
-    auditSoon(sql, req.auth.user, 'version.yank', { namespace, id, version: row.version });
+    await db.versions.updateMany({ where: { id: row.id }, data: { status: 'yanked' } });
+    auditSoon(db, req.auth.user, 'version.yank', { namespace, id, version: row.version });
     void webhooks.scheduleFor(namespace, id, 'version.yanked', {
       version: row.version,
       occurredAt: new Date().toISOString(),
@@ -770,13 +877,18 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       res.sendFile(abs);
       // Metrics never get in the way of a download, so a failure here costs the
       // event, not the blob.
-      const ipHash = await hashDownloadAddress(sql, config, req.ip).catch(() => null);
-      void sql`
-        INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
-        VALUES (${row.namespace}, ${row.extension_id}, ${row.version},
-                ${String(req.headers['user-agent'] ?? '').slice(0, 250)},
-                ${ipHash})
-      `.catch(() => {});
+      const ipHash = await hashDownloadAddress(db, config, req.ip).catch(() => null);
+      void db.download_events
+        .create({
+          data: {
+            namespace: row.namespace,
+            extension_id: row.extension_id,
+            version: row.version,
+            user_agent: String(req.headers['user-agent'] ?? '').slice(0, 250),
+            ip_hash: ipHash,
+          },
+        })
+        .catch(() => {});
     } else {
       throw notFound('Compiled output is missing.');
     }
@@ -811,7 +923,8 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (!(await extensionExists(namespace, id))) throw notFound();
-    const rows = await sql`
+    // A two-table join whose output is the response body, kept raw.
+    const rows = await db.$queryRaw`
       SELECT u.namespace, u.display_name, u.role, u.kind, u.created_at, o.added_at
       FROM extension_owners o
       JOIN users u ON u.id = o.owner_id
@@ -828,8 +941,8 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.get('/@:namespace/:id/owners/pending', requireAuth, async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    const organizations = await organizationsOwnedBy(sql, req.auth.user);
-    const rows = await sql`
+    const organizations = await organizationsOwnedBy(db, req.auth.user);
+    const rows = await db.$queryRaw`
       SELECT u.namespace, u.display_name, u.kind, i.created_at,
         a.namespace AS invited_by_namespace
       FROM extension_owner_invites i
@@ -838,7 +951,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       WHERE i.namespace = ${namespace} AND i.extension_id = ${id}
         AND (
           i.owner_id = ${req.auth.user.id}
-          OR u.namespace = ANY (${sql.array(organizations)}::text[])
+          OR u.namespace = ANY (${organizations}::text[])
         )
       ORDER BY i.created_at
     `;
@@ -858,7 +971,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (
       req.auth.user.namespace !== targetNamespace &&
       req.auth.user.role !== 'admin' &&
-      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+      !(await isOrganizationOwner(db, req.auth.user, targetNamespace))
     ) {
       throw forbidden('Only an existing owner or an admin can add owners.');
     }
@@ -869,46 +982,46 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     ) {
       throw notFound();
     }
-    const [existing] = await sql`
-        SELECT 1 FROM versions
-        WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
-      `;
+    const existing = await db.versions.findFirst({
+      where: { namespace: targetNamespace, extension_id: id, status: { not: 'rejected' } },
+      select: { id: true },
+    });
     if (!existing) throw notFound();
     if (candidate === targetNamespace) {
       throw fieldErrors([
         { field: 'namespace', message: 'The namespace account already owns this extension.' },
       ]);
     }
-    const [candidateUser] = await sql`
-        SELECT * FROM users WHERE namespace = ${candidate}
-      `;
+    const candidateUser = await db.users.findUnique({ where: { namespace: candidate } });
     if (!candidateUser) throw notFound('No such account to invite.');
-    const [alreadyOwner] = await sql`
-        SELECT 1 FROM extension_owners
-        WHERE namespace = ${targetNamespace} AND extension_id = ${id}
-          AND owner_id = ${candidateUser.id}
-      `;
+    const alreadyOwner = await db.extension_owners.findFirst({
+      where: { namespace: targetNamespace, extension_id: id, owner_id: candidateUser.id },
+      select: { owner_id: true },
+    });
     if (alreadyOwner) {
       // Nothing to invite, and clearing a leftover invitation keeps the two from
       // disagreeing about whether it took.
-      await sql`
-        DELETE FROM extension_owner_invites
-        WHERE namespace = ${targetNamespace} AND extension_id = ${id}
-          AND owner_id = ${candidateUser.id}
-      `;
+      await db.extension_owner_invites.deleteMany({
+        where: { namespace: targetNamespace, extension_id: id, owner_id: candidateUser.id },
+      });
       res.status(204).end();
       return;
     }
     // An invitation is idempotent rather than an error, so a retried request does
     // not need to know whether the first attempt landed.
-    const [invited] = await sql.begin(async (tx) => {
-      const [row] = await tx`
-          INSERT INTO extension_owner_invites (namespace, extension_id, owner_id, invited_by)
-          VALUES (${targetNamespace}, ${id}, ${candidateUser.id}, ${req.auth.user.id})
-          ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
-          RETURNING 1
-        `;
-      if (row) {
+    const invited = await db.$transaction(async (tx) => {
+      const { count } = await tx.extension_owner_invites.createMany({
+        data: [
+          {
+            namespace: targetNamespace,
+            extension_id: id,
+            owner_id: candidateUser.id,
+            invited_by: req.auth.user.id,
+          },
+        ],
+        skipDuplicates: true,
+      });
+      if (count > 0) {
         await notifyOwnerCandidate(
           tx,
           candidateUser,
@@ -924,7 +1037,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           { invited: candidateUser.namespace },
         );
       }
-      return [row].filter(Boolean);
+      return count > 0;
     });
     if (invited) {
       void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
@@ -952,7 +1065,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       ) {
         throw notFound();
       }
-      const [invite] = await sql`
+      const [invite] = await db.$queryRaw`
           SELECT i.owner_id, u.kind
           FROM extension_owner_invites i
           JOIN users u ON u.id = i.owner_id
@@ -964,29 +1077,32 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!mine && invite.kind !== 'organization') {
         throw forbidden('Only the invited account can accept this invitation.');
       }
-      if (!mine && !(await isOrganizationOwner(sql, req.auth.user, candidate))) {
+      if (!mine && !(await isOrganizationOwner(db, req.auth.user, candidate))) {
         throw forbidden('Only an owner of the invited organization can accept this invitation.');
       }
-      await sql.begin(async (tx) => {
-        const [claimed] = await tx`
-          DELETE FROM extension_owner_invites
-          WHERE namespace = ${targetNamespace} AND extension_id = ${id}
-            AND owner_id = ${invite.owner_id}
-          RETURNING 1
-        `;
-        if (!claimed) throw notFound('There is no pending invitation to accept.');
-        await tx`
-          INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
-          VALUES (${invite.owner_id}, ${targetNamespace}, ${id}, ${req.auth.user.id})
-          ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
-        `;
+      await db.$transaction(async (tx) => {
+        const { count: claimed } = await tx.extension_owner_invites.deleteMany({
+          where: { namespace: targetNamespace, extension_id: id, owner_id: invite.owner_id },
+        });
+        if (claimed === 0) throw notFound('There is no pending invitation to accept.');
+        await tx.extension_owners.createMany({
+          data: [
+            {
+              owner_id: invite.owner_id,
+              namespace: targetNamespace,
+              extension_id: id,
+              added_by: req.auth.user.id,
+            },
+          ],
+          skipDuplicates: true,
+        });
         // The account that accepted knows already; the partners on an
         // organization's owner list do not, so they are the ones told.
         if (invite.kind === 'organization') {
-          const partners = await tx`
-            SELECT user_id FROM organization_owners
-            WHERE org_id = ${invite.owner_id} AND user_id <> ${req.auth.user.id}
-          `;
+          const partners = await tx.organization_owners.findMany({
+            where: { org_id: invite.owner_id, user_id: { not: req.auth.user.id } },
+            select: { user_id: true },
+          });
           for (const row of partners) {
             await notifyUser(
               tx,
@@ -1026,14 +1142,14 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (
       req.auth.user.namespace !== targetNamespace &&
       req.auth.user.role !== 'admin' &&
-      !(await isOrganizationOwner(sql, req.auth.user, targetNamespace))
+      !(await isOrganizationOwner(db, req.auth.user, targetNamespace))
     ) {
       throw forbidden('Only an owner or an admin can remove owners.');
     }
-    const [account] = await sql`
-        SELECT 1 FROM versions
-        WHERE namespace = ${targetNamespace} AND extension_id = ${id} AND status <> 'rejected'
-      `;
+    const account = await db.versions.findFirst({
+      where: { namespace: targetNamespace, extension_id: id, status: { not: 'rejected' } },
+      select: { id: true },
+    });
     if (!account) throw notFound();
     if (target === targetNamespace) {
       throw fieldErrors([
@@ -1043,21 +1159,21 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         },
       ]);
     }
-    const [candidateUser] = await sql`
-        SELECT * FROM users WHERE namespace = ${target}
-      `;
+    const candidateUser = await db.users.findUnique({ where: { namespace: target } });
     if (!candidateUser) throw notFound('No such account.');
 
     // Withdrawing an invitation and removing a grant are one request from the
     // namespace account's side, and the invitation is looked for first so that
     // reporting which of the two happened is not a guess.
-    const [withdrawn] = await sql.begin(async (tx) => {
-      const [r] = await tx`
-          DELETE FROM extension_owner_invites
-          WHERE owner_id = ${candidateUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
-          RETURNING 1
-        `;
-      if (r) {
+    const withdrawn = await db.$transaction(async (tx) => {
+      const { count } = await tx.extension_owner_invites.deleteMany({
+        where: {
+          owner_id: candidateUser.id,
+          namespace: targetNamespace,
+          extension_id: id,
+        },
+      });
+      if (count > 0) {
         await notifyOwnerCandidate(
           tx,
           candidateUser,
@@ -1073,7 +1189,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           { withdrawn: candidateUser.namespace },
         );
       }
-      return [r].filter(Boolean);
+      return count > 0;
     });
     if (withdrawn) {
       void webhooks.scheduleFor(targetNamespace, id, 'owners.invited', {
@@ -1085,13 +1201,11 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       return;
     }
 
-    const [deleted] = await sql.begin(async (tx) => {
-      const [r] = await tx`
-          DELETE FROM extension_owners
-          WHERE owner_id = ${candidateUser.id} AND namespace = ${targetNamespace} AND extension_id = ${id}
-          RETURNING 1
-        `;
-      if (r) {
+    const deleted = await db.$transaction(async (tx) => {
+      const { count } = await tx.extension_owners.deleteMany({
+        where: { owner_id: candidateUser.id, namespace: targetNamespace, extension_id: id },
+      });
+      if (count > 0) {
         await notifyOwnerCandidate(
           tx,
           candidateUser,
@@ -1107,7 +1221,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
           { removed: candidateUser.namespace },
         );
       }
-      return [r].filter(Boolean);
+      return count > 0;
     });
     if (!deleted) throw notFound('That account is not an owner.');
     void webhooks.scheduleFor(targetNamespace, id, 'owners.changed', {
@@ -1136,15 +1250,15 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
         { field: 'to', message: 'An extension cannot be transferred to itself.' },
       ]);
     }
-    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+    if (!(await mayOfferTransfer(db, req.auth.user, from))) {
       throw forbidden('Only the namespace account or an admin can transfer an extension away.');
     }
-    const recipient = await loadTransferRecipient(sql, to);
+    const recipient = await loadTransferRecipient(db, to);
     if (!recipient) throw notFound('No such account to transfer to.');
-    if (recipient.kind === 'organization' && !(await hasOrgOwner(sql, recipient.id))) {
+    if (recipient.kind === 'organization' && !(await hasOrgOwner(db, recipient.id))) {
       throw conflict('An organization with no owners cannot receive an extension.');
     }
-    await sql.begin(async (tx) => {
+    await db.$transaction(async (tx) => {
       await openTransfer(tx, {
         config,
         actor: req.auth.user,
@@ -1161,7 +1275,7 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
   router.get('/@:namespace/:id/transfers', requireAuth, async (req, res) => {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
-    res.json({ data: await pendingTransfersFor(sql, req.auth.user, namespace, id) });
+    res.json({ data: await pendingTransfersFor(db, req.auth.user, namespace, id) });
   });
 
   // The recipient accepts, and the move happens. Same transaction as the audit
@@ -1176,12 +1290,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
       if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
         throw notFound();
       }
-      const recipient = await loadTransferRecipient(sql, to);
+      const recipient = await loadTransferRecipient(db, to);
       if (!recipient) throw notFound();
-      if (!(await mayReceiveTransfer(sql, req.auth.user, to))) {
+      if (!(await mayReceiveTransfer(db, req.auth.user, to))) {
         throw forbidden('Only the receiving namespace or an admin can accept this transfer.');
       }
-      const moved = await sql.begin(async (tx) => {
+      const moved = await db.$transaction(async (tx) => {
         return await acceptTransfer(tx, {
           config,
           actor: req.auth.user,
@@ -1210,12 +1324,12 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     if (!isValidNamespace(from) || !isValidNamespace(to) || !isValidExtensionId(id)) {
       throw notFound();
     }
-    if (!(await mayOfferTransfer(sql, req.auth.user, from))) {
+    if (!(await mayOfferTransfer(db, req.auth.user, from))) {
       throw forbidden('Only the namespace account or an admin can withdraw a transfer.');
     }
-    const recipient = await loadTransferRecipient(sql, to);
+    const recipient = await loadTransferRecipient(db, to);
     if (!recipient) throw notFound();
-    await sql.begin(async (tx) => {
+    await db.$transaction(async (tx) => {
       await withdrawTransfer(tx, {
         actor: req.auth.user,
         namespace: from,
@@ -1231,22 +1345,19 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     if (await redirectIfMoved(req, res)) return;
-    const rows = await sql`
-      SELECT * FROM versions
-      WHERE namespace = ${namespace} AND extension_id = ${id}
-        AND status IN ('published', 'deprecated')
-      ORDER BY
-        CASE WHEN status = 'published' THEN 0 ELSE 1 END,
-        created_at DESC
-    `;
+    const rows = await db.versions.findMany({
+      where: { namespace, extension_id: id, status: { in: ['published', 'deprecated'] } },
+      orderBy: [{ created_at: 'desc' }],
+    });
     if (rows.length === 0) throw notFound();
     const versions = [...rows].sort((a, b) => compareSemver(b.version, a.version));
     const top = versions.find((row) => row.status === 'published') ?? versions[0];
+    const totals = await versionDownloadTotals(db, namespace, id);
     const summary = extensionDetailFromRow(
       top,
-      versions.map((row) => versionToObject(row, config)),
+      versions.map((row) => versionToObject(row, config, totals.get(row.version) ?? 0n)),
     );
-    summary.downloads = await totalDownloads(sql, namespace, id);
+    summary.downloads = await totalDownloads(db, namespace, id);
     res.json(summary);
   });
 
@@ -1254,107 +1365,103 @@ export function makePackagesRouter({ sql, config, termsGate, rateLimiter }) {
     const { namespace, id } = req.params;
     if (!isValidNamespace(namespace) || !isValidExtensionId(id)) throw notFound();
     const lockKey = `${namespace}/${id}`;
-    const reserved = await sql.reserve();
-    try {
-      // Hold a session-scoped lock for the same key publishVersion uses so the
-      // per-extension exclusion also covers blob cleanup. If it were released
-      // with the delete transaction, a concurrent publish could reuse a blob
-      // path and have its freshly written bytes removed by this cleanup.
-      await reserved`SELECT pg_advisory_lock(hashtextextended(${lockKey}, 0))`;
-      let rows;
-      await reserved`BEGIN`;
-      try {
-        if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
-          throw forbidden('You can only delete your own extensions.');
-        }
-        rows = await reserved`
-          SELECT blob_digest, blob_path, status, blob_size, source_digest, source_size
-          FROM versions
-          WHERE namespace = ${namespace} AND extension_id = ${id}
-        `;
-        if (rows.length === 0) throw notFound();
-        if (rows.some((row) => row.status === 'staging')) {
-          throw conflict('A publish is in progress for this extension.');
-        }
-        await reserved`DELETE FROM versions WHERE namespace = ${namespace} AND extension_id = ${id}`;
-        // An invitation to manage an extension that no longer exists can never
-        // be accepted, and the extension_owners rows survive on purpose, so
-        // these have to be cleared here rather than left for a cascade.
-        await reserved`
-          DELETE FROM extension_owner_invites
-          WHERE namespace = ${namespace} AND extension_id = ${id}
-        `;
-        await reserved`
-          DELETE FROM extension_transfers
-          WHERE namespace = ${namespace} AND extension_id = ${id}
-        `;
-        // Refund the account's quota for every byte this extension charged.
-        const charged = rows.reduce(
-          (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
-          0,
-        );
-        if (charged > 0) {
-          const [account] = await reserved`SELECT id FROM users WHERE namespace = ${namespace}`;
-          if (account) {
-            await reserved`
-              UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${charged}, 0)
+    // The per-extension lock is the same one publishVersion uses. The delete
+    // commits its row changes first, then the filesystem cleanup reacquires this
+    // lock (and the GC lock) so a concurrent publish cannot reuse a blob path
+    // and have its freshly written bytes removed by a cleanup that is still
+    // running. The keeper check in the cleanup has to see the committed delete,
+    // which is why it runs after the transaction rather than inside it.
+    const { rows, charged } = await withLocks(db, [lockKey, BLOB_GC_LOCK_KEY], async (tx) => {
+      if (!(await isExtensionOwner(req.auth.user, namespace, id))) {
+        throw forbidden('You can only delete your own extensions.');
+      }
+      const found = await tx.versions.findMany({
+        where: { namespace, extension_id: id },
+        select: {
+          blob_digest: true,
+          blob_path: true,
+          status: true,
+          blob_size: true,
+          source_digest: true,
+          source_size: true,
+        },
+      });
+      if (found.length === 0) throw notFound();
+      if (found.some((row) => row.status === 'staging')) {
+        throw conflict('A publish is in progress for this extension.');
+      }
+      await tx.versions.deleteMany({ where: { namespace, extension_id: id } });
+      // An invitation to manage an extension that no longer exists can never
+      // be accepted, and the extension_owners rows survive on purpose, so
+      // these have to be cleared here rather than left for a cascade.
+      await tx.extension_owner_invites.deleteMany({ where: { namespace, extension_id: id } });
+      await tx.extension_transfers.deleteMany({ where: { namespace, extension_id: id } });
+      // Refund the account's quota for every byte this extension charged.
+      const total = found.reduce(
+        (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
+        0,
+      );
+      if (total > 0) {
+        const account = await tx.users.findUnique({
+          where: { namespace },
+          select: { id: true },
+        });
+        if (account) {
+          await tx.$executeRaw`
+              UPDATE users SET blob_bytes = GREATEST(blob_bytes - ${total}, 0)
               WHERE id = ${account.id}
             `;
-          }
         }
-        await reserved`COMMIT`;
-      } catch (error) {
-        try {
-          await reserved`ROLLBACK`;
-        } catch {
-          // surface the original error
-        }
-        throw error;
       }
-      await Promise.all(
-        rows.map(async (version) => {
+      // The filesystem cleanup is deliberately not part of this transaction: it
+      // can be slow, and unlinking before the commit would remove a file a later
+      // rollback still needs. Hand the digests back and clean up once this has
+      // committed, under the same locks.
+      return { rows: found, charged: total };
+    });
+    // Reacquired after the commit, so the keeper check sees this delete: a digest
+    // another version still references is kept, and holding the address lock
+    // keeps a concurrent publish from reusing a path this cleanup removes.
+    try {
+      await withLocks(db, [lockKey, BLOB_GC_LOCK_KEY], async (tx) => {
+        for (const version of rows) {
           if (version.blob_digest) {
-            await removeBlobIfUnused(sql, config, version.blob_digest, null);
+            await removeBlobIfUnusedInTx(tx, config, version.blob_digest, null);
           } else if (version.blob_path) {
             await rm(path.join(config.dataDir, version.blob_path), { force: true });
           }
-        }),
-      );
-      const dedupedSources = new Set(rows.map((row) => row.source_digest).filter(Boolean));
-      await Promise.all(
-        [...dedupedSources].map((digest) => removeSourceIfUnused(sql, config, digest)),
-      );
-      auditSoon(
-        sql,
-        req.auth.user,
-        'extension.delete',
-        { namespace, id },
-        {
-          versions: rows.length,
-          bytesRefunded: rows.reduce(
-            (sum, row) => sum + Number(row.blob_size ?? 0) + Number(row.source_size ?? 0),
-            0,
-          ),
-        },
-      );
-      res.status(204).end();
-    } finally {
-      try {
-        await reserved`SELECT pg_advisory_unlock(hashtextextended(${lockKey}, 0))`;
-      } finally {
-        reserved.release();
-      }
+        }
+        const dedupedSources = new Set(rows.map((row) => row.source_digest).filter(Boolean));
+        for (const digest of dedupedSources) {
+          await removeSourceIfUnusedInTx(tx, config, digest);
+        }
+      });
+    } catch (error) {
+      // A cleanup failure costs disk, not correctness: the boot-time sweep in
+      // db.js collects whatever is left unreferenced.
+      console.error(`blob cleanup deferred for ${namespace}/${id}: ${error.message}`);
     }
+    auditSoon(
+      db,
+      req.auth.user,
+      'extension.delete',
+      { namespace, id },
+      {
+        versions: rows.length,
+        bytesRefunded: charged,
+      },
+    );
+    res.status(204).end();
   });
 
   return router;
 }
 
 async function publishVersion(
-  sql,
+  db,
   config,
   owner,
-  { id, manifest, code, sourceBuffer, buildLog, stagedBy },
+  { id, manifest, code, sourceBuffer, buildLog, warnings = [], stagedBy },
 ) {
   const version = normalizeSemver(manifest.version);
   const name = typeof manifest.name === 'string' && manifest.name.length > 0 ? manifest.name : id;
@@ -1384,26 +1491,25 @@ async function publishVersion(
     // The source tarball is only stored once the uniqueness checks commit, so
     // a lower/duplicate publish never leaves an orphaned source file.
     let staged;
-    await sql.begin(async (tx) => {
+    await withLocks(db, [lockKey], async (tx) => {
       // Serialize per namespace/extension so concurrent publishes cannot both
       // validate against the same ceiling snapshot.
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`;
       if (await redirectFor(tx, owner.namespace, id)) {
         throw conflict('This extension address has been transferred away.');
       }
 
-      const [pending] = await tx`
-        SELECT 1 FROM versions
-        WHERE owner_id = ${credentialOwner.id} AND status IN ('staging', 'pending')
-      `;
+      const pending = await tx.versions.findFirst({
+        where: { owner_id: credentialOwner.id, status: { in: ['staging', 'pending'] } },
+        select: { id: true },
+      });
       if (pending) {
         throw forbidden('The owner already has a version awaiting review.');
       }
 
-      const existing = await tx`
-        SELECT version FROM versions
-        WHERE namespace = ${owner.namespace} AND extension_id = ${id}
-      `;
+      const existing = await tx.versions.findMany({
+        where: { namespace: owner.namespace, extension_id: id },
+        select: { version: true },
+      });
       const ceiling = maxVersionBySemver(existing.map((row) => row.version));
       if (ceiling && !semver.gt(version, ceiling)) {
         throw new HttpError(422, {
@@ -1411,34 +1517,44 @@ async function publishVersion(
         });
       }
 
-      const [recorded] = await tx`
-        INSERT INTO versions (
-          owner_id, namespace, extension_id, version, status,
-          name, license, description, author, color1, color2, color3,
-          is_unsandboxed, blob_path, blob_digest, blob_size, blob_sha512, search_text,
-          source_size, build_log
-        ) VALUES (
-          ${credentialOwner.id}, ${owner.namespace}, ${id}, ${version}, 'staging',
-          ${name}, ${manifest.license}, ${manifest.description}, ${manifest.author ?? null},
-          ${manifest.color1 ?? null}, ${manifest.color2 ?? null}, ${manifest.color3 ?? null},
-          ${manifest.isUnsandboxed ?? null},
-          ${blobRelative}, ${digest}, ${codeBuffer.length}, ${sha512}, ${searchText},
-          ${sourceBuffer.length}, ${buildLog}
-        )
-        RETURNING *
-      `;
-      await tx`
-        INSERT INTO extension_owners (owner_id, namespace, extension_id, added_by)
-        VALUES (${owner.id}, ${owner.namespace}, ${id}, ${owner.id})
-        ON CONFLICT (namespace, extension_id, owner_id) DO NOTHING
-      `;
+      const recorded = await tx.versions.create({
+        data: {
+          owner_id: credentialOwner.id,
+          namespace: owner.namespace,
+          extension_id: id,
+          version,
+          status: 'staging',
+          name,
+          license: manifest.license,
+          description: manifest.description,
+          author: manifest.author ?? null,
+          color1: manifest.color1 ?? null,
+          color2: manifest.color2 ?? null,
+          color3: manifest.color3 ?? null,
+          is_unsandboxed: manifest.isUnsandboxed ?? null,
+          blob_path: blobRelative,
+          blob_digest: digest,
+          blob_size: codeBuffer.length,
+          blob_sha512: sha512,
+          search_text: searchText,
+          source_size: sourceBuffer.length,
+          build_log: buildLog,
+          warnings,
+        },
+      });
+      await tx.extension_owners.createMany({
+        data: [
+          { owner_id: owner.id, namespace: owner.namespace, extension_id: id, added_by: owner.id },
+        ],
+        skipDuplicates: true,
+      });
       // Charge the blob and source bytes to the namespace account. Identical
       // content is re-charged per version row; deleting a version refunds it.
       // The route's quota check read the balance before the build, and the
       // advisory lock above only covers this extension, so the balance is
       // re-read under a row lock: publishes to sibling extensions queue here
       // instead of both charging against the same ceiling.
-      const [account] = await tx`
+      const [account] = await tx.$queryRaw`
         SELECT blob_bytes, max_blob_bytes FROM users WHERE id = ${owner.id} FOR UPDATE
       `;
       if (account) {
@@ -1451,10 +1567,10 @@ async function publishVersion(
           });
         }
       }
-      await tx`
-        UPDATE users SET blob_bytes = blob_bytes + ${charge}
-        WHERE id = ${owner.id}
-      `;
+      await tx.users.update({
+        where: { id: owner.id },
+        data: { blob_bytes: { increment: charge } },
+      });
       staged = recorded;
     });
 
@@ -1463,29 +1579,26 @@ async function publishVersion(
     // only the committed version may write its blob and source. A crash before
     // they are placed leaves a staging row that reconcileOnBoot promotes once
     // both exist or removes when either is missing.
-    await sql.begin(async (tx) => {
+    await withLocks(db, [{ key: BLOB_GC_LOCK_KEY, shared: true }], async (tx) => {
       // GC holds the exclusive lock; publishers share it until the source
       // digest commits, so cleanup cannot unlink a source another publish is
       // about to reference.
-      await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
       const stored = await storeSource(config.dataDir, sourceBuffer);
-      await tx`
-        UPDATE versions
-        SET source_path = ${stored.path}, source_digest = ${stored.digest}
-        WHERE id = ${staged.id}
-      `;
+      await tx.versions.update({
+        where: { id: staged.id },
+        data: { source_path: stored.path, source_digest: stored.digest },
+      });
     });
-    const row = await sql.begin(async (tx) => {
+    const row = await withLocks(db, [{ key: BLOB_GC_LOCK_KEY, shared: true }], async (tx) => {
       // GC holds the exclusive lock; publishers share it through promotion.
-      await tx`SELECT pg_advisory_xact_lock_shared(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
       await storeBlob(config.dataDir, tmpPath, codeBuffer);
-      const promoted = await tx`
-        UPDATE versions
-        SET status = ${finalStatus},
-            published_at = ${finalStatus === 'published' ? new Date() : null}
-        WHERE id = ${staged.id}
-        RETURNING *
-      `;
+      const promoted = await tx.versions.update({
+        where: { id: staged.id },
+        data: {
+          status: finalStatus,
+          published_at: finalStatus === 'published' ? new Date() : null,
+        },
+      });
       // The audit commits with the promotion so a pending publish is never
       // recorded until it sticks, and the write can never race a reset.
       await audit(
@@ -1499,15 +1612,16 @@ async function publishVersion(
           sourceBytes: sourceBuffer.length,
         },
       );
-      return promoted[0];
+      return promoted;
     });
     if (!row) {
       throw new HttpError(409, { detail: 'Version row disappeared before promotion.' });
     }
     return row;
   } catch (error) {
-    if (error.code === '23505') {
-      if (error.constraint === 'versions_one_pending_idx') {
+    const violation = uniqueViolation(error);
+    if (violation) {
+      if (violation.constraint === 'versions_one_pending_idx') {
         throw forbidden('The owner already has a version awaiting review.');
       }
       throw new HttpError(409, { detail: `Version ${version} already exists for this extension.` });

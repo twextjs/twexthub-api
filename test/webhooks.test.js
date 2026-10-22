@@ -7,6 +7,7 @@ import {
   apiPath,
   bearer,
   boot,
+  followPages,
   publishProject,
   resetDb,
   signupAndAccept,
@@ -21,13 +22,13 @@ import {
 } from '../src/webhooks.js';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 // scheduleFor runs fire-and-forget; give it a tick to land its inserts.
@@ -55,7 +56,7 @@ async function makeOwner() {
 // The worker claims a row before attempting it, and only the claim holder may
 // write the outcome, so a driven attempt has to go through the same claim.
 async function claimOne(id) {
-  const [claimed] = (await claimDue(sql, Date.now())).filter((row) => row.id === id);
+  const [claimed] = (await claimDue(db, Date.now())).filter((row) => row.id === id);
   assert.ok(claimed, `delivery ${id} was not claimable`);
   return claimed;
 }
@@ -79,12 +80,33 @@ const dueNow = () => new Date(Date.now() - 1000).toISOString();
 // create() blocks loopback and unreachable URLs, so tests that exercise
 // delivery insert the webhook row directly.
 async function insertWebhook(ns, url, events) {
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     INSERT INTO webhooks (namespace, extension_id, url, secret, events)
     VALUES (${ns}, 'hooked', ${url}, 'test-secret-0123456789abcdef', ${events})
     RETURNING id
   `;
   return row.id;
+}
+
+// A delivery in a chosen state, for the log and redelivery endpoints. The body
+// and signature are real enough to tell a copy from a rewrite.
+async function insertDelivery(webhookId, { status = 'pending', attempt = 0 } = {}) {
+  const payload = {
+    event: 'version.published',
+    namespace: 'hooked',
+    id: 'hooked',
+    version: '1.0.0',
+  };
+  const body = JSON.stringify(payload);
+  const [row] = await db.$queryRaw`
+    INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, status, attempt)
+    VALUES (${webhookId}, 'version.published', ${payload}, ${body}, 'test-signature',
+            ${status}, ${attempt})
+    RETURNING *
+  `;
+  // The API hands ids back as strings, and the assertions compare this row's id
+  // to that one, so the id is stringified the same way here.
+  return { ...row, id: String(row.id) };
 }
 
 // The sandbox resolver cannot resolve fake hosts, so create() calls in tests
@@ -234,7 +256,8 @@ test('registry events schedule deliveries for subscribed hooks', async () => {
     .expect(204);
 
   await settle();
-  const events = await sql`SELECT event, payload, body FROM webhook_deliveries ORDER BY id`;
+  const events =
+    await db.$queryRaw`SELECT event, payload, body FROM webhook_deliveries ORDER BY id`;
   const seen = events.map((row) => row.event);
   for (const event of [
     'version.published',
@@ -292,7 +315,7 @@ test('version.rejected fires from the review endpoint', async () => {
     .expect(200);
   await settle();
 
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     SELECT event, payload FROM webhook_deliveries WHERE event = 'version.rejected'
   `;
   assert.ok(delivery, 'a rejection should schedule a delivery');
@@ -328,7 +351,7 @@ test('delivery posts the signed payload and records status', async () => {
       .expect(201);
     const { secret, id: webhookId } = created.body;
     const url = `https://${RECEIVER_HOST}:${port}/hook`;
-    await sql`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
+    await db.$executeRaw`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
 
     const payload = {
       event: 'version.published',
@@ -340,14 +363,14 @@ test('delivery posts the signed payload and records status', async () => {
     };
     const body = JSON.stringify(payload);
     const signature = signWebhookPayload(secret, body);
-    const [delivery] = await sql`
+    const [delivery] = await db.$queryRaw`
       INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-      VALUES (${webhookId}, 'version.published', ${sql.json(payload)}, ${body}, ${signature})
+      VALUES (${webhookId}, 'version.published', ${payload}, ${body}, ${signature})
       RETURNING *
     `;
 
     const result = await attemptDelivery(
-      sql,
+      db,
       { ...(await claimOne(delivery.id)), url },
       toLoopbackReceiver,
     );
@@ -361,9 +384,10 @@ test('delivery posts the signed payload and records status', async () => {
     assert.deepEqual(JSON.parse(received[0].body), payload);
 
     const [after] =
-      await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+      await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
     assert.equal(after.status, 'delivered');
-    const [hook] = await sql`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
+    const [hook] =
+      await db.$queryRaw`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
     assert.equal(hook.last_delivery_status, 'ok');
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -388,23 +412,24 @@ test('a delivery connects to the address it validated, not the hostname', async 
     // A name that resolves nowhere, paired with an address that resolves
     // nowhere else. Only a socket pinned to the checked address can complete.
     const url = `https://${RECEIVER_HOST}:${port}/hook`;
-    await sql`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
+    await db.$executeRaw`UPDATE webhooks SET url = ${url} WHERE id = ${webhookId}`;
 
     const body = JSON.stringify({ event: 'version.published', id: 'hooked' });
-    const [delivery] = await sql`
+    const [delivery] = await db.$queryRaw`
       INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-      VALUES (${webhookId}, 'version.published', ${sql.json(JSON.parse(body))}, ${body},
+      VALUES (${webhookId}, 'version.published', ${JSON.parse(body)}, ${body},
               ${signWebhookPayload(secret, body)})
       RETURNING *
     `;
 
     const result = await attemptDelivery(
-      sql,
+      db,
       { ...(await claimOne(delivery.id)), url },
       toLoopbackReceiver,
     );
     assert.equal(result.ok, true);
-    const [after] = await sql`SELECT status FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    const [after] =
+      await db.$queryRaw`SELECT status FROM webhook_deliveries WHERE id = ${delivery.id}`;
     assert.equal(after.status, 'delivered');
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -424,42 +449,43 @@ test('failed deliveries retry with backoff then mark failed', async () => {
 
   const payload = { event: 'version.published', namespace: ns, id: 'hooked', version: '1.0.0' };
   const body = JSON.stringify(payload);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json(payload)}, ${body},
+    VALUES (${webhookId}, 'version.published', ${payload}, ${body},
             ${signWebhookPayload(secret, body)})
     RETURNING *
   `;
 
   // This delivery carries no destination of its own, so the attempt fails on
   // the check rather than reaching a receiver, and the retry bookkeeping runs.
-  const first = await attemptDelivery(sql, await claimOne(delivery.id));
+  const first = await attemptDelivery(db, await claimOne(delivery.id));
   assert.equal(first.ok, false);
   const [afterFirst] =
-    await sql`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterFirst.status, 'retrying');
   assert.equal(afterFirst.attempt, 1);
   assert.ok(afterFirst.next_attempt_at, 'retrying rows must carry a next_attempt_at');
 
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, await claimOne(delivery.id));
+  await db.$executeRaw`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
+  await attemptDelivery(db, await claimOne(delivery.id));
   const [afterSecond] =
-    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterSecond.status, 'retrying');
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, await claimOne(delivery.id));
+  await db.$executeRaw`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
+  await attemptDelivery(db, await claimOne(delivery.id));
   const [afterThird] =
-    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterThird.status, 'retrying');
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
-  await attemptDelivery(sql, await claimOne(delivery.id));
+  await db.$executeRaw`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()} WHERE id = ${delivery.id}`;
+  await attemptDelivery(db, await claimOne(delivery.id));
   const [afterFourth] =
-    await sql`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt, next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(afterFourth.status, 'failed');
   assert.equal(afterFourth.attempt, 4);
   assert.equal(afterFourth.next_attempt_at, null);
 
-  const [hook] = await sql`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
+  const [hook] =
+    await db.$queryRaw`SELECT last_delivery_status FROM webhooks WHERE id = ${webhookId}`;
   assert.equal(hook.last_delivery_status, 'error');
 });
 
@@ -470,16 +496,16 @@ test('the retry delay is measured from the end of the attempt, not the claim', a
   // the moment it landed and the backoff bought nothing.
   const { ns } = await makeOwner();
   const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    VALUES (${webhookId}, 'version.published', ${{ hello: 'world' }}, '{}', 'sig')
     RETURNING id
   `;
 
   // A long-failing attempt, the way a destination that stops answering looks.
   const claimed = await claimOne(delivery.id);
   const startedAt = Date.now();
-  const result = await attemptDelivery(sql, claimed, async () => {
+  const result = await attemptDelivery(db, claimed, async () => {
     await new Promise((resolve) => setTimeout(resolve, 400));
     throw new Error('receiver is gone');
   });
@@ -495,7 +521,7 @@ test('the retry delay is measured from the end of the attempt, not the claim', a
   // the attempt took, so a deadline measured from the claim (which would land
   // 5s after it) cannot pass.
   const [after] =
-    await sql`SELECT next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT next_attempt_at FROM webhook_deliveries WHERE id = ${delivery.id}`;
   const deadline = new Date(after.next_attempt_at).getTime();
   assert.ok(deadline >= completedAt + 5000 - 100, 'the wait starts when the attempt ended');
   assert.ok(
@@ -512,11 +538,11 @@ test('deleting a webhook removes its pending deliveries', async () => {
     .send({ url: PUBLIC_URL, events: ['version.published'] })
     .expect(201);
 
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ db });
   await webhooks.scheduleFor(ns, 'hooked', 'version.published', { version: '1.0.0' });
   await settle();
   const count =
-    await sql`SELECT COUNT(*)::int AS n FROM webhook_deliveries WHERE webhook_id = ${created.body.id}`;
+    await db.$queryRaw`SELECT COUNT(*)::int AS n FROM webhook_deliveries WHERE webhook_id = ${created.body.id}`;
   assert.equal(count[0].n, 1);
 
   await request(app)
@@ -529,7 +555,7 @@ test('deleting a webhook removes its pending deliveries', async () => {
     .expect(404);
 
   const after =
-    await sql`SELECT COUNT(*)::int AS n FROM webhook_deliveries WHERE webhook_id = ${created.body.id}`;
+    await db.$queryRaw`SELECT COUNT(*)::int AS n FROM webhook_deliveries WHERE webhook_id = ${created.body.id}`;
   assert.equal(after[0].n, 0);
 });
 
@@ -546,23 +572,23 @@ test('ssrf guard rejects loopback hosts and non-https schemes', async () => {
 test('a delivery re-checks the destination and refuses a private address', async () => {
   const { ns } = await makeOwner();
   const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}',
+    VALUES (${webhookId}, 'version.published', ${{ hello: 'world' }}, '{}',
             'test-signature')
     RETURNING *
   `;
 
   // The row was written while the name resolved to a public address, so only a
   // check at delivery time can catch the host flipping to a private one.
-  const result = await attemptDelivery(sql, {
+  const result = await attemptDelivery(db, {
     ...(await claimOne(delivery.id)),
     url: 'https://169.254.169.254/latest',
   });
   assert.equal(result.ok, false);
   assert.match(result.error, /public|address/i);
   const [after] =
-    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(after.status, 'retrying');
   assert.equal(after.attempt, 1);
 });
@@ -573,13 +599,13 @@ test('a claimed delivery is not handed to a second worker', async () => {
   // rows an in-flight attempt already owns.
   const { ns } = await makeOwner();
   const webhookId = await insertWebhook(ns, 'https://198.51.100.9/hook', ['version.published']);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    VALUES (${webhookId}, 'version.published', ${{ hello: 'world' }}, '{}', 'sig')
     RETURNING id
   `;
 
-  const first = await claimDue(sql, Date.now());
+  const first = await claimDue(db, Date.now());
   assert.deepEqual(
     first.map((row) => row.id),
     [delivery.id],
@@ -589,7 +615,7 @@ test('a claimed delivery is not handed to a second worker', async () => {
 
   // A second poll at the same instant -- a peer process, or this worker's own
   // next tick while the attempt is still open -- must come back empty.
-  assert.equal((await claimDue(sql, Date.now())).length, 0);
+  assert.equal((await claimDue(db, Date.now())).length, 0);
 });
 
 test('a delivery stranded as delivering is reclaimed once its lease expires', async () => {
@@ -597,27 +623,27 @@ test('a delivery stranded as delivering is reclaimed once its lease expires', as
   // in 'delivering' forever. The lease in next_attempt_at is what releases it.
   const { ns } = await makeOwner();
   const webhookId = await insertWebhook(ns, 'https://198.51.100.9/hook', ['version.published']);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    VALUES (${webhookId}, 'version.published', ${{ hello: 'world' }}, '{}', 'sig')
     RETURNING id
   `;
 
-  const claimed = (await claimDue(sql, Date.now()))[0];
+  const claimed = (await claimDue(db, Date.now()))[0];
   assert.equal(claimed.id, delivery.id);
 
   // Not yet: the lease is still held.
-  assert.equal((await claimDue(sql, Date.now())).length, 0);
+  assert.equal((await claimDue(db, Date.now())).length, 0);
 
   const [after] =
-    await sql`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(after.status, 'delivering');
   assert.equal(after.attempt, 0, 'a claim alone must not count as an attempt');
 
   // Past the lease: reclaimed for another attempt.
-  await sql`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()}
+  await db.$executeRaw`UPDATE webhook_deliveries SET next_attempt_at = ${dueNow()}
             WHERE id = ${delivery.id}`;
-  const reclaimed = await claimDue(sql, Date.now());
+  const reclaimed = await claimDue(db, Date.now());
   assert.deepEqual(
     reclaimed.map((row) => row.id),
     [delivery.id],
@@ -629,28 +655,178 @@ test('a stale attempt cannot overwrite a delivery another worker has taken', asy
   // on a row that has since been reclaimed and possibly retried.
   const { ns } = await makeOwner();
   const webhookId = await insertWebhook(ns, 'https://172.31.255.7/hook', ['version.published']);
-  const [delivery] = await sql`
+  const [delivery] = await db.$queryRaw`
     INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-    VALUES (${webhookId}, 'version.published', ${sql.json({ hello: 'world' })}, '{}', 'sig')
+    VALUES (${webhookId}, 'version.published', ${{ hello: 'world' }}, '{}', 'sig')
     RETURNING *
   `;
 
   const claimed = await claimOne(delivery.id);
   // A peer's lease expired and its re-claim landed first, moving the deadline
   // and starting that attempt's own bookkeeping.
-  await sql`UPDATE webhook_deliveries SET status = 'delivering', attempt = 2,
+  await db.$executeRaw`UPDATE webhook_deliveries SET status = 'delivering', attempt = 2,
               next_attempt_at = now() + interval '1 minute'
             WHERE id = ${delivery.id}`;
 
   // The stale holder now reports failure; it must not be recorded.
-  const result = await attemptDelivery(sql, claimed, async () => {
+  const result = await attemptDelivery(db, claimed, async () => {
     throw new Error('receiver is gone');
   });
   assert.equal(result.ok, false);
 
   const [after] =
-    await sql`SELECT status, attempt, last_error FROM webhook_deliveries WHERE id = ${delivery.id}`;
+    await db.$queryRaw`SELECT status, attempt, last_error FROM webhook_deliveries WHERE id = ${delivery.id}`;
   assert.equal(after.status, 'delivering', 'a non-holder must not resolve the row');
   assert.equal(after.attempt, 2, 'the claim holder attempt count is left alone');
   assert.equal(after.last_error, null);
+});
+
+test('a webhook lists its deliveries newest first, without the signed body', async () => {
+  const { owner, ns } = await makeOwner();
+  const created = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+
+  const first = await insertDelivery(created.body.id, { status: 'delivered' });
+  const second = await insertDelivery(created.body.id, { status: 'failed', attempt: 4 });
+
+  const page = await request(app)
+    .get(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries`))
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.deepEqual(
+    page.body.data.map((delivery) => delivery.id),
+    [second.id, first.id],
+  );
+  const [latest] = page.body.data;
+  assert.equal(latest.status, 'failed');
+  assert.equal(latest.attempt, 4);
+  assert.equal(latest.max_attempts, 4);
+  assert.equal(latest.payload.version, '1.0.0');
+  assert.equal(latest.next_attempt_at, null);
+  // The body is the signed bytes and the signature is derived from the secret;
+  // neither belongs in a listing, and the hook id is already in the path.
+  assert.equal(latest.body, undefined);
+  assert.equal(latest.signature, undefined);
+  assert.equal(latest.webhook_id, undefined);
+});
+
+test('the delivery log pages like the rest of the API', async () => {
+  const { owner, ns } = await makeOwner();
+  const created = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+
+  const ids = [];
+  for (let i = 0; i < 3; i += 1) {
+    ids.push((await insertDelivery(created.body.id)).id);
+  }
+
+  const start = apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries?limit=1`);
+  const { rows, pages } = await followPages(app, start, bearer(owner.token));
+  assert.equal(pages.length, 3);
+  assert.deepEqual(
+    rows.map((delivery) => delivery.id),
+    ids.toReversed(),
+  );
+  assert.equal(pages[0]._links.prev, null);
+  assert.equal(pages.at(-1)._links.next, null);
+});
+
+test('redelivering a finished delivery queues the same signed body again', async () => {
+  const { owner, ns } = await makeOwner();
+  const created = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+
+  const original = await insertDelivery(created.body.id, { status: 'failed', attempt: 4 });
+  const response = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries/${original.id}/redeliver`))
+    .set(bearer(owner.token))
+    .expect(202);
+  assert.equal(response.body.status, 'pending');
+  assert.equal(response.body.attempt, 0);
+  assert.notEqual(response.body.id, original.id);
+
+  const [copy] = await db.$queryRaw`
+    SELECT body, signature, next_attempt_at FROM webhook_deliveries WHERE id = ${response.body.id}
+  `;
+  assert.equal(copy.body, original.body, 'the redelivery sends the bytes that were signed');
+  assert.equal(copy.signature, original.signature);
+  assert.equal(copy.next_attempt_at, null, 'a queued delivery has no retry deadline yet');
+
+  // The original is left alone, so the failure it re-runs is still in the log.
+  const [kept] =
+    await db.$queryRaw`SELECT status, attempt FROM webhook_deliveries WHERE id = ${original.id}`;
+  assert.equal(kept.status, 'failed');
+  assert.equal(kept.attempt, 4);
+
+  // The copy is what the worker picks up next.
+  const claimed = await claimDue(db, Date.now());
+  assert.ok(claimed.some((row) => String(row.id) === response.body.id));
+});
+
+test('a delivery that has not finished cannot be redelivered', async () => {
+  const { owner, ns } = await makeOwner();
+  const created = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+
+  for (const status of ['pending', 'retrying', 'delivering']) {
+    const delivery = await insertDelivery(created.body.id, { status });
+    const refused = await request(app)
+      .post(
+        apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries/${delivery.id}/redeliver`),
+      )
+      .set(bearer(owner.token));
+    assert.equal(refused.status, 409, `${status} should not be redelivered`);
+  }
+});
+
+test('the delivery log answers to the hook owner and to the hook it names', async () => {
+  const { owner, ns } = await makeOwner();
+  const outsider = await signupAndAccept(app, uniqNs());
+  const created = await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks`))
+    .set(bearer(owner.token))
+    .send({ url: PUBLIC_URL, events: ['version.published'] })
+    .expect(201);
+  const delivery = await insertDelivery(created.body.id);
+
+  // A stranger sees neither the log nor the redelivery, on the same gate the
+  // hook itself uses.
+  await request(app)
+    .get(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries`))
+    .set(bearer(outsider.token))
+    .expect(403);
+  await request(app)
+    .post(apiPath(`/@${ns}/hooked/webhooks/${created.body.id}/deliveries/${delivery.id}/redeliver`))
+    .set(bearer(outsider.token))
+    .expect(403);
+
+  // An id that names no hook in this collection is a 404, not an empty log.
+  await request(app)
+    .get(apiPath(`/@${ns}/hooked/webhooks/999999/deliveries`))
+    .set(bearer(owner.token))
+    .expect(404);
+
+  // A delivery belonging to another hook is not reachable through this one.
+  const otherHook = await insertWebhook(ns, PUBLIC_URL, ['version.published']);
+  const otherDelivery = await insertDelivery(otherHook);
+  await request(app)
+    .post(
+      apiPath(
+        `/@${ns}/hooked/webhooks/${created.body.id}/deliveries/${otherDelivery.id}/redeliver`,
+      ),
+    )
+    .set(bearer(owner.token))
+    .expect(404);
 });

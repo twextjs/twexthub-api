@@ -14,14 +14,14 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function makeOrg() {
@@ -193,7 +193,7 @@ describe('the old address redirects', () => {
 
     const rejected = await publishProject(app, ns, 'hello', owner.token, { version: '2.0.0' }, 409);
     assert.match(rejected.body.detail, /transferred away/);
-    assert.equal((await sql`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
+    assert.equal((await db.$queryRaw`SELECT 1 FROM versions WHERE namespace = ${ns}`).length, 0);
     assert.deepEqual(await versionsMoved(ns, 'hello', other.user.namespace), ['1.0.0']);
   });
 
@@ -274,7 +274,7 @@ describe('the old address redirects', () => {
     assert.equal(hop.headers.location, apiPath(`/@${third.user.namespace}/hello`));
     assert.equal((await request(app).get(hop.headers.location)).status, 200);
 
-    const [{ hops }] = await sql`
+    const [{ hops }] = await db.$queryRaw`
       SELECT count(*)::int AS hops FROM extension_redirects WHERE to_namespace = ${ns}
     `;
     assert.equal(hops, 0);
@@ -315,21 +315,21 @@ describe('what the move refuses', () => {
 
     // The extension's real size, so the limit is set below it rather than at a
     // guessed number of bytes.
-    const [size] = await sql`
+    const [size] = await db.$queryRaw`
       SELECT COALESCE(SUM(blob_size + source_size), 0)::int AS bytes
       FROM versions WHERE namespace = ${ns} AND extension_id = 'hello'
     `;
     assert.ok(size.bytes > 0);
-    await sql`UPDATE users SET max_blob_bytes = ${size.bytes - 1} WHERE namespace = ${other.user.namespace}`;
+    await db.$executeRaw`UPDATE users SET max_blob_bytes = ${size.bytes - 1} WHERE namespace = ${other.user.namespace}`;
 
     const refused = await offer(ns, 'hello', other.user.namespace, owner.token).expect(409);
     assert.match(refused.body.detail, /does not have room/);
 
     // The same refusal has to hold on accept, because the destination can fill up
     // in between, which is the only moment the charge actually lands.
-    await sql`UPDATE users SET max_blob_bytes = NULL WHERE namespace = ${other.user.namespace}`;
+    await db.$executeRaw`UPDATE users SET max_blob_bytes = NULL WHERE namespace = ${other.user.namespace}`;
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
-    await sql`UPDATE users SET max_blob_bytes = ${size.bytes - 1} WHERE namespace = ${other.user.namespace}`;
+    await db.$executeRaw`UPDATE users SET max_blob_bytes = ${size.bytes - 1} WHERE namespace = ${other.user.namespace}`;
     await request(app)
       .post(apiPath(`/@${ns}/hello/transfers/${other.user.namespace}/accept`))
       .set(bearer(other.token))
@@ -362,11 +362,11 @@ describe('what the move carries', () => {
       { version: '2.0.0' },
       403,
     );
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT owner_id FROM extension_owners
       WHERE namespace = ${other.user.namespace} AND extension_id = 'hello'
     `;
-    const recipient = await loadNamespaceAccount(sql, other.user.namespace);
+    const recipient = await loadNamespaceAccount(db, other.user.namespace);
     assert.deepEqual(
       rows.map((row) => row.owner_id),
       [recipient.id],
@@ -394,14 +394,14 @@ describe('what the move carries', () => {
     const { ns, owner } = await publishedExtension();
     const other = await signupAndAccept(app, uniqNs());
     await offer(ns, 'hello', other.user.namespace, owner.token).expect(201);
-    const recipient = await loadNamespaceAccount(sql, other.user.namespace);
-    await sql`
+    const recipient = await loadNamespaceAccount(db, other.user.namespace);
+    await db.$executeRaw`
       UPDATE users SET blob_bytes = 100, max_blob_bytes = 100
       WHERE id = ${recipient.id}
     `;
 
     await assert.rejects(
-      sql.begin((tx) =>
+      db.$transaction((tx) =>
         acceptTransfer(tx, {
           config: {},
           actor: { ...other.user, id: recipient.id },
@@ -417,7 +417,10 @@ describe('what the move carries', () => {
         return true;
       },
     );
-    assert.equal((await sql`SELECT 1 FROM extension_transfers WHERE namespace = ${ns}`).length, 1);
+    assert.equal(
+      (await db.$queryRaw`SELECT 1 FROM extension_transfers WHERE namespace = ${ns}`).length,
+      1,
+    );
     assert.deepEqual(await versions(ns, 'hello'), ['1.0.0']);
   });
 
@@ -449,27 +452,40 @@ describe('what the move carries', () => {
       .expect(200);
     // Seeded rather than waited for: in production the rollup is filled by a
     // scheduled job, and the raw event above is what a download actually wrote.
-    await sql`
+    await db.$executeRaw`
       INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
       VALUES (${ns}, 'hello', current_date, 7)
+    `;
+    await db.$executeRaw`
+      INSERT INTO extension_version_daily_downloads
+        (namespace, extension_id, version, day, total_downloads)
+      VALUES (${ns}, 'hello', '1.0.0', current_date, 7)
     `;
 
     const events = async (namespace) =>
       Number(
         (
-          await sql`SELECT count(*)::int AS n FROM download_events
+          await db.$queryRaw`SELECT count(*)::int AS n FROM download_events
             WHERE namespace = ${namespace} AND extension_id = 'hello'`
         )[0].n,
       );
     const rolled = async (namespace) =>
       Number(
         (
-          await sql`SELECT COALESCE(SUM(total_downloads), 0)::int AS n
+          await db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::int AS n
             FROM extension_daily_downloads
             WHERE namespace = ${namespace} AND extension_id = 'hello'`
         )[0].n,
       );
-    const [charged] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+    const rolledByVersion = async (namespace) =>
+      Number(
+        (
+          await db.$queryRaw`SELECT COALESCE(SUM(total_downloads), 0)::int AS n
+            FROM extension_version_daily_downloads
+            WHERE namespace = ${namespace} AND extension_id = 'hello'`
+        )[0].n,
+      );
+    const [charged] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
     assert.ok(Number(charged.blob_bytes) > 0);
     assert.ok((await events(ns)) > 0);
 
@@ -509,6 +525,8 @@ describe('what the move carries', () => {
     assert.ok((await events(to)) > 0);
     assert.equal(await rolled(ns), 0);
     assert.equal(await rolled(to), 7);
+    assert.equal(await rolledByVersion(ns), 0);
+    assert.equal(await rolledByVersion(to), 7);
     assert.equal(
       Number(
         (
@@ -522,8 +540,8 @@ describe('what the move carries', () => {
 
     // The charge moved with the bytes, so the sender is not billed for storage
     // the recipient is serving and the recipient is not given it for free.
-    const [sender] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
-    const [recipient] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${to}`;
+    const [sender] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+    const [recipient] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${to}`;
     assert.equal(Number(sender.blob_bytes), 0);
     assert.equal(Number(recipient.blob_bytes), Number(charged.blob_bytes));
   });
@@ -564,7 +582,7 @@ describe('what the move carries', () => {
     // `has_published` stays where it was and the next version is still held.
     // Otherwise two accounts could sell each other the review gate, and the
     // moderation queue would be worth nothing.
-    const [recipient] = await sql`
+    const [recipient] = await db.$queryRaw`
       SELECT has_published FROM users WHERE namespace = ${other.user.namespace}
     `;
     assert.equal(recipient.has_published, false);
@@ -627,7 +645,7 @@ describe('what the move carries', () => {
 
     // The hook moved with the extension, so the delivery belongs to the hook at
     // the new address and says which way the extension went.
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT w.namespace, w.extension_id, d.event, d.payload
       FROM webhook_deliveries d JOIN webhooks w ON w.id = d.webhook_id
     `;
@@ -648,7 +666,7 @@ describe('what the move carries', () => {
     // owner_id is the account that ran the publish, not the namespace, and it is
     // deliberately not rewritten: the audit trail has to still say who pushed
     // 1.0.0 after the address it was published under is gone.
-    const [row] = await sql`
+    const [row] = await db.$queryRaw`
       SELECT v.namespace, u.namespace AS publisher
       FROM versions v JOIN users u ON u.id = v.owner_id
       WHERE v.namespace = ${other.user.namespace} AND v.extension_id = 'hello'

@@ -1,7 +1,9 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { Router } from 'express';
+import { Prisma } from '../../prisma/generated/client/index.js';
 import { requireScope } from '../auth.js';
+import { uniqueViolation } from '../db.js';
 import { removeBlobIfUnused } from '../blobs.js';
 import { removeProfileImageBlob } from '../profile-images.js';
 import { removeSourceIfUnused } from '../sources.js';
@@ -13,8 +15,21 @@ import { addedAsOrgOwnerMessage, notifyUser, removedAsOrgOwnerMessage } from '..
 import { requireObjectBody } from './shared.js';
 import { makeProfileImageRouter } from './profile-images.js';
 import { makeWebhooks, WebhookInputError } from '../webhooks.js';
+import { makeWebhookDeliveryRoutes } from './webhook-deliveries.js';
 import { profileFieldErrors, profilePatch } from '../profile.js';
 import { audit } from '../audit.js';
+
+// The address-keyed tables an organization takes with it when it is deleted.
+// They are constant names, never request values, so the raw DELETE that clears
+// each one is safe to splice the table in for.
+const ORG_SCOPED_TABLES = [
+  'dist_tags',
+  'extension_owners',
+  'extension_owner_invites',
+  'download_events',
+  'extension_daily_downloads',
+  'extension_version_daily_downloads',
+];
 
 // An organization is a pseudo-account: a namespace that publishes extensions,
 // carries a profile and holds webhooks, but has no password and no session of
@@ -26,23 +41,31 @@ import { audit } from '../audit.js';
 // Nothing here creates a session: an organization is acted for by its owners
 // with their own credentials, so there is nothing to steal and nothing to
 // revoke apart from the account.
-export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtensions }) {
+export function makeOrgsRouter({
+  db,
+  config,
+  termsGate,
+  rateLimiter,
+  listExtensions,
+  resolveTarget,
+}) {
   const router = Router();
 
   // One scope answers every organization write below, since they all ask the
   // same question: may this credential act for an organization at all? Whether
   // it may act for *this* one is `loadOrgForWrite`'s job, and it runs after.
   const manageOrgs = requireScope('manage:orgs');
-  const webhooks = makeWebhooks({ sql });
+  const webhooks = makeWebhooks({ db, resolveTarget });
+  const webhookDeliveries = makeWebhookDeliveryRoutes({ webhooks, config });
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const orgPath = (namespace) =>
     `${apiRoot ? `/${apiRoot}` : ''}/orgs/${encodeURIComponent(namespace)}`;
 
   async function loadOrg(namespace) {
     if (!isValidNamespace(namespace)) throw notFound();
-    const [row] = await sql`
-      SELECT * FROM users WHERE namespace = ${namespace} AND kind = 'organization'
-    `;
+    const row = await db.users.findFirst({
+      where: { namespace, kind: 'organization' },
+    });
     // A namespace that belongs to an account is a 404 here rather than a
     // redirect: /orgs is for organizations, and the account is one click away
     // at /users.
@@ -52,9 +75,10 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
 
   async function isOrgOwner(user, org) {
     if (user.role === 'admin') return true;
-    const [row] = await sql`
-      SELECT 1 FROM organization_owners WHERE user_id = ${user.id} AND org_id = ${org.id}
-    `;
+    const row = await db.organization_owners.findFirst({
+      where: { user_id: user.id, org_id: org.id },
+      select: { org_id: true },
+    });
     return Boolean(row);
   }
 
@@ -96,9 +120,10 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     // created on a name a version already publishes under. The unique index
     // settles it either way; this only makes the error a 409 about the name
     // instead of an unhandled constraint violation.
-    const [taken] = await sql`
-      SELECT 1 FROM users WHERE namespace = ${namespace}
-    `;
+    const taken = await db.users.findFirst({
+      where: { namespace },
+      select: { id: true },
+    });
     if (taken) throw conflict('That namespace is already taken.');
 
     // Signups are the same act as signing in, so they share the window: an
@@ -107,9 +132,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     await rateLimiter.signupCheck(`signup:${req.ip}`);
 
     // The profile columns come from the shared helper, so a field an account
-    // accepts is a field an organization accepts, defaults included. The object
-    // is turned into a column list, which keeps the column names written once
-    // instead of once in the helper and once in the query.
+    // accepts is a field an organization accepts, defaults included.
     const { patch } = profilePatch(req.body);
     const columns = {
       namespace,
@@ -119,12 +142,11 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     };
     let org;
     try {
-      await sql.begin(async (tx) => {
-        [org] = await tx`INSERT INTO users ${tx(columns)} RETURNING *`;
-        await tx`
-          INSERT INTO organization_owners (org_id, user_id, added_by)
-          VALUES (${org.id}, ${req.auth.user.id}, ${req.auth.user.id})
-        `;
+      await db.$transaction(async (tx) => {
+        org = await tx.users.create({ data: columns });
+        await tx.organization_owners.create({
+          data: { org_id: org.id, user_id: req.auth.user.id, added_by: req.auth.user.id },
+        });
         await audit(
           tx,
           req.auth.user,
@@ -134,7 +156,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
         );
       });
     } catch (error) {
-      if (error.code === '23505') throw conflict('That namespace is already taken.');
+      if (uniqueViolation(error)) throw conflict('That namespace is already taken.');
       throw error;
     }
 
@@ -148,13 +170,14 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
-    const rows = await sql`
-      SELECT * FROM users
-      WHERE kind = 'organization'
-      ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
-      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
-      LIMIT ${limit + 1}
-    `;
+    const rows = await db.users.findMany({
+      where: {
+        kind: 'organization',
+        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+      },
+      orderBy: { id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
     res.json(
       keysetPage(req, rows, {
         limit,
@@ -190,11 +213,9 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     const errors = profileFieldErrors(req.body);
     if (errors.length > 0) throw fieldErrors(errors);
 
-    const [updated] = await sql`
-      UPDATE users SET ${sql(patch)} WHERE id = ${org.id} RETURNING *
-    `;
+    const updated = await db.users.update({ where: { id: org.id }, data: patch });
     await audit(
-      sql,
+      db,
       req.auth.user,
       'org.update',
       { namespace: org.namespace },
@@ -210,31 +231,25 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // namespace, so keep their digests when deleting the version rows.
   router.delete('/:namespace', manageOrgs, termsGate, async (req, res) => {
     const org = await loadOrgForWrite(req);
-    const owned = await sql.begin(async (tx) => {
-      await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
-      const rows = await tx`
+    const owned = await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
+      // The digests have to come back with the delete, so this keeps its
+      // `RETURNING` rather than going through deleteMany.
+      const rows = await tx.$queryRaw`
         DELETE FROM versions WHERE namespace = ${org.namespace}
         RETURNING blob_digest, blob_path, source_digest
       `;
-      await tx`DELETE FROM webhooks WHERE namespace = ${org.namespace}`;
-      for (const table of [
-        'dist_tags',
-        'extension_owners',
-        'extension_owner_invites',
-        'download_events',
-        'extension_daily_downloads',
-      ]) {
-        await tx`DELETE FROM ${tx(table)} WHERE namespace = ${org.namespace}`;
+      await tx.webhooks.deleteMany({ where: { namespace: org.namespace } });
+      for (const table of ORG_SCOPED_TABLES) {
+        await tx.$executeRaw`DELETE FROM ${Prisma.raw(table)} WHERE namespace = ${org.namespace}`;
       }
-      await tx`
-        DELETE FROM extension_transfers
-        WHERE namespace = ${org.namespace} OR to_namespace = ${org.namespace}
-      `;
-      await tx`
-        DELETE FROM extension_redirects
-        WHERE from_namespace = ${org.namespace} OR to_namespace = ${org.namespace}
-      `;
-      await tx`DELETE FROM users WHERE id = ${org.id}`;
+      await tx.extension_transfers.deleteMany({
+        where: { OR: [{ namespace: org.namespace }, { to_namespace: org.namespace }] },
+      });
+      await tx.extension_redirects.deleteMany({
+        where: { OR: [{ from_namespace: org.namespace }, { to_namespace: org.namespace }] },
+      });
+      await tx.users.delete({ where: { id: org.id } });
       await audit(tx, req.auth.user, 'org.delete', { namespace: org.namespace });
       return rows;
     });
@@ -255,10 +270,10 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     try {
       await Promise.all([
         ...owned
-          .map((row) => (row.blob_digest ? removeBlobIfUnused(sql, config, row.blob_digest) : null))
+          .map((row) => (row.blob_digest ? removeBlobIfUnused(db, config, row.blob_digest) : null))
           .filter(Boolean),
         ...legacyPaths.map((rel) => rm(path.join(config.dataDir, rel), { force: true })),
-        ...profileDigests.map((digest) => removeProfileImageBlob(sql, config, digest)),
+        ...profileDigests.map((digest) => removeProfileImageBlob(db, config, digest)),
       ]);
     } catch (error) {
       console.error(`blob cleanup deferred for ${org.namespace}: ${error.message}`);
@@ -266,7 +281,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     try {
       await Promise.all(
         [...new Set(owned.map((row) => row.source_digest).filter(Boolean))].map((digest) =>
-          removeSourceIfUnused(sql, config, digest),
+          removeSourceIfUnused(db, config, digest),
         ),
       );
     } catch (error) {
@@ -278,10 +293,11 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
   // The owner list is public: it is the answer to "who runs this namespace",
   // and the same information is implied by every extension it publishes. Only
   // what identifies a person is exposed -- no role, no accepted terms, no
-  // contact details.
+  // contact details. A two-table join with the avatar columns the URL needs, so
+  // it stays a raw read.
   router.get('/:namespace/owners', async (req, res) => {
     const org = await loadOrg(req.params.namespace);
-    const rows = await sql`
+    const rows = await db.$queryRaw`
       SELECT u.namespace, u.display_name, u.created_at, g.added_at,
         u.avatar_blob_digest, u.avatar_url
       FROM organization_owners g
@@ -306,7 +322,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
-    const [user] = await sql`SELECT * FROM users WHERE namespace = ${candidate}`;
+    const user = await db.users.findUnique({ where: { namespace: candidate } });
     if (!user) throw notFound('No such account to add.');
     if (user.kind === 'organization') {
       throw fieldErrors([
@@ -315,18 +331,15 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     }
     // Adding a co-owner is a grant like any other, so it is idempotent rather
     // than an error: a retry of a request that actually landed should not need
-    // the caller to know it landed.
-    const [inserted] = await sql`
-      INSERT INTO organization_owners (org_id, user_id, added_by)
-      VALUES (${org.id}, ${user.id}, ${req.auth.user.id})
-      ON CONFLICT (org_id, user_id) DO NOTHING
-      RETURNING 1
-    `;
-    if (!inserted) {
-      res.status(204).end();
-      return;
-    }
-    await sql.begin(async (tx) => {
+    // the caller to know it landed. The insert, its notification and its audit
+    // entry commit together, so a failure after the insert cannot leave a
+    // co-owner the audit trail never recorded.
+    await db.$transaction(async (tx) => {
+      const { count } = await tx.organization_owners.createMany({
+        data: [{ org_id: org.id, user_id: user.id, added_by: req.auth.user.id }],
+        skipDuplicates: true,
+      });
+      if (count === 0) return;
       if (user.id !== req.auth.user.id) {
         await notifyUser(
           tx,
@@ -354,19 +367,15 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     const org = await loadOrgForWrite(req);
     const candidate = req.params.ownerNamespace;
     if (!isValidNamespace(candidate)) throw notFound();
-    const [user] = await sql`SELECT * FROM users WHERE namespace = ${candidate}`;
+    const user = await db.users.findUnique({ where: { namespace: candidate } });
     if (!user) throw notFound('No such account.');
-    await sql.begin(async (tx) => {
-      await tx`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
-      const [deleted] = await tx`
-          DELETE FROM organization_owners
-          WHERE org_id = ${org.id} AND user_id = ${user.id}
-          RETURNING 1
-        `;
-      if (!deleted) throw notFound('That account is not an owner.');
-      const [{ count }] = await tx`
-          SELECT count(*)::int AS count FROM organization_owners WHERE org_id = ${org.id}
-        `;
+    await db.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT id FROM users WHERE id = ${org.id} FOR UPDATE`;
+      const { count: deleted } = await tx.organization_owners.deleteMany({
+        where: { org_id: org.id, user_id: user.id },
+      });
+      if (deleted === 0) throw notFound('That account is not an owner.');
+      const count = await tx.organization_owners.count({ where: { org_id: org.id } });
       if (count === 0) {
         throw conflict(
           'That is the only owner. Add another owner, or delete the organization, before removing it.',
@@ -419,7 +428,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
       throw error;
     }
     await audit(
-      sql,
+      db,
       req.auth.user,
       'organization.webhook.create',
       { namespace: org.namespace },
@@ -439,7 +448,7 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
       throw notFound('No such webhook.');
     }
     await audit(
-      sql,
+      db,
       req.auth.user,
       'organization.webhook.delete',
       { namespace: org.namespace },
@@ -450,12 +459,26 @@ export function makeOrgsRouter({ sql, config, termsGate, rateLimiter, listExtens
     res.status(204).end();
   });
 
+  router.get('/:namespace/webhooks/:webhookId/deliveries', ...manageChain, async (req, res) => {
+    const org = await loadOrgForWrite(req);
+    await webhookDeliveries.list(req, res, { namespace: org.namespace, extensionId: null });
+  });
+
+  router.post(
+    '/:namespace/webhooks/:webhookId/deliveries/:deliveryId/redeliver',
+    ...manageChain,
+    async (req, res) => {
+      const org = await loadOrgForWrite(req);
+      await webhookDeliveries.redeliver(req, res, { namespace: org.namespace, extensionId: null });
+    },
+  );
+
   // Avatars and banners behave exactly as they do for an account, down to the
   // cached URL and the identicon fallback; only the owner list decides who may
   // replace them.
   router.use(
     makeProfileImageRouter({
-      sql,
+      db,
       config,
       load: (namespace) => loadOrg(namespace),
       mayWrite: (row, req) => req.auth.user.id !== undefined && isOrgOwner(req.auth.user, row),

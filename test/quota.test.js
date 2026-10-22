@@ -13,16 +13,16 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot({
+  ({ app, db } = await boot({
     limits: { maxBlobBytes: 5000, maxAccountBlobBytes: 8000 },
     rateLimits: { signupsPerIpPerWindow: 10_000 },
   }));
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('blob size caps and the account quota are enforced on publish', async () => {
@@ -59,7 +59,7 @@ test('blob size caps and the account quota are enforced on publish', async () =>
 
   // Force the account near its quota; the charge covers both the compiled blob
   // and the retained source tarball, so even a small publish must be refused.
-  await sql`UPDATE users SET blob_bytes = 7990 WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE users SET blob_bytes = 7990 WHERE namespace = ${ns}`;
   const overflowing = await publishProject(
     app,
     ns,
@@ -93,9 +93,9 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
     .expect(200);
 
   // Size the account for one of the two publishes still to come.
-  const [afterSeed] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [afterSeed] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
   const quota = Math.ceil(Number(afterSeed.blob_bytes) * 1.5);
-  await sql`UPDATE users SET blob_bytes = 0, max_blob_bytes = ${quota} WHERE namespace = ${ns}`;
+  await db.$executeRaw`UPDATE users SET blob_bytes = 0, max_blob_bytes = ${quota} WHERE namespace = ${ns}`;
 
   // A co-owner publishing a different extension charges the same account, and
   // the per-extension lock does not join the two requests.
@@ -113,7 +113,7 @@ test('concurrent publishes to sibling extensions cannot both pass the quota', as
   ]);
   assert.deepEqual([alpha.status, seed.status].sort(), [201, 413]);
 
-  const [account] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [account] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
   assert.ok(Number(account.blob_bytes) <= quota, `charged ${account.blob_bytes} of ${quota}`);
 });
 

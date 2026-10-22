@@ -12,13 +12,13 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function makeSetup() {
@@ -205,4 +205,196 @@ test('the list pages by following its own links', async () => {
     .get(apiPath(`/@${ns}/ranger/versions`))
     .query({ cursor: 'not-a-cursor' });
   assert.equal(bad.status, 400);
+});
+
+test('an owner can list their own unpublished versions by status', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  // The owner's first publish waits on review, so it lands as pending.
+  await publishProject(app, ns, 'ranger', owner.token, { version: '1.0.0', code: '// 1.0.0' });
+  await request(app)
+    .patch(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+    .set(bearer(admin.token))
+    .send({ status: 'rejected', reason: 'No loops.' })
+    .expect(200);
+  // A rejection clears the pending slot, so the next publish waits again.
+  await publishProject(app, ns, 'ranger', owner.token, { version: '1.1.0', code: '// 1.1.0' });
+
+  const pending = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.deepEqual(
+    pending.body.data.map((v) => v.version),
+    ['1.1.0'],
+  );
+  assert.equal(pending.body.data[0].status, 'pending');
+
+  const rejected = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'rejected' })
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.deepEqual(
+    rejected.body.data.map((v) => v.version),
+    ['1.0.0'],
+  );
+  assert.equal(rejected.body.data[0].rejectionReason, 'No loops.');
+
+  // The reason also rides on the single-version read the list is matching.
+  const one = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+    .set(bearer(owner.token))
+    .expect(200);
+  assert.equal(one.body.rejectionReason, 'No loops.');
+
+  // The public view still shows neither: both are unpublished.
+  const all = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .expect(200);
+  assert.deepEqual(all.body.data, []);
+});
+
+test('an admin can filter any extension by status', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'ranger', owner.token, { version: '1.0.0', code: '// 1.0.0' });
+
+  const r = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .set(bearer(admin.token))
+    .expect(200);
+  assert.deepEqual(
+    r.body.data.map((v) => v.version),
+    ['1.0.0'],
+  );
+});
+
+for (const ownership of ['co-owner', 'organization co-owner', 'organization owner']) {
+  test(`${ownership} can follow unpublished version self links`, async () => {
+    const admin = await signupAndAccept(app, uniqNs());
+    const owner = await signupAndAccept(app, uniqNs());
+    const delegate = await signupAndAccept(app, uniqNs());
+    const outsider = await signupAndAccept(app, uniqNs());
+    let ns = owner.user.namespace;
+    let grant = delegate.user;
+    if (ownership !== 'co-owner') {
+      const org = await request(app)
+        .post(apiPath('/orgs'))
+        .set(bearer(delegate.token))
+        .send({ namespace: uniqNs(), displayName: 'Delegated owners' })
+        .expect(201);
+      grant = org.body;
+      if (ownership === 'organization owner') ns = org.body.namespace;
+    }
+    await publishProject(
+      app,
+      ns,
+      'ranger',
+      ownership === 'organization owner' ? delegate.token : owner.token,
+    );
+    if (ownership === 'organization owner') {
+      // Exercise namespace authority without an extension ownership row.
+      await db.$executeRaw`DELETE FROM extension_owners WHERE namespace = ${ns} AND extension_id = 'ranger'`;
+    } else {
+      await db.$executeRaw`
+        INSERT INTO extension_owners (owner_id, namespace, extension_id)
+        SELECT id, ${ns}, 'ranger' FROM users WHERE namespace = ${grant.namespace}
+      `;
+    }
+
+    for (const status of ['pending', 'rejected']) {
+      if (status === 'rejected') {
+        await request(app)
+          .patch(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+          .set(bearer(admin.token))
+          .send({ status, reason: 'Needs changes.' })
+          .expect(200);
+      }
+      const list = await request(app)
+        .get(apiPath(`/@${ns}/ranger/versions`))
+        .query({ status })
+        .set(bearer(delegate.token))
+        .expect(200);
+      assert.equal(list.body.data.length, 1);
+      const self = list.body.data[0]._links.self;
+      for (const token of [delegate.token, admin.token]) {
+        const one = await request(app).get(self).set(bearer(token)).expect(200);
+        assert.deepEqual(one.body, list.body.data[0]);
+      }
+      if (ns === owner.user.namespace) {
+        await request(app).get(self).set(bearer(owner.token)).expect(200);
+      }
+      await request(app).get(self).expect(404);
+      await request(app).get(self).set(bearer(outsider.token)).expect(404);
+    }
+  });
+}
+
+test('the status filter is owner-and-admin only, and rejects an unknown status', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const other = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'ranger', owner.token, { version: '1.0.0', code: '// 1.0.0' });
+
+  await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .expect(401);
+  await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .set(bearer(other.token))
+    .expect(403);
+
+  const bad = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'nonsense' })
+    .set(bearer(owner.token));
+  assert.equal(bad.status, 422);
+  assert.equal(bad.body.errors[0].field, 'status');
+});
+
+test('a status filter needs the admin scope, not just the role', async () => {
+  const ab = await signupAndAccept(app, uniqNs());
+  assert.equal(ab.user.role, 'admin');
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'ranger', owner.token, { version: '1.0.0', code: '// 1.0.0' });
+
+  const unscoped = await request(app)
+    .post(apiPath('/tokens'))
+    .set(bearer(ab.token))
+    .send({ name: 'curious', scopes: ['publish'] })
+    .expect(201);
+  await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .set(bearer(unscoped.body.token))
+    .expect(403);
+  await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions/1.0.0`))
+    .set(bearer(unscoped.body.token))
+    .expect(404);
+
+  const scoped = await request(app)
+    .post(apiPath('/tokens'))
+    .set(bearer(ab.token))
+    .send({ name: 'reviewer', scopes: ['admin'] })
+    .expect(201);
+  const r = await request(app)
+    .get(apiPath(`/@${ns}/ranger/versions`))
+    .query({ status: 'pending' })
+    .set(bearer(scoped.body.token))
+    .expect(200);
+  assert.deepEqual(
+    r.body.data.map((v) => v.version),
+    ['1.0.0'],
+  );
+  await request(app).get(r.body.data[0]._links.self).set(bearer(scoped.body.token)).expect(200);
 });

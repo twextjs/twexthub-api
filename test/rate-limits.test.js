@@ -4,6 +4,7 @@ import request from 'supertest';
 import {
   apiPath,
   bearer,
+  ensureTestDatabase,
   makeConfig,
   publishProject,
   signupAndAccept,
@@ -14,7 +15,7 @@ import { createDb, ensureDataDirs } from '../src/db.js';
 
 // Separate app instances: the shared boot() cache is built once per process,
 // and these tests need their own tiny rate-limit config to be exercisable.
-let sql;
+let db;
 let looseApp;
 let tightApp;
 let coarseApp;
@@ -33,6 +34,9 @@ function makeRateConfig(overrides = {}) {
 }
 
 before(async () => {
+  // This file builds its own app instances instead of calling boot(), so it
+  // creates its per-process database clone itself.
+  await ensureTestDatabase();
   // One shared database and dataDir; the apps differ only in rate limits.
   const loose = makeRateConfig();
   const tight = makeRateConfig({
@@ -48,31 +52,31 @@ before(async () => {
   coarse.trustProxy = true;
   tight.dataDir = loose.dataDir;
   coarse.dataDir = loose.dataDir;
-  sql = createDb(loose);
+  db = createDb(loose);
   ensureDataDirs(loose.dataDir);
-  looseApp = createApp({ config: loose, sql }).app;
-  tightApp = createApp({ config: tight, sql }).app;
-  const built = createApp({ config: coarse, sql });
+  looseApp = createApp({ config: loose, db }).app;
+  tightApp = createApp({ config: tight, db }).app;
+  const built = createApp({ config: coarse, db });
   coarseApp = built.app;
   coarseTelemetry = built.telemetry;
 });
 
 beforeEach(async () => {
   // Shared database, so clear the rows both app instances see.
-  await sql.unsafe(`
+  await db.$executeRawUnsafe(`
     TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
-    users, legal_documents, download_events, extension_daily_downloads, dist_tags,
+    users, legal_documents, download_events, extension_daily_downloads, extension_version_daily_downloads, dist_tags,
     webhook_deliveries, webhooks
     RESTART IDENTITY CASCADE
   `);
-  await sql`
+  await db.$executeRaw`
     INSERT INTO legal_documents (kind, version, body)
     VALUES ('terms', 1, 'Placeholder terms.'), ('privacy', 1, 'Placeholder privacy.')
   `;
 });
 
 after(async () => {
-  await sql?.end();
+  await db?.$disconnect();
 });
 
 test('the publish bucket is counted per account and rejects past the cap', async () => {
@@ -123,13 +127,13 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
 
   // With the bucket disabled, repeated hits sail through and nothing is counted:
   // a null limit has to beat the 240-per-window default to be meaningful.
-  await sql`DELETE FROM rate_limit_entries WHERE bucket LIKE 'download:%'`;
+  await db.$executeRaw`DELETE FROM rate_limit_entries WHERE bucket LIKE 'download:%'`;
   for (let i = 0; i < 3; i += 1) {
     await request(looseApp)
       .get(apiPath(`/@${ns}/hello/versions/1.0.0/download`))
       .expect(200);
   }
-  const disabled = await sql`
+  const disabled = await db.$queryRaw`
     SELECT 1 FROM rate_limit_entries WHERE bucket LIKE 'download:%'
   `;
   assert.equal(disabled.length, 0, 'a null download limit records no bucket');

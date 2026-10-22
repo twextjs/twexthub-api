@@ -2,6 +2,8 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import https from 'node:https';
 import { isIP } from 'node:net';
+import { Prisma } from '../prisma/generated/client/index.js';
+import { conflict, notFound } from './errors.js';
 
 export const WEBHOOK_EVENTS = Object.freeze([
   'version.published',
@@ -60,7 +62,10 @@ function isPrivateIp(ip) {
 // to. The address is what a delivery connects to: resolving the name and then
 // connecting by name would leave room for a second answer to point somewhere
 // else, so callers carry this one through instead of the name.
-export async function resolvePublicWebhookTarget(rawUrl) {
+//
+// `lookupFn` is the seam a test uses to answer every name with a fixed public
+// address, so URL validation keeps its rules without touching live DNS.
+export async function resolvePublicWebhookTarget(rawUrl, lookupFn = lookup) {
   let url;
   try {
     url = new URL(rawUrl);
@@ -84,7 +89,7 @@ export async function resolvePublicWebhookTarget(rawUrl) {
   }
   let addresses;
   try {
-    addresses = await lookup(host, { all: true });
+    addresses = await lookupFn(host, { all: true });
   } catch {
     throw new Error('Webhook URL host could not be resolved.');
   }
@@ -142,6 +147,13 @@ export function renderWebhookMessage(event, namespace, id, payload) {
   }
 }
 
+// The client returns int8 columns as BigInt, and these rows go straight into a
+// JSON response, which refuses one. The ids were strings before the conversion
+// and clients compare them as strings, so they stay strings.
+function withStringId(row) {
+  return { ...row, id: row.id.toString() };
+}
+
 export class WebhookInputError extends Error {
   constructor(fields) {
     super(fields.map((f) => f.message).join('; '));
@@ -150,7 +162,11 @@ export class WebhookInputError extends Error {
   }
 }
 
-export function makeWebhooks({ sql }) {
+// `resolveTarget` validates a URL the way `create` must -- throwing on anything
+// a delivery would refuse. It defaults to the real resolver, which performs live
+// DNS; a test injects a deterministic one so creation never depends on the
+// network. The delivery worker keeps its own seam on attemptDelivery.
+export function makeWebhooks({ db, resolveTarget = assertPublicWebhookUrl }) {
   // One hook per extension, or one for a whole namespace when extensionId is
   // null. `IS NOT DISTINCT FROM` matches null to null, so the per-extension and
   // per-organization queries are the same query with a different argument
@@ -172,38 +188,128 @@ export function makeWebhooks({ sql }) {
     }
     if (errors.length > 0) throw new WebhookInputError(errors);
     try {
-      await assertPublicWebhookUrl(input.url);
+      await resolveTarget(input.url);
     } catch (error) {
       throw new WebhookInputError([{ field: 'url', message: error.message }]);
     }
     const secret = newWebhookSecret();
-    const [row] = await sql`
-      INSERT INTO webhooks (namespace, extension_id, url, secret, events, active)
-      VALUES (${namespace}, ${extensionId}, ${input.url}, ${secret},
-              ${input.events}, ${input.active !== false})
-      RETURNING id, namespace, extension_id, url, events, active, created_at
-    `;
-    return { ...row, secret };
+    const row = await db.webhooks.create({
+      data: {
+        namespace,
+        extension_id: extensionId,
+        url: input.url,
+        secret,
+        events: input.events,
+        active: input.active !== false,
+      },
+      select: {
+        id: true,
+        namespace: true,
+        extension_id: true,
+        url: true,
+        events: true,
+        active: true,
+        created_at: true,
+      },
+    });
+    return { ...withStringId(row), secret };
   }
 
   async function list(namespace, extensionId) {
-    return await sql`
-      SELECT id, namespace, extension_id, url, events, active,
-             last_delivery_status, last_delivery_at, created_at
-      FROM webhooks
-      WHERE namespace = ${namespace} AND extension_id IS NOT DISTINCT FROM ${extensionId}
-      ORDER BY created_at DESC
-    `;
+    const rows = await db.webhooks.findMany({
+      where: { namespace, extension_id: extensionId ?? null },
+      select: {
+        id: true,
+        namespace: true,
+        extension_id: true,
+        url: true,
+        events: true,
+        active: true,
+        last_delivery_status: true,
+        last_delivery_at: true,
+        created_at: true,
+      },
+      orderBy: { created_at: 'desc' },
+    });
+    return rows.map(withStringId);
   }
 
   async function remove(namespace, extensionId, id) {
-    const [deleted] = await sql`
-      DELETE FROM webhooks
-      WHERE id = ${id} AND namespace = ${namespace}
-        AND extension_id IS NOT DISTINCT FROM ${extensionId}
-      RETURNING 1
+    const { count } = await db.webhooks.deleteMany({
+      where: { id, namespace, extension_id: extensionId ?? null },
+    });
+    return count > 0;
+  }
+
+  // The hook a delivery log belongs to, or null when the id names one in
+  // another collection or namespace. `remove` refuses the same mismatches with
+  // the same clause, so an id means the same thing wherever it is passed.
+  async function scopedWebhook(namespace, extensionId, id) {
+    const row = await db.webhooks.findFirst({
+      where: { id, namespace, extension_id: extensionId ?? null },
+      select: { id: true },
+    });
+    return row ?? null;
+  }
+
+  // A hook's log, newest first. The body and its signature stay out of it: the
+  // payload is the same object and all a UI can render, while the raw bytes and
+  // the HMAC over them only mean something to the receiver verifying them.
+  async function listDeliveries(namespace, extensionId, webhookId, { limit, cursor, back }) {
+    if (!(await scopedWebhook(namespace, extensionId, webhookId))) {
+      throw notFound('No such webhook.');
+    }
+    const keyset = cursor
+      ? back
+        ? Prisma.sql`AND id > ${cursor.i}`
+        : Prisma.sql`AND id < ${cursor.i}`
+      : Prisma.empty;
+    const rows = await db.$queryRaw`
+      SELECT id, event, payload, attempt, max_attempts, status, next_attempt_at,
+             last_error, created_at, updated_at
+      FROM webhook_deliveries
+      WHERE webhook_id = ${webhookId}
+        ${keyset}
+      ORDER BY id ${back ? Prisma.raw('ASC') : Prisma.raw('DESC')}
+      LIMIT ${limit + 1}
     `;
-    return Boolean(deleted);
+    return rows.map(withStringId);
+  }
+
+  // Queue a delivery's signed body again. This inserts rather than resets the
+  // row, so the failed attempt it re-runs stays in the log beside the retry.
+  // Body and signature are copied verbatim because they were signed with a
+  // secret that does not change.
+  async function redeliver(namespace, extensionId, webhookId, deliveryId) {
+    return await db.$transaction(async (tx) => {
+      // Lock the original row before reading its status, so a worker cannot
+      // finish the attempt between the check and the copy.
+      const [delivery] = await tx.$queryRaw`
+        SELECT d.status
+        FROM webhook_deliveries d
+        JOIN webhooks w ON w.id = d.webhook_id
+        WHERE d.id = ${deliveryId} AND d.webhook_id = ${webhookId}
+          AND w.namespace = ${namespace}
+          AND w.extension_id IS NOT DISTINCT FROM ${extensionId}
+        FOR UPDATE OF d
+      `;
+      if (!delivery) throw notFound('No such delivery.');
+      // A delivery still queued or in flight is already on its way out; a second
+      // copy now would put the receiver through it twice.
+      if (delivery.status !== 'delivered' && delivery.status !== 'failed') {
+        throw conflict('That delivery has not finished yet.');
+      }
+      // Body and signature are copied verbatim: they were signed with a secret
+      // that does not change, and jsonb round-tripping would reorder the payload.
+      const [row] = await tx.$queryRaw`
+        INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature, max_attempts)
+        SELECT webhook_id, event, payload, body, signature, max_attempts
+        FROM webhook_deliveries WHERE id = ${deliveryId}
+        RETURNING id, event, payload, attempt, max_attempts, status, next_attempt_at,
+                  last_error, created_at, updated_at
+      `;
+      return withStringId(row);
+    });
   }
 
   async function scheduleFor(namespace, extensionId, event, basePayload) {
@@ -211,12 +317,14 @@ export function makeWebhooks({ sql }) {
       // A namespace-wide hook (extension_id IS NULL) is scheduled alongside the
       // hook registered for this exact extension, so one publish feeds both
       // without either having to be registered twice.
-      const hooks = await sql`
-        SELECT * FROM webhooks
-        WHERE namespace = ${namespace}
-          AND (extension_id = ${extensionId} OR extension_id IS NULL)
-          AND active AND ${event} = ANY (events)
-      `;
+      const hooks = await db.webhooks.findMany({
+        where: {
+          namespace,
+          OR: [{ extension_id: extensionId }, { extension_id: null }],
+          active: true,
+          events: { has: event },
+        },
+      });
       for (const hook of hooks) {
         const message = renderWebhookMessage(event, namespace, extensionId, basePayload);
         const payload = {
@@ -242,10 +350,9 @@ export function makeWebhooks({ sql }) {
         // produce a body that no longer matches the signature.
         const body = JSON.stringify(payload);
         const signature = signWebhookPayload(hook.secret, body);
-        await sql`
-          INSERT INTO webhook_deliveries (webhook_id, event, payload, body, signature)
-          VALUES (${hook.id}, ${event}, ${sql.json(payload)}, ${body}, ${signature})
-        `;
+        await db.webhook_deliveries.create({
+          data: { webhook_id: hook.id, event, payload, body, signature },
+        });
       }
     } catch (error) {
       console.error('webhook scheduling failed:', error);
@@ -259,7 +366,7 @@ export function makeWebhooks({ sql }) {
       if (running) return;
       running = true;
       try {
-        await deliverDue(sql);
+        await deliverDue(db);
       } catch (error) {
         console.error('webhook delivery worker failed:', error);
       } finally {
@@ -280,7 +387,7 @@ export function makeWebhooks({ sql }) {
     };
   }
 
-  return { create, list, remove, scheduleFor, worker };
+  return { create, list, remove, listDeliveries, redeliver, scheduleFor, worker };
 }
 
 // Take ownership of the deliveries that are due, up to a batch. Returns them
@@ -293,8 +400,8 @@ export function makeWebhooks({ sql }) {
 // 'delivering' with the lease in next_attempt_at, so a concurrent claim skips
 // them and a worker that dies mid-attempt has its rows picked up once the lease
 // runs out.
-export async function claimDue(sql, now = Date.now(), limit = DELIVERY_BATCH) {
-  return await sql`
+export async function claimDue(db, now = Date.now(), limit = DELIVERY_BATCH) {
+  return await db.$queryRaw`
     WITH claimable AS (
       SELECT d.id
       FROM webhook_deliveries d
@@ -325,15 +432,15 @@ export async function claimDue(sql, now = Date.now(), limit = DELIVERY_BATCH) {
 // next poll -- while this pass is still working towards them, so the same body
 // would be POSTed twice. Claiming one row at a time keeps every lease fresh for
 // the whole of its own attempt.
-export async function deliverDue(sql) {
+export async function deliverDue(db) {
   const results = [];
   for (let sent = 0; sent < DELIVERY_BATCH; sent += 1) {
     const claimedAt = Date.now();
-    const [delivery] = await claimDue(sql, claimedAt, 1);
+    const [delivery] = await claimDue(db, claimedAt, 1);
     if (!delivery) break;
     // The attempt stamps its own retry deadline off the clock when it finishes,
     // so the claim time is not carried into it.
-    results.push(await attemptDelivery(sql, delivery));
+    results.push(await attemptDelivery(db, delivery));
   }
   return results;
 }
@@ -378,7 +485,7 @@ function postToTarget(target, delivery) {
 
 // `resolveTarget` is a seam for the test receiver, which listens on loopback;
 // the worker always resolves and validates for real.
-export async function attemptDelivery(sql, delivery, resolveTarget = resolvePublicWebhookTarget) {
+export async function attemptDelivery(db, delivery, resolveTarget = resolvePublicWebhookTarget) {
   const attempt = delivery.attempt + 1;
   let error = null;
   let ok = false;
@@ -407,24 +514,32 @@ export async function attemptDelivery(sql, delivery, resolveTarget = resolvePubl
   // stamped is the holder's proof: if the lease ran out and a peer re-claimed
   // the row, its deadline has moved on, so a late result from the original
   // attempt is dropped instead of overwriting the newer attempt's work.
-  await sql`
-    UPDATE webhook_deliveries
-    SET status = ${ok ? 'delivered' : retrying ? 'retrying' : 'failed'},
-        attempt = ${attempt},
-        last_error = ${ok ? null : error},
-        next_attempt_at = ${retrying ? new Date(completedAt + delay).toISOString() : null},
-        updated_at = now()
-    WHERE id = ${delivery.id}
-      AND status = 'delivering'
-      AND next_attempt_at = ${delivery.next_attempt_at}
-  `.catch(() => {});
+  await db.webhook_deliveries
+    .updateMany({
+      where: {
+        id: delivery.id,
+        status: 'delivering',
+        next_attempt_at: delivery.next_attempt_at,
+      },
+      data: {
+        status: ok ? 'delivered' : retrying ? 'retrying' : 'failed',
+        attempt,
+        last_error: ok ? null : error,
+        next_attempt_at: retrying ? new Date(completedAt + delay) : null,
+        updated_at: new Date(),
+      },
+    })
+    .catch(() => {});
   if (ok || retrying) {
-    await sql`
-      UPDATE webhooks
-      SET last_delivery_status = ${ok ? 'ok' : 'error'},
-          last_delivery_at = now()
-      WHERE id = ${delivery.webhook_id}
-    `.catch(() => {});
+    await db.webhooks
+      .updateMany({
+        where: { id: delivery.webhook_id },
+        data: {
+          last_delivery_status: ok ? 'ok' : 'error',
+          last_delivery_at: new Date(),
+        },
+      })
+      .catch(() => {});
   }
   return { id: delivery.id, ok, retrying, error };
 }

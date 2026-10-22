@@ -41,6 +41,7 @@ const defaultTitles = {
   422: 'Unprocessable Entity',
   429: 'Too Many Requests',
   500: 'Internal Server Error',
+  502: 'Bad Gateway',
 };
 
 export function fieldErrors(errors) {

@@ -42,19 +42,20 @@ You can see the official live instance of TwextHub at [twexts.sdisk.us](https://
 
 While installation with Node.js exists, you should prefer Docker because it's safer. We will only provide steps for deployment with Docker Compose.
 
-1. Copy the required files to a directory of your choice:
+1. Copy the compose file to a directory of your choice:
 
    ```bash
    cp compose.example.yml <YOUR_DIRECTORY>/compose.yaml
-   cp config.yaml <YOUR_DIRECTORY>/config.yaml
    ```
 
-2. Modify `config.yaml` to your deployment's needs.
+2. Set `TWEXTHUB_DATABASE_URL` and `TWEXTHUB_PUBLIC_BASE_URL` in it. The image is configured through `TWEXTHUB_*` environment variables.
 3. Deploy:
 
    ```bash
    docker compose up -d
    ```
+
+The container applies the schema and any pending migrations on boot, so a first deploy needs no manual migrate step. Upgrading a database that an earlier release built with its own SQL files requires its `schema_migrations` table to hold every legacy migration name; the [deploy guide](./docs/deploy.md#-upgrading-from-the-sql-migration-releases) has the details.
 
 ## 💭 Feedback and Contributing
 

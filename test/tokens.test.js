@@ -17,7 +17,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('create/list/update/delete automation tokens', async () => {

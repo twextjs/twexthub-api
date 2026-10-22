@@ -27,7 +27,26 @@ export function newToken() {
 
 const LAST_USED_THROTTLE_MS = 60_000;
 
-export function makeAuthenticate(sql) {
+// The columns a request needs from the authenticated account. Selected rather
+// than read whole so a password hash never rides along in memory.
+const SESSION_USER_FIELDS = {
+  id: true,
+  namespace: true,
+  display_name: true,
+  role: true,
+  has_published: true,
+  terms_accepted_version: true,
+  created_at: true,
+  bio: true,
+  website: true,
+  github: true,
+  avatar_url: true,
+  banner_url: true,
+  avatar_blob_digest: true,
+  banner_blob_digest: true,
+};
+
+export function makeAuthenticate(db) {
   return async function authenticate(req, res, next) {
     const header = req.headers.authorization;
     // \S after \s+ keeps the match unambiguous (the two can't share a
@@ -39,7 +58,7 @@ export function makeAuthenticate(sql) {
     }
 
     const hash = hashToken(match[1].trim());
-    const found = await lookupToken(sql, hash);
+    const found = await lookupToken(db, hash);
     req.auth = found
       ? {
           user: found.user,
@@ -50,10 +69,20 @@ export function makeAuthenticate(sql) {
       : null;
 
     if (found && shouldTouchLastUsed(found.lastUsedAt)) {
-      const table = found.tokenType === 'session' ? 'sessions' : 'automation_tokens';
       try {
-        await sql`UPDATE ${sql(table)} SET last_used_at = now() WHERE id = ${found.tokenId}`;
+        if (found.tokenType === 'session') {
+          await db.sessions.update({
+            where: { id: found.tokenId },
+            data: { last_used_at: new Date() },
+          });
+        } else {
+          await db.automation_tokens.update({
+            where: { id: found.tokenId },
+            data: { last_used_at: new Date() },
+          });
+        }
       } catch (error) {
+        const table = found.tokenType === 'session' ? 'sessions' : 'automation_tokens';
         console.warn(
           `failed to update last_used_at for ${table} ${found.tokenId}: ${error.message}`,
         );
@@ -68,44 +97,36 @@ function shouldTouchLastUsed(lastUsedAt) {
   return Date.now() - lastUsedAt.getTime() >= LAST_USED_THROTTLE_MS;
 }
 
-async function lookupToken(sql, hash) {
-  const [session] = await sql`
-    SELECT s.id AS token_id, s.expires_at, s.last_used_at,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
-      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
-    FROM sessions s
-    JOIN users u ON u.id = s.user_id
-    WHERE s.token_hash = ${hash}
-  `;
+async function lookupToken(db, hash) {
+  const session = await db.sessions.findUnique({
+    where: { token_hash: hash },
+    include: { users: { select: SESSION_USER_FIELDS } },
+  });
   if (session) {
     if (session.expires_at && session.expires_at <= new Date()) return null;
     return {
-      tokenId: session.token_id,
+      tokenId: session.id,
       tokenType: 'session',
       // A session is the full authority of the account, so it satisfies every
       // scope. Copied per request so nothing can widen them in place.
       scopes: [...SCOPES],
       lastUsedAt: session.last_used_at,
-      user: session,
+      user: session.users,
     };
   }
 
-  const [token] = await sql`
-    SELECT t.id AS token_id, t.expires_at, t.last_used_at, t.scopes,
-      u.id, u.namespace, u.display_name, u.role, u.has_published, u.terms_accepted_version, u.created_at,
-      u.bio, u.website, u.github, u.avatar_url, u.banner_url, u.avatar_blob_digest, u.banner_blob_digest
-    FROM automation_tokens t
-    JOIN users u ON u.id = t.user_id
-    WHERE t.token_hash = ${hash}
-  `;
+  const token = await db.automation_tokens.findUnique({
+    where: { token_hash: hash },
+    include: { users: { select: SESSION_USER_FIELDS } },
+  });
   if (!token) return null;
   if (token.expires_at && token.expires_at <= new Date()) return null;
   return {
-    tokenId: token.token_id,
+    tokenId: token.id,
     tokenType: 'automation',
     scopes: token.scopes,
     lastUsedAt: token.last_used_at,
-    user: token,
+    user: token.users,
   };
 }
 
@@ -118,9 +139,10 @@ export function requireAuth(req, res, next) {
 // owners all stand behind its row. So one test answers both: the direct match
 // covers the account case, and the organization_owners branch covers @org/id
 // with no row per person, as well as an organization holding a row on somebody
-// else's extension.
-export async function isExtensionOwner(sql, user, namespace, id) {
-  const [row] = await sql`
+// else's extension. Two relations, an OR, and an EXISTS: kept as one raw read
+// rather than smuggled into two typed round trips.
+export async function isExtensionOwner(db, user, namespace, id) {
+  const rows = await db.$queryRaw`
     SELECT 1
     FROM extension_owners o
     WHERE o.namespace = ${namespace} AND o.extension_id = ${id}
@@ -131,29 +153,31 @@ export async function isExtensionOwner(sql, user, namespace, id) {
           WHERE g.org_id = o.owner_id AND g.user_id = ${user.id}
         )
       )
+    LIMIT 1
   `;
-  return Boolean(row);
+  return rows.length > 0;
 }
 
 // Whether an account may act for an organization by name. Used where the
 // organization is identified by its namespace rather than by an ownership row:
 // accepting an invitation addressed to it, for one.
-export async function isOrganizationOwner(sql, user, namespace) {
-  const [row] = await sql`
+export async function isOrganizationOwner(db, user, namespace) {
+  const rows = await db.$queryRaw`
     SELECT 1
     FROM organization_owners g
     JOIN users org ON org.id = g.org_id
     WHERE g.user_id = ${user.id} AND org.namespace = ${namespace}
       AND org.kind = 'organization'
+    LIMIT 1
   `;
-  return Boolean(row);
+  return rows.length > 0;
 }
 
 // The same answer as a list, for the places that need it as one: the listing
 // filter carries the namespaces rather than testing each row, and an
 // organization holding an invitation needs to know it is waiting.
-export async function organizationsOwnedBy(sql, user) {
-  const rows = await sql`
+export async function organizationsOwnedBy(db, user) {
+  const rows = await db.$queryRaw`
     SELECT org.namespace
     FROM organization_owners g
     JOIN users org ON org.id = g.org_id
@@ -196,7 +220,7 @@ export function requireAdmin(req, res, next) {
   next();
 }
 
-export function makeRequireTerms(sql) {
+export function makeRequireTerms(db) {
   let cachedVersion;
   let cachedAt = 0;
 
@@ -204,7 +228,10 @@ export function makeRequireTerms(sql) {
     requireAuth(req, res, () => {});
     const now = Date.now();
     if (cachedVersion === undefined || cachedVersion === null || now - cachedAt > 60_000) {
-      const [terms] = await sql`SELECT version FROM legal_documents WHERE kind = 'terms'`;
+      const terms = await db.legal_documents.findUnique({
+        where: { kind: 'terms' },
+        select: { version: true },
+      });
       cachedVersion = terms ? terms.version : null;
       cachedAt = now;
     }

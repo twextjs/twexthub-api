@@ -14,17 +14,19 @@ export function requireObjectBody(req) {
 // A session is created in two places: when an account signs up and when it
 // signs in. Both hand back the plaintext token, because the row only holds its
 // hash, and it is shown exactly once.
-export async function createSession(sql, userId, sessionTtlMs) {
+export async function createSession(db, userId, sessionTtlMs) {
   const token = newToken();
-  const [row] = await sql`
-    INSERT INTO sessions (user_id, token_hash, expires_at)
-    VALUES (${userId}, ${hashToken(token)}, ${new Date(Date.now() + sessionTtlMs)})
-    RETURNING *
-  `;
-  return { token, session: row };
+  const session = await db.sessions.create({
+    data: {
+      user_id: userId,
+      token_hash: hashToken(token),
+      expires_at: new Date(Date.now() + sessionTtlMs),
+    },
+  });
+  return { token, session };
 }
 
-export async function resolveTargetUser(sql, req) {
+export async function resolveTargetUser(db, req) {
   const me = req.auth.user;
   const ns = req.query.namespace;
   if (ns === undefined) return me;
@@ -34,7 +36,7 @@ export async function resolveTargetUser(sql, req) {
   if (me.role !== 'admin' && ns !== me.namespace) {
     throw forbidden('Only an admin can inspect another account.');
   }
-  const [user] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+  const user = await db.users.findUnique({ where: { namespace: ns } });
   if (!user) throw notFound('No such user.');
   return user;
 }

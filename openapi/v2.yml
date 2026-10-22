@@ -1,7 +1,7 @@
 openapi: '3.1.0'
 info:
   title: TwextHub API
-  version: '2.0.0'
+  version: '2.1.0'
   license:
     name: Apache-2.0
     identifier: Apache-2.0
@@ -93,6 +93,210 @@ paths:
               schema: { $ref: '#/components/schemas/User' }
         '401': { $ref: '#/components/responses/Unauthorized' }
 
+  # ------------------------------------------ Authentication & sign-in
+  /auth:
+    get:
+      summary: Describe how this instance signs users in
+      operationId: getAuthDescriptor
+      tags: [Open]
+      security: []
+      description: >
+        Public, because a sign-in page reads it before anybody has signed in.
+        `passwordAuth` is false when the instance is in identity-provider-only
+        mode; `oidc` is null when no provider is configured.
+      responses:
+        '200':
+          description: The available sign-in methods
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthDescriptor' }
+
+  /auth/oidc/authorize:
+    get:
+      summary: Start a sign-in through the identity provider
+      operationId: oidcAuthorize
+      tags: [Open]
+      security: []
+      description: >
+        Begins the Authorization Code + PKCE flow. A browser (an `Accept:
+        text/html` request) is redirected to the provider; any other client gets
+        the URL to send the browser to itself. `returnTo` is where the browser
+        is sent once the provider hands it back — a path on this instance, or an
+        absolute URL naming an origin in `cors.allowedOrigins`. Anything else is
+        refused, so an authorize link cannot be turned into a way to hand a
+        freshly minted sign-in code to another origin.
+      parameters:
+        - $ref: '#/components/parameters/ReturnTo'
+      responses:
+        '200':
+          description: The authorization URL to send the browser to
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorizationUrl]
+                properties:
+                  authorizationUrl: { type: string, format: uri }
+        '302':
+          description: A browser is redirected to the provider
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/oidc/callback:
+    get:
+      summary: Where the provider sends the browser back
+      operationId: oidcCallback
+      tags: [Open]
+      security: []
+      description: >
+        Completes the sign-in or link started by an authorize request. The
+        `state` is single-use: the callback that claims it is the only one that
+        can, so a replayed callback is refused. A browser is redirected to
+        `returnTo` with a one-time `oidc_code` (and `oidc_linked=1` for a link)
+        or `oidc_error=<slug>` on failure; an API client receives the session
+        directly. The session token is never carried in a URL.
+      parameters:
+        - name: code
+          in: query
+          schema: { type: string }
+        - name: state
+          in: query
+          required: true
+          schema: { type: string }
+        - name: error
+          in: query
+          schema: { type: string }
+      responses:
+        '201':
+          description: The session that was created, its owner, and its one-time token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '200':
+          description: The identity that was linked
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [linked]
+                properties:
+                  linked: { type: boolean }
+                  issuer: { type: string }
+                  subject: { type: string }
+        '302':
+          description: A browser is redirected back to `returnTo`
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '502': { $ref: '#/components/responses/BadGateway' }
+
+  /auth/oidc/exchange:
+    post:
+      summary: Trade a browser's one-time code for a session
+      operationId: oidcExchange
+      tags: [Open]
+      security: []
+      description: >
+        The browser cannot read an Authorization header off a redirect, so the
+        callback sends it back with a one-time `code`; this trades that code for
+        the session. The code is consumed on first use.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        '201':
+          description: The session, its owner, and its one-time token
+          headers:
+            Location:
+              description: The new session's own URL
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /auth/oidc/link:
+    post:
+      summary: Link the identity provider to the signed-in account
+      operationId: oidcLink
+      tags: [Userspace]
+      description: >
+        Starts an authorize round-trip whose callback links the provider
+        identity to the caller's account. Session-authenticated rather than open
+        to automation tokens: linking is a lasting change to how the account can
+        be signed into, which a credential should not be able to make.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                returnTo: { type: string }
+      responses:
+        '200':
+          description: The authorization URL to send the browser to
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authorizationUrl]
+                properties:
+                  authorizationUrl: { type: string, format: uri }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/oidc/identities:
+    get:
+      summary: List the account's linked identities
+      operationId: listOidcIdentities
+      tags: [Userspace]
+      description: >
+        Not gated on the provider still being configured: an operator who turns
+        the provider off leaves accounts needing a way to see and remove what
+        they had linked.
+      responses:
+        '200':
+          description: The caller's linked identities
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/OidcIdentity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/oidc/identities/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, pattern: '^[0-9]+$' }
+        description: Identity id, as a string so it survives a JSON parser that keeps numbers exact.
+    delete:
+      summary: Remove a linked identity from the account
+      operationId: deleteOidcIdentity
+      tags: [Userspace]
+      description: >
+        Removing the last way into an account is refused with a `409`: a
+        password that still works counts as a way in, but one the instance no
+        longer accepts does not.
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
   # ---------------------------------------------- Sessions & automation tokens
   /sessions:
     post:
@@ -102,11 +306,13 @@ paths:
       security: []
       description: >
         Signing in is creating a session, so the credentials ride in the body
-        rather than a namespace in the path. The plaintext `token` is shown
+        rather than a namespace in the path.         The plaintext `token` is shown
         once here and never again: only its hash is stored. A namespace that
         belongs to an organization is a `403` here rather than a bad password:
         an organization has no credentials of its own, and is acted for by its
-        owners instead.
+        owners instead. When the instance is in identity-provider-only mode
+        (`auth.oidc.required`), password sign-in is refused with a `403`.
+
       requestBody:
         required: true
         content:
@@ -332,7 +538,9 @@ paths:
         Creating the account and signing in are the same act, so the response
         carries a session too: the new user, the session opened for it, and the
         plaintext token to use for both. The first account ever created becomes
-        an admin.
+        an admin. When the instance is in identity-provider-only mode
+        (`auth.oidc.required`), registration here is refused with a `403` and
+        accounts are made by signing in through the provider instead.
       requestBody:
         required: true
         content:
@@ -494,6 +702,134 @@ paths:
         cascade would leave the organization unmanageable.
       responses:
         '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /users/{namespace}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+    get:
+      summary: List an account's webhooks
+      operationId: listAccountWebhooks
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. Secrets are never returned here; they
+        are returned once, by the create call.
+      responses:
+        '200':
+          description: The namespace-wide webhooks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Webhook' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      summary: Create an account webhook
+      operationId: createAccountWebhook
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. A webhook on an account watches every
+        extension in its namespace instead of one `id`, so a publish, yank,
+        deprecation, rejection or owner change under `@{namespace}` reaches it
+        without registering anything per extension. The per-extension webhooks
+        at `/@{namespace}/{id}/webhooks` are a separate collection and are
+        unaffected; the two do not see each other. A namespace that belongs to
+        an organization is a `403`; manage its webhooks at
+        `/orgs/{namespace}/webhooks`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookInput' }
+      responses:
+        '201':
+          description: Created, with the signing secret returned once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookCreated' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /users/{namespace}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+    delete:
+      summary: Delete an account webhook
+      operationId: deleteAccountWebhook
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. An id belonging to a per-extension
+        webhook is a `404` here, since the two collections do not overlap.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{namespace}/webhooks/{webhookId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+    get:
+      summary: List an account webhook's recent deliveries
+      operationId: listAccountWebhookDeliveries
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. Newest first, cursor-paged. The signed
+        body is not returned; `payload` is the object it was built from.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/WebhookDelivery' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{namespace}/webhooks/{webhookId}/deliveries/{deliveryId}/redeliver:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    post:
+      summary: Redeliver an account webhook's delivery
+      operationId: redeliverAccountWebhook
+      tags: [Userspace]
+      description: >
+        The account itself, or an admin. Queues the same signed body as another
+        delivery instead of resetting the original, so the attempt it re-runs
+        stays in the log. A delivery still queued or in flight is a `409`.
+      responses:
+        '202':
+          description: Queued for delivery
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
@@ -963,10 +1299,7 @@ paths:
   /orgs/{namespace}/webhooks/{webhookId}:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
-      - name: webhookId
-        in: path
-        required: true
-        schema: { type: integer }
+      - $ref: '#/components/parameters/WebhookIdPath'
     delete:
       summary: Delete an organization webhook
       operationId: deleteOrganizationWebhook
@@ -979,6 +1312,63 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/webhooks/{webhookId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+    get:
+      summary: List an organization webhook's recent deliveries
+      operationId: listOrganizationWebhookDeliveries
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Newest first, cursor-paged. The signed body is
+        not returned; `payload` is the object it was built from.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/WebhookDelivery' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /orgs/{namespace}/webhooks/{webhookId}/deliveries/{deliveryId}/redeliver:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    post:
+      summary: Redeliver an organization webhook's delivery
+      operationId: redeliverOrganizationWebhook
+      tags: [Userspace]
+      description: >
+        Any owner, or an admin. Queues the same signed body as another delivery
+        instead of resetting the original, so the attempt it re-runs stays in
+        the log. A delivery still queued or in flight is a `409`.
+      responses:
+        '202':
+          description: Queued for delivery
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /orgs/{namespace}/avatar:
     parameters:
@@ -1518,6 +1908,11 @@ paths:
         SemVer first, so the first entry is the one a range resolution
         returns. Yanked versions are excluded, and a range that matches
         nothing is an empty list rather than a `404`.
+
+        An owner or an admin may instead name a `status` to read the
+        versions in that state -- most often `pending` for the build awaiting
+        review, or `rejected` for one that was turned down, whose
+        `rejectionReason` then rides along on the version.
       parameters:
         - name: range
           in: query
@@ -1526,6 +1921,14 @@ paths:
             A SemVer range such as `^1.2` or `>=2.0.0 <3`. Omit it for every
             version. A prerelease satisfies a range only when the range names
             one or is `*`.
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [staging, pending, published, rejected, yanked, deprecated]
+          description: >
+            Return only versions in this state. Owner or admin only, because
+            the states outside the default pair are unpublished.
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Dir'
         - $ref: '#/components/parameters/Limit'
@@ -1542,6 +1945,8 @@ paths:
                     type: array
                     items: { $ref: '#/components/schemas/VersionInfo' }
                   _links: { $ref: '#/components/schemas/PageLinks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
     post:
@@ -1553,7 +1958,8 @@ paths:
         `package.json` with `"type": "module"`). The server validates the
         manifest against the path, compiles the project in a sandboxed child
         process (no network, bounded filesystem/memory/time), and stages the
-        result for moderation; the build log rides along in the queue entry.
+        result for moderation; the build log and any static-analysis `warnings`
+        ride along in the queue entry.
         A caller's first-ever publish is held as `pending`; once an admin
         approves it, later publishes go straight to `published`. Only one
         `pending`/`staging` version per owner may exist at a time. The
@@ -2031,10 +2437,7 @@ paths:
     parameters:
       - $ref: '#/components/parameters/NamespacePath'
       - $ref: '#/components/parameters/ExtensionIdPath'
-      - name: webhookId
-        in: path
-        required: true
-        schema: { type: integer }
+      - $ref: '#/components/parameters/WebhookIdPath'
     delete:
       summary: Delete a webhook
       operationId: deleteWebhook
@@ -2044,6 +2447,63 @@ paths:
         '204': { description: Deleted }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/webhooks/{webhookId}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+    get:
+      summary: List a webhook's recent deliveries
+      operationId: listWebhookDeliveries
+      tags: [Userspace]
+      description: >
+        Owner or admin. Newest first, cursor-paged. The signed body is not
+        returned; `payload` is the object it was built from.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated deliveries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/WebhookDelivery' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /@{namespace}/{id}/webhooks/{webhookId}/deliveries/{deliveryId}/redeliver:
+    parameters:
+      - $ref: '#/components/parameters/NamespacePath'
+      - $ref: '#/components/parameters/ExtensionIdPath'
+      - $ref: '#/components/parameters/WebhookIdPath'
+      - $ref: '#/components/parameters/DeliveryIdPath'
+    post:
+      summary: Redeliver a delivery
+      operationId: redeliverWebhook
+      tags: [Userspace]
+      description: >
+        Owner or admin. Queues the same signed body as another delivery instead
+        of resetting the original, so the attempt it re-runs stays in the log.
+        A delivery still queued or in flight is a `409`.
+      responses:
+        '202':
+          description: Queued for delivery
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
 
   /@{namespace}/{id}/versions/{version}:
     parameters:
@@ -2546,6 +3006,16 @@ components:
       schema:
         type: string
         description: SemVer string, a dist-tag name, or the literal `latest`.
+    WebhookIdPath:
+      name: webhookId
+      in: path
+      required: true
+      schema: { type: integer }
+    DeliveryIdPath:
+      name: deliveryId
+      in: path
+      required: true
+      schema: { type: integer }
     NotificationId:
       name: id
       in: path
@@ -2567,6 +3037,16 @@ components:
       in: query
       schema: { $ref: '#/components/schemas/Namespace' }
       description: Only extensions published under this account or organization.
+    ReturnTo:
+      name: returnTo
+      in: query
+      required: false
+      schema: { type: string }
+      description: >
+        Where the browser is sent once the provider hands it back. Either a path
+        on this instance (starting with a single `/`), or an absolute URL whose
+        origin is this instance's `publicBaseUrl` or one listed in
+        `cors.allowedOrigins`. Anything else is refused with a `422`.
 
   schemas:
     Namespace:
@@ -2668,6 +3148,47 @@ components:
         createdAt: { type: string, format: date-time }
         expiresAt: { type: string, format: date-time, description: '7 days after creation.' }
         lastUsedAt: { type: ['string', 'null'], format: date-time }
+
+    AuthSession:
+      type: object
+      required: [session, user, token]
+      properties:
+        session: { $ref: '#/components/schemas/Session' }
+        user: { $ref: '#/components/schemas/User' }
+        token:
+          type: string
+          description: The bearer token secret. Shown only in this one response.
+
+    AuthDescriptor:
+      type: object
+      required: [passwordAuth, oidc]
+      properties:
+        passwordAuth:
+          type: boolean
+          description: Whether namespace/password sign-in and registration are offered.
+        oidc:
+          type: ['object', 'null']
+          description: The configured identity provider, or `null` when none is set.
+          required: [issuer, required]
+          properties:
+            issuer: { type: string, format: uri }
+            required:
+              type: boolean
+              description: When true, the provider is the only way to get an account.
+
+    OidcIdentity:
+      type: object
+      required: [id, issuer, subject, email, createdAt]
+      properties:
+        id: { type: string }
+        issuer: { type: string, format: uri }
+        subject:
+          type: string
+          description: The provider's `sub`. Together with `issuer` this is what identifies the account.
+        email:
+          type: ['string', 'null']
+          description: Kept for reference only; accounts are never matched or linked by email.
+        createdAt: { type: string, format: date-time }
 
     AutomationToken:
       type: object
@@ -2855,7 +3376,7 @@ components:
 
     VersionInfo:
       type: object
-      required: [namespace, id, version, status, createdAt]
+      required: [namespace, id, version, status, createdAt, downloads]
       properties:
         namespace: { $ref: '#/components/schemas/Namespace' }
         id: { $ref: '#/components/schemas/ExtensionId' }
@@ -2866,11 +3387,19 @@ components:
         description: { type: string }
         author: { type: ['string', 'null'] }
         createdAt: { type: string, format: date-time }
+        downloads:
+          type: integer
+          description: >
+            Total recorded downloads of this version. Zero for a version that
+            has never been downloaded, including one still awaiting review.
         publishedAt:
           { type: string, format: date-time, description: Absent while pending or rejected. }
         deprecation:
           type: ['string', 'null']
           description: Deprecation message; present only while status is `deprecated`.
+        rejectionReason:
+          type: ['string', 'null']
+          description: Why a reviewer turned the version down; present only while status is `rejected`.
         dist:
           type: object
           description: Absent while pending or rejected.
@@ -2882,6 +3411,23 @@ components:
         buildLog:
           type: string
           description: Compiler output; returned on publish responses and queue entries.
+        warnings:
+          type: array
+          description: >
+            Static-analysis hits from the uploaded source, present only when the
+            scan found something. Returned on the publish response and on
+            review queue entries so an author or reviewer can see the risky
+            patterns without reading every file.
+          items:
+            type: object
+            required: [code, file, line, message]
+            properties:
+              code:
+                type: string
+                enum: [fetch, eval, new-function, xmlhttprequest, insecure-http]
+              file: { type: string, description: Path within the uploaded tarball. }
+              line: { type: integer }
+              message: { type: string }
         sourceUrl:
           type: string
           format: uri
@@ -2986,6 +3532,45 @@ components:
             secret:
               { type: string, description: Signs deliveries; shown only in this one response. }
 
+    WebhookDelivery:
+      type: object
+      description: >
+        One event scheduled for one webhook, with the outcome of its attempts so
+        far. `attempt` counts attempts on this row, so it starts at `0`; a
+        retry writes the same row and raises it. The signed body is not part of
+        the representation.
+      required:
+        [
+          id,
+          event,
+          payload,
+          attempt,
+          max_attempts,
+          status,
+          next_attempt_at,
+          last_error,
+          created_at,
+          updated_at,
+        ]
+      properties:
+        id: { type: integer }
+        event: { $ref: '#/components/schemas/WebhookEvent' }
+        payload: { type: object, description: The event payload the signed body was built from. }
+        attempt: { type: integer, description: Attempts made so far. }
+        max_attempts:
+          { type: integer, description: Attempts allowed before the delivery is failed. }
+        status:
+          type: string
+          enum: [pending, delivering, retrying, delivered, failed]
+        next_attempt_at:
+          type: ['string', 'null']
+          format: date-time
+          description: When the next attempt is due, or `null` once it has finished.
+        last_error:
+          { type: ['string', 'null'], description: Why the last attempt failed, or `null`. }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
     AuditEntry:
       type: object
       required: [id, actor, action, target, detail, createdAt]
@@ -3002,7 +3587,8 @@ components:
             extension.transfer.withdraw, extension.transfer,
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,
-            organization.webhook.create, organization.webhook.delete
+            organization.webhook.create, organization.webhook.delete,
+            account.webhook.create, account.webhook.delete
         target:
           type: object
           properties:
@@ -3119,6 +3705,9 @@ components:
       description: Rate limit exceeded
       headers:
         Retry-After: { schema: { type: integer } }
+      content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
+    BadGateway:
+      description: The identity provider could not be reached, refused the request, or returned a token that failed verification
       content: { application/problem+json: { schema: { $ref: '#/components/schemas/Problem' } } }
 
   securitySchemes:

@@ -1,0 +1,360 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "./generated/client"
+  previewFeatures = ["driverAdapters", "relationJoins", "partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model audit_log {
+  id                  BigInt   @id @default(autoincrement())
+  actor_id            BigInt?
+  actor_namespace     String
+  action              String
+  target_namespace    String?
+  target_extension_id String?
+  target_version      String?
+  detail              Json     @default("{}")
+  created_at          DateTime @default(now()) @db.Timestamptz(6)
+  users               users?   @relation(fields: [actor_id], references: [id], onUpdate: NoAction)
+
+  @@index([created_at(sort: Desc)], map: "audit_log_created_idx")
+  @@index([target_namespace, target_extension_id], map: "audit_log_target_idx", where: raw("(target_namespace IS NOT NULL)"))
+}
+
+model automation_tokens {
+  id           BigInt    @id @default(autoincrement())
+  user_id      BigInt
+  name         String
+  token_hash   String    @unique
+  scopes       Json      @default("[]")
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at   DateTime? @db.Timestamptz(6)
+  last_used_at DateTime? @db.Timestamptz(6)
+  users        users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id])
+}
+
+model dist_tags {
+  owner_id     BigInt
+  namespace    String
+  extension_id String
+  tag          String
+  version      String
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+  users        users    @relation(fields: [owner_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([namespace, extension_id, tag])
+  @@index([namespace, extension_id], map: "dist_tags_namespace_id_idx")
+  @@index([namespace, extension_id, version], map: "dist_tags_version_idx")
+}
+
+model download_events {
+  id           BigInt   @id @default(autoincrement())
+  namespace    String
+  extension_id String
+  version      String
+  user_agent   String   @default("")
+  ip_hash      String?
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([namespace, extension_id, created_at], map: "download_events_ns_id_ts_idx")
+  @@index([namespace, extension_id, version], map: "download_events_version_idx")
+}
+
+model extension_daily_downloads {
+  namespace          String
+  extension_id       String
+  day                DateTime @db.Date
+  total_downloads    BigInt   @default(0)
+  distinct_downloads BigInt   @default(0)
+
+  @@id([namespace, extension_id, day])
+}
+
+model extension_owner_invites {
+  namespace                                       String
+  extension_id                                    String
+  owner_id                                        BigInt
+  invited_by                                      BigInt?
+  created_at                                      DateTime @default(now()) @db.Timestamptz(6)
+  users_extension_owner_invites_invited_byTousers users?   @relation("extension_owner_invites_invited_byTousers", fields: [invited_by], references: [id], onUpdate: NoAction)
+  users_extension_owner_invites_owner_idTousers   users    @relation("extension_owner_invites_owner_idTousers", fields: [owner_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([namespace, extension_id, owner_id])
+  @@index([owner_id], map: "extension_owner_invites_owner_idx")
+}
+
+model extension_owners {
+  owner_id                               BigInt
+  namespace                              String
+  extension_id                           String
+  added_by                               BigInt?
+  added_at                               DateTime @default(now()) @db.Timestamptz(6)
+  users_extension_owners_added_byTousers users?   @relation("extension_owners_added_byTousers", fields: [added_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_extension_owners_owner_idTousers users    @relation("extension_owners_owner_idTousers", fields: [owner_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([namespace, extension_id, owner_id])
+  @@index([owner_id], map: "extension_owners_owner_idx")
+}
+
+model extension_redirects {
+  from_namespace    String
+  from_extension_id String
+  to_namespace      String
+  to_extension_id   String
+  created_at        DateTime @default(now()) @db.Timestamptz(6)
+
+  @@id([from_namespace, from_extension_id])
+  @@index([to_namespace, to_extension_id], map: "extension_redirects_to_idx")
+}
+
+model extension_transfers {
+  namespace    String
+  extension_id String
+  to_namespace String
+  requested_by BigInt
+  created_at   DateTime @default(now()) @db.Timestamptz(6)
+  users        users    @relation(fields: [requested_by], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([namespace, extension_id, to_namespace])
+  @@index([to_namespace], map: "extension_transfers_to_idx")
+}
+
+model extension_version_daily_downloads {
+  namespace          String
+  extension_id       String
+  version            String
+  day                DateTime @db.Date
+  total_downloads    BigInt   @default(0)
+  distinct_downloads BigInt   @default(0)
+
+  @@id([namespace, extension_id, version, day])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model legal_documents {
+  kind       String   @id
+  version    Int      @default(1)
+  body       String
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model notifications {
+  id         BigInt    @id @default(autoincrement())
+  user_id    BigInt
+  kind       String
+  message    String
+  payload    Json      @default("{}")
+  read_at    DateTime? @db.Timestamptz(6)
+  created_at DateTime  @default(now()) @db.Timestamptz(6)
+  users      users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id], map: "notifications_unread_idx", where: raw("(read_at IS NULL)"))
+  @@index([user_id, id(sort: Desc)], map: "notifications_user_id_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model oidc_flows {
+  id                 BigInt   @id @default(autoincrement())
+  kind               String
+  state_hash         String   @unique
+  flow_secret_hash   String
+  code_verifier      String
+  nonce              String
+  user_id            BigInt?
+  return_to          String?
+  exchange_code_hash String?  @unique
+  created_at         DateTime @default(now()) @db.Timestamptz(6)
+  expires_at         DateTime @db.Timestamptz(6)
+  users              users?   @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model organization_owners {
+  org_id                                             BigInt
+  org_kind                                           String   @default("organization")
+  user_id                                            BigInt
+  user_kind                                          String   @default("user")
+  added_by                                           BigInt?
+  added_at                                           DateTime @default(now()) @db.Timestamptz(6)
+  users_organization_owners_added_byTousers          users?   @relation("organization_owners_added_byTousers", fields: [added_by], references: [id], onUpdate: NoAction)
+  users_organization_owners_org_id_org_kindTousers   users    @relation("organization_owners_org_id_org_kindTousers", fields: [org_id, org_kind], references: [id, kind], onDelete: Cascade, onUpdate: NoAction)
+  users_organization_owners_user_id_user_kindTousers users    @relation("organization_owners_user_id_user_kindTousers", fields: [user_id, user_kind], references: [id, kind], onDelete: Cascade, onUpdate: NoAction)
+
+  @@id([org_id, user_id])
+  @@index([user_id], map: "organization_owners_user_idx")
+}
+
+model rate_limit_entries {
+  id           BigInt   @id @default(autoincrement())
+  bucket       String
+  window_start DateTime @db.Timestamptz(6)
+  count        Int      @default(1)
+
+  @@unique([bucket, window_start])
+  @@index([window_start])
+}
+
+model schema_migrations {
+  version    String   @id
+  applied_at DateTime @default(now()) @db.Timestamptz(6)
+}
+
+model sessions {
+  id           BigInt    @id @default(autoincrement())
+  user_id      BigInt
+  token_hash   String    @unique
+  created_at   DateTime  @default(now()) @db.Timestamptz(6)
+  expires_at   DateTime  @db.Timestamptz(6)
+  last_used_at DateTime? @db.Timestamptz(6)
+  users        users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at])
+  @@index([user_id])
+}
+
+model user_identities {
+  id         BigInt   @id @default(autoincrement())
+  user_id    BigInt
+  issuer     String
+  subject    String
+  email      String?
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  users      users    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([issuer, subject])
+  @@index([user_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model users {
+  id                                                                BigInt                    @id @default(autoincrement())
+  namespace                                                         String                    @unique
+  display_name                                                      String
+  password_hash                                                     String?
+  role                                                              String                    @default("normal")
+  has_published                                                     Boolean                   @default(false)
+  terms_accepted_version                                            Int?
+  created_at                                                        DateTime                  @default(now()) @db.Timestamptz(6)
+  bio                                                               String                    @default("")
+  website                                                           String?
+  github                                                            String?
+  avatar_url                                                        String?
+  banner_url                                                        String?
+  blob_bytes                                                        BigInt                    @default(0)
+  max_blob_bytes                                                    BigInt?
+  avatar_blob_digest                                                String?
+  avatar_content_type                                               String?
+  avatar_bytes                                                      Int?
+  banner_blob_digest                                                String?
+  banner_content_type                                               String?
+  banner_bytes                                                      Int?
+  kind                                                              String                    @default("user")
+  audit_log                                                         audit_log[]
+  automation_tokens                                                 automation_tokens[]
+  dist_tags                                                         dist_tags[]
+  extension_owner_invites_extension_owner_invites_invited_byTousers extension_owner_invites[] @relation("extension_owner_invites_invited_byTousers")
+  extension_owner_invites_extension_owner_invites_owner_idTousers   extension_owner_invites[] @relation("extension_owner_invites_owner_idTousers")
+  extension_owners_extension_owners_added_byTousers                 extension_owners[]        @relation("extension_owners_added_byTousers")
+  extension_owners_extension_owners_owner_idTousers                 extension_owners[]        @relation("extension_owners_owner_idTousers")
+  extension_transfers                                               extension_transfers[]
+  notifications                                                     notifications[]
+  oidc_flows                                                        oidc_flows[]
+  organization_owners_organization_owners_added_byTousers           organization_owners[]     @relation("organization_owners_added_byTousers")
+  organization_owners_organization_owners_org_id_org_kindTousers    organization_owners[]     @relation("organization_owners_org_id_org_kindTousers")
+  organization_owners_organization_owners_user_id_user_kindTousers  organization_owners[]     @relation("organization_owners_user_id_user_kindTousers")
+  sessions                                                          sessions[]
+  user_identities                                                   user_identities[]
+  versions                                                          versions[]
+
+  @@unique([id, kind])
+  @@index([avatar_blob_digest], map: "users_avatar_blob_idx", where: raw("(avatar_blob_digest IS NOT NULL)"))
+  @@index([banner_blob_digest], map: "users_banner_blob_idx", where: raw("(banner_blob_digest IS NOT NULL)"))
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model versions {
+  id                  BigInt    @id @default(autoincrement())
+  owner_id            BigInt    @unique(map: "versions_one_pending_idx", where: raw("(status = ANY (ARRAY['staging'::text, 'pending'::text]))"))
+  namespace           String
+  extension_id        String
+  version             String
+  status              String    @default("staging")
+  name                String
+  license             String
+  description         String    @default("")
+  author              String?
+  color1              String?
+  color2              String?
+  color3              String?
+  blob_path           String
+  search_text         String    @default("")
+  created_at          DateTime  @default(now()) @db.Timestamptz(6)
+  published_at        DateTime? @db.Timestamptz(6)
+  rejection_reason    String?
+  blob_digest         String?
+  blob_size           BigInt?
+  blob_sha512         String?
+  deprecation_message String?
+  source_path         String?
+  source_digest       String?
+  source_size         BigInt    @default(0)
+  build_log           String?
+  build_error         String?
+  is_unsandboxed      Boolean?
+  warnings            Json      @default("[]")
+  users               users     @relation(fields: [owner_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([owner_id, extension_id, version])
+  @@index([blob_digest])
+  @@index([namespace, extension_id], map: "versions_namespace_id_idx")
+  @@index([namespace, extension_id, status, published_at(sort: Desc)], map: "versions_public_listing_idx", where: raw("(status = ANY (ARRAY['published'::text, 'deprecated'::text]))"))
+  @@index([search_text(ops: raw("gin_trgm_ops"))], map: "versions_search_text_trgm_idx", type: Gin)
+  @@index([source_digest], where: raw("(source_digest IS NOT NULL)"))
+  @@index([status, created_at])
+  @@index([status, published_at(sort: Desc)])
+}
+
+model webhook_deliveries {
+  id              BigInt    @id @default(autoincrement())
+  webhook_id      BigInt
+  event           String
+  payload         Json
+  body            String
+  signature       String
+  attempt         Int       @default(0)
+  max_attempts    Int       @default(4)
+  status          String    @default("pending")
+  next_attempt_at DateTime? @db.Timestamptz(6)
+  last_error      String?
+  created_at      DateTime  @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime  @default(now()) @db.Timestamptz(6)
+  webhooks        webhooks  @relation(fields: [webhook_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([status, next_attempt_at], map: "webhook_deliveries_due_idx", where: raw("(status = ANY (ARRAY['pending'::text, 'retrying'::text, 'delivering'::text]))"))
+  @@index([webhook_id, id(sort: Desc)], map: "webhook_deliveries_webhook_id_idx")
+}
+
+model webhooks {
+  id                   BigInt               @id @default(autoincrement())
+  namespace            String
+  extension_id         String?
+  url                  String
+  secret               String
+  events               String[]             @default([])
+  active               Boolean              @default(true)
+  last_delivery_status String?
+  last_delivery_at     DateTime?            @db.Timestamptz(6)
+  created_at           DateTime             @default(now()) @db.Timestamptz(6)
+  webhook_deliveries   webhook_deliveries[]
+
+  @@index([namespace, extension_id], map: "webhooks_extension_idx")
+  @@index([namespace], where: raw("active"))
+}

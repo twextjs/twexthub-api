@@ -13,13 +13,13 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 // Publishes several extensions under fresh namespaces. Returns their metadata
@@ -64,8 +64,8 @@ async function seedExtensions() {
   return { ns, owner, admin };
 }
 
-async function downloadNs(sqlClient, ns, id) {
-  await sqlClient`
+async function downloadNs(client, ns, id) {
+  await client.$executeRaw`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash)
     VALUES (${ns}, ${id}, '1.0.0', 'test', '10.0.0.9')
   `;
@@ -74,10 +74,10 @@ async function downloadNs(sqlClient, ns, id) {
 test('sort=downloads orders by cumulative downloads', async () => {
   const { ns } = await seedExtensions();
   // zoo gets the most downloads, alpaca none
-  for (let i = 0; i < 3; i += 1) await downloadNs(sql, ns, 'zoo');
-  await downloadNs(sql, ns, 'minterm');
+  for (let i = 0; i < 3; i += 1) await downloadNs(db, ns, 'zoo');
+  await downloadNs(db, ns, 'minterm');
   const { aggregateDayLoader } = await import('../src/metrics.js');
-  await aggregateDayLoader(sql)(new Date());
+  await aggregateDayLoader(db)(new Date());
 
   const r = await request(app).get(apiPath('/extensions?sort=downloads')).expect(200);
   const ids = r.body.data.filter((e) => e.namespace === ns).map((e) => e.id);
@@ -132,10 +132,10 @@ test('paginating with sort=name walks every page', async () => {
 
 test('paginating with sort=downloads walks every page', async () => {
   const { ns } = await seedExtensions();
-  for (let i = 0; i < 3; i += 1) await downloadNs(sql, ns, 'zoo');
-  await downloadNs(sql, ns, 'minterm');
+  for (let i = 0; i < 3; i += 1) await downloadNs(db, ns, 'zoo');
+  await downloadNs(db, ns, 'minterm');
   const { aggregateDayLoader } = await import('../src/metrics.js');
-  await aggregateDayLoader(sql)(new Date());
+  await aggregateDayLoader(db)(new Date());
 
   const { rows } = await followPages(app, apiPath('/extensions?sort=downloads&limit=2'));
   assert.deepEqual(
@@ -156,9 +156,9 @@ test('paginating a tied sort key keeps every row', async () => {
 
 test('badge splits into one-fact endpoints that are each far narrower', async () => {
   const { ns } = await seedExtensions();
-  await downloadNs(sql, ns, 'zoo');
+  await downloadNs(db, ns, 'zoo');
   const { aggregateDayLoader } = await import('../src/metrics.js');
-  await aggregateDayLoader(sql)(new Date());
+  await aggregateDayLoader(db)(new Date());
 
   const svgWidth = (markup) => Number(markup.match(/^<svg[^>]*\bwidth="([\d.]+)"/)[1]);
   const get = async (path) => {
@@ -188,7 +188,7 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
   // download count is set to a realistic figure first, because a badge whose
   // message reads "1 download" flatters the combined width -- the digits and the
   // word "downloads" are most of what makes it long.
-  await sql`UPDATE extension_daily_downloads SET total_downloads = 48213
+  await db.$executeRaw`UPDATE extension_daily_downloads SET total_downloads = 48213
             WHERE namespace = ${ns} AND extension_id = 'zoo'`;
   const combined = await get(apiPath(`/badge/@${ns}/zoo`));
   const combinedWidth = svgWidth(combined);
@@ -227,9 +227,9 @@ test('badge splits into one-fact endpoints that are each far narrower', async ()
 
 test('badge renders an SVG with version, downloads, and license', async () => {
   const { ns } = await seedExtensions();
-  await downloadNs(sql, ns, 'zoo');
+  await downloadNs(db, ns, 'zoo');
   const { aggregateDayLoader } = await import('../src/metrics.js');
-  await aggregateDayLoader(sql)(new Date());
+  await aggregateDayLoader(db)(new Date());
 
   const r = await request(app)
     .get(apiPath(`/badge/@${ns}/zoo`))
@@ -405,9 +405,9 @@ test('badge colour is derived per package, stays put, and stays readable', async
     'kilo',
     'lima',
   ];
-  const owner = await sql`SELECT owner_id FROM versions WHERE namespace = ${ns} LIMIT 1`;
+  const owner = await db.$queryRaw`SELECT owner_id FROM versions WHERE namespace = ${ns} LIMIT 1`;
   for (const name of names) {
-    await sql`INSERT INTO versions (owner_id, namespace, extension_id, version, status, name,
+    await db.$executeRaw`INSERT INTO versions (owner_id, namespace, extension_id, version, status, name,
                                    license, description, blob_path, published_at)
                VALUES (${owner[0].owner_id}, ${ns}, ${name}, '1.0.0', 'published', ${name},
                        'MIT', '', ${`badge/${name}.tgz`}, now())`;

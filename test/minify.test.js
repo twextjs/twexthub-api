@@ -16,14 +16,14 @@ import { blobPathFor } from '../src/blobs.js';
 import { minifyCode } from '../src/minify.js';
 
 let app;
-let sql;
+let db;
 let config;
 before(async () => {
-  ({ app, sql, config } = await boot());
+  ({ app, db, config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('minifyCode strips comments and whitespace but keeps property names', async () => {
@@ -84,7 +84,7 @@ test('approval minifies a pending build and updates digest, integrity, size, and
   const code = '// REMOVE_ME_SENTINEL_ABC\nreturn 42;';
 
   await publishProject(app, ns, 'mini', owner.token, { code });
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest, blob_size, source_size FROM versions
     WHERE namespace = ${ns} AND extension_id = 'mini'
   `;
@@ -98,7 +98,7 @@ test('approval minifies a pending build and updates digest, integrity, size, and
     .send({ status: 'approved' })
     .expect(200);
 
-  const [after] = await sql`
+  const [after] = await db.$queryRaw`
     SELECT blob_digest, blob_size FROM versions
     WHERE namespace = ${ns} AND extension_id = 'mini'
   `;
@@ -113,7 +113,7 @@ test('approval minifies a pending build and updates digest, integrity, size, and
   assert.equal(createHash('sha256').update(afterBytes).digest('hex'), after.blob_digest);
 
   // The publish charged the unminified build; approval refunded the shaved bytes.
-  const [account] = await sql`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
+  const [account] = await db.$queryRaw`SELECT blob_bytes FROM users WHERE namespace = ${ns}`;
   assert.equal(Number(account.blob_bytes), Number(after.blob_size) + Number(row.source_size));
 
   // The old unminified file is no longer referenced and is swept.
@@ -140,7 +140,7 @@ test('a trusted account publishes minified output directly', async () => {
   });
   assert.equal(published.body.status, 'published', 'trusted publishes skip review');
 
-  const [row] = await sql`
+  const [row] = await db.$queryRaw`
     SELECT blob_digest FROM versions
     WHERE namespace = ${ns} AND extension_id = 'mini'
   `;

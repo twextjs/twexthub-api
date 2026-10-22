@@ -1,12 +1,13 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { BLOB_GC_LOCK_KEY, blobPathFor, removeBlobIfUnused, sha256Hex } from './blobs.js';
+import { withLocks } from './locks.js';
 
 // Blob garbage collection: a file under blobs/ whose digest no row references is
 // deleted. Sources are handled by removeSourceIfUnused at the call sites that
 // already know the digest; this sweep only covers blobs so a crash between the
 // DB delete and the file removal cannot strand bytes.
-export async function gcBlobs(sql, dataDir) {
+export async function gcBlobs(db, dataDir) {
   const blobsDir = path.join(dataDir, 'blobs');
 
   // The transaction covers the two queries and nothing else. Nearly all of this
@@ -16,23 +17,27 @@ export async function gcBlobs(sql, dataDir) {
   // everything cascading from it. The advisory lock only keeps two instances off
   // the same directory at once. The unlink is a separate locked step per
   // candidate, so releasing it before the walk costs nothing.
-  const referenced = await sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
-    const known = await tx`SELECT DISTINCT blob_digest FROM versions WHERE blob_digest IS NOT NULL`;
+  const referenced = await withLocks(db, [BLOB_GC_LOCK_KEY], async (tx) => {
+    const known = await tx.versions.findMany({
+      where: { blob_digest: { not: null } },
+      distinct: ['blob_digest'],
+      select: { blob_digest: true },
+    });
     // Uploaded profile images share this store, so their digests have to be in
     // the referenced set too. Leaving them out would make every avatar on the
     // instance collectable the first time the sweep ran.
-    const profiles = await tx`
-      SELECT avatar_blob_digest AS digest, banner_blob_digest AS banner
-      FROM users
-      WHERE avatar_blob_digest IS NOT NULL OR banner_blob_digest IS NOT NULL
-    `;
-    const referenced = new Set(known.map((row) => row.blob_digest));
+    const profiles = await tx.users.findMany({
+      where: {
+        OR: [{ avatar_blob_digest: { not: null } }, { banner_blob_digest: { not: null } }],
+      },
+      select: { avatar_blob_digest: true, banner_blob_digest: true },
+    });
+    const set = new Set(known.map((row) => row.blob_digest));
     for (const row of profiles) {
-      if (row.digest) referenced.add(row.digest);
-      if (row.banner) referenced.add(row.banner);
+      if (row.avatar_blob_digest) set.add(row.avatar_blob_digest);
+      if (row.banner_blob_digest) set.add(row.banner_blob_digest);
     }
-    return referenced;
+    return set;
   });
 
   // A blob lands on disk before the versions row that references it, so a file
@@ -62,7 +67,7 @@ export async function gcBlobs(sql, dataDir) {
       // it is not, and a publish can claim an aged file in between. The final
       // check and the unlink both happen under the lock in the helper, so a
       // digest that gained a reference since the snapshot is kept.
-      if (await removeBlobIfUnused(sql, { dataDir }, digest, null)) {
+      if (await removeBlobIfUnused(db, { dataDir }, digest, null)) {
         removed += 1;
       }
     }
@@ -81,8 +86,9 @@ export function getIntegrityErrors() {
   return integrityErrorCount;
 }
 
-export async function scrubBlobs(sql, dataDir) {
-  const rows = await sql`
+export async function scrubBlobs(db, dataDir) {
+  // One row per digest, newest id first. `DISTINCT ON` has no typed equivalent.
+  const rows = await db.$queryRaw`
     SELECT DISTINCT ON (blob_digest) namespace, extension_id, version, blob_digest
     FROM versions
     WHERE blob_digest IS NOT NULL AND status <> 'staging'
@@ -112,7 +118,7 @@ export async function scrubBlobs(sql, dataDir) {
   return problems;
 }
 
-export function makeMaintenanceJob({ sql, config }) {
+export function makeMaintenanceJob({ db, config }) {
   let timer = null;
   let running = false;
 
@@ -128,12 +134,12 @@ export function makeMaintenanceJob({ sql, config }) {
     if (running) return;
     running = true;
     try {
-      const removed = await gcBlobs(sql, config.dataDir);
+      const removed = await gcBlobs(db, config.dataDir);
       if (removed > 0) console.log(`blob gc removed ${removed} orphaned file(s)`);
 
       if (!gcOnly && Date.now() - lastScrub >= scrubIntervalMs) {
         lastScrub = Date.now();
-        const problems = await scrubBlobs(sql, config.dataDir);
+        const problems = await scrubBlobs(db, config.dataDir);
         for (const problem of problems) {
           console.warn(
             `blob integrity ${problem.problem}: ${problem.namespace}/${problem.extension_id}@${problem.version}`,

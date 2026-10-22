@@ -13,14 +13,14 @@ import {
 } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function makeOrg() {
@@ -90,8 +90,8 @@ describe('an invitation grants nothing until it is accepted', () => {
     const candidate = await signupAndAccept(app, uniqNs());
     await invite(ns, 'hello', candidate.user.namespace, owner.token);
     const attempts = [];
-    await sql.begin(async (tx) => {
-      await tx`LOCK TABLE extension_owner_invites IN SHARE MODE`;
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`LOCK TABLE extension_owner_invites IN SHARE MODE`;
       for (let i = 0; i < 2; i += 1) {
         attempts.push(
           request(app)
@@ -103,10 +103,13 @@ describe('an invitation grants nothing until it is accepted', () => {
       // Hold both DELETEs until each request has read the pending invitation.
       const deadline = Date.now() + 5000;
       while (true) {
-        const [{ waiting }] = await sql`
+        // The statement text is the client's own, which spells the table
+        // quoted, so the match is on the name rather than on a phrase around
+        // it.
+        const [{ waiting }] = await db.$queryRaw`
           SELECT count(*)::int AS waiting FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
-            AND query LIKE '%DELETE FROM extension_owner_invites%'
+            AND query LIKE '%extension_owner_invites%'
         `;
         if (waiting === 2) break;
         assert.ok(Date.now() < deadline, 'both acceptances should reach the claim');
@@ -349,7 +352,8 @@ describe('withdrawing', () => {
       .set(bearer(owner.token))
       .expect(204);
 
-    const [{ count }] = await sql`SELECT count(*)::int AS count FROM extension_owner_invites`;
+    const [{ count }] =
+      await db.$queryRaw`SELECT count(*)::int AS count FROM extension_owner_invites`;
     assert.equal(count, 0);
     await request(app)
       .post(apiPath(`/@${ns}/hello/owners/${candidate.user.namespace}/accept`))

@@ -17,7 +17,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('sessions lists only the current session for a user', async () => {

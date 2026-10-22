@@ -6,18 +6,18 @@ import { acceptTerms, apiPath, bearer, boot, signup, uniqNs } from './helpers.mj
 // This file deliberately never seeds legal_documents (resetDb does), so it
 // exercises a fresh registry where no terms or privacy document exists.
 
-let app, sql;
+let app, db;
 before(async () => {
-  ({ app, sql } = await boot());
+  ({ app, db } = await boot());
 });
 beforeEach(async () => {
-  await sql.unsafe(`
+  await db.$executeRawUnsafe(`
     TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications, users, legal_documents
     RESTART IDENTITY CASCADE
   `);
 });
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('a fresh registry can create its first legal documents, then gates writes', async () => {

@@ -5,7 +5,7 @@ import { fieldErrors, forbidden, notFound } from '../errors.js';
 import { automationTokenToObject } from '../serialize.js';
 import { requireObjectBody, resolveTargetUser } from './shared.js';
 
-export function makeTokensRouter({ sql, config }) {
+export function makeTokensRouter({ db, config }) {
   const router = Router();
 
   // Mints, edits and revocations are a permission in their own right rather
@@ -34,18 +34,19 @@ export function makeTokensRouter({ sql, config }) {
   }
 
   router.get('/', manageTokens, async (req, res) => {
-    const user = await resolveTargetUser(sql, req);
+    const user = await resolveTargetUser(db, req);
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
 
-    const rows = await sql`
-      SELECT * FROM automation_tokens
-      WHERE user_id = ${user.id}
-        ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
-      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
-      LIMIT ${limit + 1}
-    `;
+    const rows = await db.automation_tokens.findMany({
+      where: {
+        user_id: user.id,
+        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+      },
+      orderBy: { id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
 
     res.json(
       keysetPage(req, rows, {
@@ -89,11 +90,15 @@ export function makeTokensRouter({ sql, config }) {
     const expiresAt =
       expiresInDays !== undefined ? new Date(Date.now() + expiresInDays * 86_400_000) : null;
 
-    const [row] = await sql`
-      INSERT INTO automation_tokens (user_id, name, token_hash, scopes, expires_at)
-      VALUES (${req.auth.user.id}, ${name}, ${hashToken(token)}, ${sql.json(cleanScopes)}, ${expiresAt})
-      RETURNING *
-    `;
+    const row = await db.automation_tokens.create({
+      data: {
+        user_id: req.auth.user.id,
+        name,
+        token_hash: hashToken(token),
+        scopes: cleanScopes,
+        expires_at: expiresAt,
+      },
+    });
 
     res.status(201).json({ ...automationTokenToObject(row), token });
   });
@@ -106,10 +111,10 @@ export function makeTokensRouter({ sql, config }) {
     }
 
     const targetId = Number(req.params.id);
-    const [row] =
+    const row =
       Number.isSafeInteger(targetId) && targetId > 0
-        ? await sql`SELECT * FROM automation_tokens WHERE id = ${targetId}`
-        : [];
+        ? await db.automation_tokens.findUnique({ where: { id: targetId } })
+        : null;
     if (!row) throw notFound();
     if (Number(row.user_id) !== Number(req.auth.user.id) && req.auth.user.role !== 'admin') {
       throw forbidden("Only an admin can modify another account's tokens.");
@@ -124,23 +129,10 @@ export function makeTokensRouter({ sql, config }) {
       ]);
     }
     const patch = {};
-    const columns = [];
-    if (name !== undefined) {
-      patch.name = name;
-      columns.push('name');
-    }
-    if (scopes !== undefined) {
-      patch.scopes = sql.json(validateScopes(scopes, req.auth.scopes));
-      columns.push('scopes');
-    }
+    if (name !== undefined) patch.name = name;
+    if (scopes !== undefined) patch.scopes = validateScopes(scopes, req.auth.scopes);
 
-    const [updated] = await sql`
-      UPDATE automation_tokens
-      SET ${sql(patch, columns)}
-      WHERE id = ${targetId}
-      RETURNING *
-    `;
-    if (!updated) throw notFound();
+    const updated = await db.automation_tokens.update({ where: { id: targetId }, data: patch });
 
     res.json(automationTokenToObject(updated));
   });
@@ -153,21 +145,21 @@ export function makeTokensRouter({ sql, config }) {
     if (req.auth.tokenType !== 'automation') {
       throw forbidden('This is a session; use DELETE /sessions/current to end it.');
     }
-    await sql`DELETE FROM automation_tokens WHERE id = ${req.auth.tokenId}`;
+    await db.automation_tokens.deleteMany({ where: { id: req.auth.tokenId } });
     res.status(204).end();
   });
 
   router.delete('/:id', manageTokens, async (req, res) => {
     const targetId = Number(req.params.id);
-    const [row] =
+    const row =
       Number.isSafeInteger(targetId) && targetId > 0
-        ? await sql`SELECT * FROM automation_tokens WHERE id = ${targetId}`
-        : [];
+        ? await db.automation_tokens.findUnique({ where: { id: targetId } })
+        : null;
     if (!row) throw notFound();
     if (Number(row.user_id) !== Number(req.auth.user.id) && req.auth.user.role !== 'admin') {
       throw forbidden("Only an admin can revoke another account's tokens.");
     }
-    await sql`DELETE FROM automation_tokens WHERE id = ${targetId}`;
+    await db.automation_tokens.deleteMany({ where: { id: targetId } });
     res.status(204).end();
   });
 

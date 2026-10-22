@@ -9,6 +9,7 @@ import { makeCors } from './cors.js';
 import { HttpError, notFound, errorHandler } from './errors.js';
 import { normalizeApiRoot } from './util.js';
 import { makeMeRouter } from './routes/me.js';
+import { makeAuthRouter } from './routes/auth.js';
 import { makeSessionsRouter } from './routes/sessions.js';
 import { makeTokensRouter } from './routes/tokens.js';
 import { makeUsersRouter } from './routes/users.js';
@@ -21,7 +22,7 @@ import { makeAdminRouter } from './routes/admin.js';
 
 export function createApp(opts = {}) {
   const config = opts.config ?? loadConfig();
-  const sql = opts.sql ?? createDb(config);
+  const db = opts.db ?? createDb(config);
 
   const app = express();
   app.disable('x-powered-by');
@@ -53,15 +54,22 @@ export function createApp(opts = {}) {
     const isPublish = req.method === 'POST' && /\/@[^/?]+\/[^/?]+\/versions\/?$/.test(req.path);
     return isPublish ? next() : jsonBody(req, res, next);
   });
-  app.use(makeAuthenticate(sql));
+  app.use(makeAuthenticate(db));
 
-  const rateLimiter = makeRateLimiter(sql, config);
-  const termsGate = makeRequireTerms(sql);
+  const rateLimiter = makeRateLimiter(db, config);
+  const termsGate = makeRequireTerms(db);
   // How configStorage decides whether the config file survives a recreate. Left
   // unset the route reads the real mount table; a test passes its own so the
   // answer does not depend on where the checkout happens to be running.
   const storageProbe = opts.storageProbe ?? {};
-  const shared = { sql, config, rateLimiter, termsGate, storageProbe };
+  const shared = {
+    db,
+    config,
+    rateLimiter,
+    termsGate,
+    storageProbe,
+    resolveTarget: opts.resolveTarget,
+  };
 
   const apiRoot = normalizeApiRoot(config.apiRoot);
   const root = apiRoot ? `/${apiRoot}` : '';
@@ -72,6 +80,7 @@ export function createApp(opts = {}) {
   const discovery = makeDiscoveryRouter(shared);
 
   app.use(mount('/sessions'), makeSessionsRouter(shared));
+  app.use(mount('/auth'), makeAuthRouter(shared));
   app.use(mount('/tokens'), makeTokensRouter(shared));
   app.use(mount('/users'), makeUsersRouter(shared));
   app.use(mount('/orgs'), makeOrgsRouter({ ...shared, listExtensions: discovery.listExtensions }));
@@ -85,5 +94,5 @@ export function createApp(opts = {}) {
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
 
-  return { app, sql, config, rateLimiter, telemetry };
+  return { app, db, config, rateLimiter, telemetry };
 }

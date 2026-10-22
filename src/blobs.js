@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, rename, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { withLocks } from './locks.js';
 
 export const BLOB_GC_LOCK_KEY = 'blob-gc';
 
@@ -102,32 +103,38 @@ export async function storeBlobBuffer(dataDir, buffer) {
 //
 // Resolves to true when the file was removed, false when it was kept or was
 // already gone. Callers that report how much they collected need the difference.
-export async function removeBlobIfUnused(sql, config, digest, exceptId) {
+// The keeper check and the unlink, without taking the GC lock: for callers that
+// already hold it and must keep it across a delete and the filesystem cleanup
+// that follows it. `tx` is the client or an interactive-transaction client.
+export async function removeBlobIfUnusedInTx(tx, config, digest, exceptId) {
   if (!digest) return false;
-  return sql.begin(async (tx) => {
-    await tx`SELECT pg_advisory_xact_lock(hashtextextended(${BLOB_GC_LOCK_KEY}, 0))`;
-    // `id != NULL` is never true in SQL, so a null exceptId has to drop the
-    // clause entirely rather than filter on it.
-    const exclude =
-      exceptId === null || exceptId === undefined ? sql`` : sql`AND id != ${exceptId}`;
-    const [keeper] = await tx`
-      SELECT 1 FROM versions
-      WHERE blob_digest = ${digest} ${exclude}
-      LIMIT 1
-    `;
-    if (keeper) return false;
-    const [profile] = await tx`
-      SELECT 1 FROM users
-      WHERE avatar_blob_digest = ${digest} OR banner_blob_digest = ${digest}
-      LIMIT 1
-    `;
-    if (profile) return false;
-    try {
-      await unlink(blobPathFor(config.dataDir, digest));
-      return true;
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      return false;
-    }
+  // `id != NULL` is never true in SQL, so a null exceptId has to drop the
+  // clause entirely rather than filter on it.
+  const keeper = await tx.versions.findFirst({
+    where: {
+      blob_digest: digest,
+      ...(exceptId === null || exceptId === undefined ? {} : { id: { not: exceptId } }),
+    },
+    select: { id: true },
   });
+  if (keeper) return false;
+  const profile = await tx.users.findFirst({
+    where: { OR: [{ avatar_blob_digest: digest }, { banner_blob_digest: digest }] },
+    select: { id: true },
+  });
+  if (profile) return false;
+  try {
+    await unlink(blobPathFor(config.dataDir, digest));
+    return true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return false;
+  }
+}
+
+export async function removeBlobIfUnused(db, config, digest, exceptId) {
+  if (!digest) return false;
+  return withLocks(db, [BLOB_GC_LOCK_KEY], (tx) =>
+    removeBlobIfUnusedInTx(tx, config, digest, exceptId),
+  );
 }

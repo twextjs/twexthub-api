@@ -13,15 +13,15 @@ import {
 import { aggregateDayLoader } from '../src/metrics.js';
 
 let app;
-let sql;
+let db;
 let aggregateDay;
 before(async () => {
-  ({ app, sql } = await boot());
-  aggregateDay = aggregateDayLoader(sql);
+  ({ app, db } = await boot());
+  aggregateDay = aggregateDayLoader(db);
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function publishAs(ns, nsToken, adminToken, id, version, code) {
@@ -42,6 +42,90 @@ async function makePublished() {
   return { ownerNs, ownerToken: ob.token, adminToken: ab.token };
 }
 
+// The route records the download after it answers, so the event lands a moment
+// after the response. Poll until the expected count shows up rather than guess
+// at a delay.
+async function waitForEvents(namespace, id, count) {
+  for (let i = 0; i < 50; i += 1) {
+    const [row] = await db.$queryRaw`
+      SELECT COUNT(*)::int AS n FROM download_events
+      WHERE namespace = ${namespace} AND extension_id = ${id}
+    `;
+    if (row.n >= count) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`timed out waiting for ${count} download events`);
+}
+
+test('downloads roll up per version and appear on version objects', async () => {
+  const adminNs = uniqNs();
+  const admin = await signupAndAccept(app, adminNs);
+  const ownerNs = uniqNs();
+  const owner = await signupAndAccept(app, ownerNs);
+  await publishAs(ownerNs, owner.token, admin.token, 'hello', '1.0.0', '// v1');
+  // The owner's first publish was approved, so this one lands published.
+  await publishProject(app, ownerNs, 'hello', owner.token, { version: '2.0.0', code: '// v2' });
+  await publishProject(app, ownerNs, 'hello', owner.token, { version: '3.0.0', code: '// v3' });
+
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
+    .expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
+    .expect(200);
+  await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/2.0.0/download`))
+    .expect(200);
+  await waitForEvents(ownerNs, 'hello', 3);
+
+  await aggregateDay(new Date());
+
+  // The per-version rollup keeps the versions apart...
+  const buckets = await db.$queryRaw`
+    SELECT version, total_downloads FROM extension_version_daily_downloads
+    WHERE namespace = ${ownerNs} AND extension_id = 'hello'
+    ORDER BY version
+  `;
+  assert.deepEqual(
+    buckets.map((b) => [b.version, Number(b.total_downloads)]),
+    [
+      ['1.0.0', 2],
+      ['2.0.0', 1],
+    ],
+  );
+
+  // ...and each single-version object reports its own count, not the total.
+  const v1 = await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0`))
+    .expect(200);
+  assert.equal(v1.body.downloads, 2);
+  const v2 = await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions/2.0.0`))
+    .expect(200);
+  assert.equal(v2.body.downloads, 1);
+
+  // The extension detail carries the count on every version, and the total on
+  // the summary.
+  const detail = await request(app)
+    .get(apiPath(`/@${ownerNs}/hello`))
+    .expect(200);
+  assert.equal(Number(detail.body.downloads), 3);
+  const byVersion = new Map(detail.body.versions.map((v) => [v.version, v.downloads]));
+  assert.equal(byVersion.get('1.0.0'), 2);
+  assert.equal(byVersion.get('2.0.0'), 1);
+  // A version nothing downloaded reports zero rather than being absent.
+  assert.equal(byVersion.get('3.0.0'), 0);
+
+  // The version list carries it too.
+  const list = await request(app)
+    .get(apiPath(`/@${ownerNs}/hello/versions`))
+    .expect(200);
+  const listed = new Map(list.body.data.map((v) => [v.version, v.downloads]));
+  assert.equal(listed.get('1.0.0'), 2);
+  assert.equal(listed.get('2.0.0'), 1);
+  assert.equal(listed.get('3.0.0'), 0);
+});
+
 test('downloads are counted, surfaced, and feed trending', async () => {
   const { ownerNs, adminToken } = await makePublished();
   const w = await signupAndAccept(app, uniqNs());
@@ -61,7 +145,7 @@ test('downloads are counted, surfaced, and feed trending', async () => {
     .get(apiPath(`/@${ownerNs}/hello/versions/latest/download`))
     .expect(200);
 
-  await sql.unsafe(`
+  await db.$executeRawUnsafe(`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, ip_hash, created_at)
     SELECT e.namespace, e.extension_id, '1.0.0', 'x', '10.0.0.1',
            now() - INTERVAL '3 days'
@@ -79,7 +163,7 @@ test('downloads are counted, surfaced, and feed trending', async () => {
 
   // the published extension's daily bucket only counts aggregations run so far
   await aggregateDay(new Date());
-  const [bucket] = await sql`
+  const [bucket] = await db.$queryRaw`
     SELECT * FROM extension_daily_downloads
     WHERE namespace = ${ownerNs} AND extension_id = 'hello'
   `;
@@ -110,7 +194,7 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
   const today = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
   const sixDaysAgo = new Date(today - 6 * 86400000);
   const sevenDaysAgo = new Date(today - 7 * 86400000);
-  await sql`
+  await db.$executeRaw`
     INSERT INTO download_events (namespace, extension_id, version, user_agent, created_at)
     VALUES (${ownerNs}, 'recent', '1.0.0', 'recent', ${sixDaysAgo.toISOString()}),
            (${ownerNs}, 'old', '1.0.0', 'old', ${sevenDaysAgo.toISOString()})
@@ -127,15 +211,15 @@ test('trending includes six UTC days ago but excludes seven UTC days ago', async
 test('trending selects a deprecated version when a newer version was yanked', async () => {
   const { ownerNs, ownerToken } = await makePublished();
   await publishProject(app, ownerNs, 'hello', ownerToken, { version: '2.0.0' });
-  await sql`
+  await db.$executeRaw`
     UPDATE versions SET status = 'deprecated'
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '1.0.0'
   `;
-  await sql`
+  await db.$executeRaw`
     UPDATE versions SET status = 'yanked'
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND version = '2.0.0'
   `;
-  await sql`
+  await db.$executeRaw`
     INSERT INTO extension_daily_downloads (namespace, extension_id, day, total_downloads)
     VALUES (${ownerNs}, 'hello', CURRENT_DATE, 3)
   `;
@@ -154,7 +238,7 @@ test('a download records a keyed hash of the address, never the address', async 
     .get(apiPath(`/@${ownerNs}/hello/versions/1.0.0/download`))
     .expect(200);
 
-  const readEvents = () => sql`
+  const readEvents = () => db.$queryRaw`
     SELECT ip_hash FROM download_events
     WHERE namespace = ${ownerNs} AND extension_id = 'hello'
     ORDER BY id
@@ -175,7 +259,7 @@ test('a download records a keyed hash of the address, never the address', async 
 
   // The hash still serves its purpose: one client, one distinct download.
   await aggregateDay(new Date());
-  const [day] = await sql`
+  const [day] = await db.$queryRaw`
     SELECT distinct_downloads, total_downloads FROM extension_daily_downloads
     WHERE namespace = ${ownerNs} AND extension_id = 'hello' AND day = CURRENT_DATE
   `;

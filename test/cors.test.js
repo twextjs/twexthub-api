@@ -14,7 +14,7 @@ before(async () => {
   ({ app } = await boot());
 });
 after(async () => {
-  await (await boot()).sql.end();
+  await (await boot()).db.$disconnect();
 });
 
 test('cross-origin reads are allowed with the wildcard by default', async () => {

@@ -13,7 +13,7 @@ import {
 import { apiPath, bearer, boot, resetDb, signupAndAccept, uniqNs } from './helpers.mjs';
 
 let app;
-let sql;
+let db;
 let config;
 let configFile;
 let originalConfigPath;
@@ -42,7 +42,7 @@ before(async () => {
   // here. A bind mount over the temp directory is what an operator mounting
   // the config into a volume gets, so the probe says that instead of reading
   // the host's mount table.
-  ({ app, sql, config } = await boot(
+  ({ app, db, config } = await boot(
     {},
     { storageProbe: { mountInfo: volumeMount(dirname(configFile)), container: true } },
   ));
@@ -58,12 +58,12 @@ beforeEach(async () => {
 });
 after(async () => {
   config.configPath = originalConfigPath;
-  await sql.end();
+  await db.$disconnect();
 });
 
 async function admin() {
   const account = await signupAndAccept(app, uniqNs());
-  await sql`UPDATE users SET role = 'admin' WHERE namespace = ${account.user.namespace}`;
+  await db.$executeRaw`UPDATE users SET role = 'admin' WHERE namespace = ${account.user.namespace}`;
   return account;
 }
 
@@ -71,7 +71,7 @@ async function admin() {
 // an ordinary account says so rather than depending on the signup order.
 async function ordinary() {
   const account = await signupAndAccept(app, uniqNs());
-  await sql`UPDATE users SET role = 'normal' WHERE namespace = ${account.user.namespace}`;
+  await db.$executeRaw`UPDATE users SET role = 'normal' WHERE namespace = ${account.user.namespace}`;
   return account;
 }
 
@@ -444,7 +444,7 @@ describe('PUT /admin/config', () => {
     // Read without waiting: the route awaits this write, so the row is committed
     // by the time the response lands. A fire-and-forget audit would leave the
     // read to race the insert.
-    const [row] = await sql`
+    const [row] = await db.$queryRaw`
       SELECT action, detail FROM audit_log WHERE action = 'config.update'
     `;
     assert.ok(row, 'expected a config.update audit row');

@@ -20,6 +20,12 @@ export const DEFAULTS = {
   auth: {
     sessionTtlDays: 7,
     scrypt: { N: 16384, r: 8, p: 1 },
+    oidc: {
+      issuer: null,
+      clientId: null,
+      clientSecret: null,
+      required: false,
+    },
   },
   rateLimits: {
     loginAttemptsPerWindow: 5,
@@ -98,6 +104,10 @@ const ENV_OVERRIDES = [
   ['database.url', 'TWEXTHUB_DATABASE_URL'],
   ['database.maxConnections', 'TWEXTHUB_DATABASE_MAX_CONNECTIONS'],
   ['auth.sessionTtlDays', 'TWEXTHUB_SESSION_TTL_DAYS'],
+  ['auth.oidc.issuer', 'TWEXTHUB_OIDC_ISSUER'],
+  ['auth.oidc.clientId', 'TWEXTHUB_OIDC_CLIENT_ID'],
+  ['auth.oidc.clientSecret', 'TWEXTHUB_OIDC_CLIENT_SECRET'],
+  ['auth.oidc.required', 'TWEXTHUB_OIDC_REQUIRED'],
   ['rateLimits.loginAttemptsPerWindow', 'TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW'],
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
@@ -157,6 +167,41 @@ function coerceAllowedOrigins(raw) {
     .filter(Boolean);
 }
 
+// An identity provider configured only halfway, or required but absent, is an
+// instance where nobody can sign in -- so it fails here rather than at the
+// first sign-in attempt. A bare issuer also gets normalized (no trailing
+// slash, since discovery is fetched at issuer + /.well-known/...) and the
+// client id is stringified, because YAML spells a numeric id as a number.
+function normalizeOidc(config) {
+  const oidc = config.auth.oidc;
+  if (oidc.issuer !== null && oidc.issuer !== undefined && oidc.issuer !== '') {
+    if (typeof oidc.issuer !== 'string') {
+      throw new Error(`auth.oidc.issuer must be a URL string (got ${JSON.stringify(oidc.issuer)})`);
+    }
+    oidc.issuer = oidc.issuer.replace(/\/+$/, '');
+    const parsed = URL.parse(oidc.issuer);
+    if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+      throw new Error(`auth.oidc.issuer must be an http or https URL (got "${oidc.issuer}")`);
+    }
+  } else {
+    oidc.issuer = null;
+  }
+  oidc.clientId =
+    oidc.clientId === null || oidc.clientId === undefined ? null : String(oidc.clientId);
+  oidc.clientSecret =
+    oidc.clientSecret === null || oidc.clientSecret === undefined || oidc.clientSecret === ''
+      ? null
+      : String(oidc.clientSecret);
+  if ((oidc.issuer || oidc.clientId || oidc.clientSecret) && !(oidc.issuer && oidc.clientId)) {
+    throw new Error('auth.oidc.issuer and auth.oidc.clientId must be set together');
+  }
+  if (oidc.required && !oidc.issuer) {
+    throw new Error(
+      'auth.oidc.required is true, but auth.oidc.issuer and auth.oidc.clientId are not both set',
+    );
+  }
+}
+
 function applyEnvOverrides(config) {
   for (const [key, envName] of ENV_OVERRIDES) {
     const raw = process.env[envName];
@@ -190,6 +235,7 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
   const config = mergeDeep(DEFAULTS, raw);
   applyEnvOverrides(config);
   config.apiRoot = normalizeApiRoot(config.apiRoot);
+  normalizeOidc(config);
   if (!config.database.url) {
     throw new Error(
       `database.url is required (set it in ${configPath}, pass a file via --config, or set TWEXTHUB_DATABASE_URL)`,

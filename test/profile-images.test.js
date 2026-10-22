@@ -40,11 +40,11 @@ const gifBytes = () => TINY_GIF;
 const jpegBytes = () => TINY_JPEG;
 
 let app;
-let sql;
+let db;
 let config;
 
 before(async () => {
-  ({ app, sql, config } = await boot({
+  ({ app, db, config } = await boot({
     // A small ceiling keeps the over-limit case cheap; the rest of the limits
     // section stays at its production default.
     limits: { maxProfileImageBytes: 4096 },
@@ -52,7 +52,7 @@ before(async () => {
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 const tokens = new Map();
@@ -71,7 +71,8 @@ const put = (ns, kind, body, type) =>
     .set('Content-Type', type)
     .send(body);
 
-const avatarDigest = (ns) => sql`SELECT avatar_blob_digest FROM users WHERE namespace = ${ns}`;
+const avatarDigest = (ns) =>
+  db.$queryRaw`SELECT avatar_blob_digest FROM users WHERE namespace = ${ns}`;
 
 // The published URL names the exact bytes, so it carries a short version token
 // taken from the content digest. Reading it back from the row keeps a test from
@@ -82,7 +83,12 @@ const asPath = (url) => url.replace(config.publicBaseUrl, '');
 
 const versioned = async (ns, kind) => {
   const column = kind === 'avatar' ? 'avatar_blob_digest' : 'banner_blob_digest';
-  const [row] = await sql`SELECT ${sql(column)} AS digest FROM users WHERE namespace = ${ns}`;
+  // `column` is one of two literal names, so the identifier is safe to paste;
+  // Prisma cannot bind an identifier as a parameter.
+  const [row] = await db.$queryRawUnsafe(
+    `SELECT ${column} AS digest FROM users WHERE namespace = $1`,
+    ns,
+  );
   assert.ok(row.digest, `expected ${ns} to have a ${kind} upload`);
   return `${config.publicBaseUrl}${apiPath(`/users/${ns}/${kind}`)}?v=${row.digest.slice(0, 16)}`;
 };
@@ -113,7 +119,7 @@ describe('uploading a profile image', () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.avatarUrl, await versioned(ns, 'avatar'));
 
-    const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
     assert.match(row.avatar_blob_digest, /^[0-9a-f]{64}$/);
     assert.equal(row.avatar_content_type, 'image/png');
     assert.equal(row.avatar_bytes, TINY_PNG.length);
@@ -149,7 +155,7 @@ describe('uploading a profile image', () => {
     const res = await put(ns, 'avatar', pngBytes(), 'image/png');
 
     const [row] =
-      await sql`SELECT avatar_url, avatar_blob_digest FROM users WHERE namespace = ${ns}`;
+      await db.$queryRaw`SELECT avatar_url, avatar_blob_digest FROM users WHERE namespace = ${ns}`;
     assert.equal(row.avatar_url, 'https://cdn.example/old.png');
     assert.ok(row.avatar_blob_digest);
     // The upload is what a visitor is shown, not the linked file.
@@ -252,7 +258,7 @@ describe('stored size', () => {
   // What ended up on disk, rather than what was sent: the point of these is the
   // stored copy, and reading it back is the only way to see what was kept.
   const storedMeta = async (ns, kind) => {
-    const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
     const bytes = await readFile(blobPathFor(config.dataDir, row[`${kind}_blob_digest`]));
     return { ...(await sharp(bytes).metadata()), bytes: bytes.length };
   };
@@ -332,7 +338,7 @@ describe('stored size', () => {
       const res = await put(ns, 'avatar', await solidPng(4000, 4000), 'image/png');
       assert.equal(res.status, 200);
     });
-    const [row] = await sql`SELECT * FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT * FROM users WHERE namespace = ${ns}`;
     // The re-encode is a new file, so the type and the byte count have to
     // describe that one rather than what the client sent.
     assert.equal(row.avatar_content_type, 'image/png');
@@ -363,7 +369,7 @@ describe('upload authorization', () => {
     // to be created first for this to be testing the admin path.
     const adminRes = await signupAndAccept(app, uniqNs());
     const [adminRow] =
-      await sql`SELECT role FROM users WHERE namespace = ${adminRes.user.namespace}`;
+      await db.$queryRaw`SELECT role FROM users WHERE namespace = ${adminRes.user.namespace}`;
     assert.equal(adminRow.role, 'admin');
 
     const owner = await account();
@@ -544,11 +550,11 @@ describe('removing a profile image', () => {
   // The two kinds are scaled to different sizes, so a shared digest is not
   // something the upload path can be relied on to produce and is set directly.
   const pointBannerAtAvatar = async (ns) => {
-    const [row] = await sql`
+    const [row] = await db.$queryRaw`
       SELECT avatar_blob_digest AS digest, avatar_bytes AS bytes
       FROM users WHERE namespace = ${ns}
     `;
-    await sql`
+    await db.$executeRaw`
       UPDATE users
       SET banner_blob_digest = ${row.digest}, banner_content_type = 'image/png',
           banner_bytes = ${row.bytes}
@@ -697,18 +703,18 @@ describe('blob collection', () => {
     const stored = blobPathFor(config.dataDir, row.avatar_blob_digest);
     await age([stored]);
 
-    await gcBlobs(sql, config.dataDir);
+    await gcBlobs(db, config.dataDir);
     assert.ok(existsSync(stored));
   });
 
   test('keeps a banner a users row still points at', async () => {
     const ns = await account();
     await put(ns, 'banner', gifBytes(), 'image/gif');
-    const [row] = await sql`SELECT banner_blob_digest FROM users WHERE namespace = ${ns}`;
+    const [row] = await db.$queryRaw`SELECT banner_blob_digest FROM users WHERE namespace = ${ns}`;
     const stored = blobPathFor(config.dataDir, row.banner_blob_digest);
     await age([stored]);
 
-    await gcBlobs(sql, config.dataDir);
+    await gcBlobs(db, config.dataDir);
     assert.ok(existsSync(stored));
   });
 

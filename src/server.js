@@ -9,29 +9,33 @@ import { makeWebhooks } from './webhooks.js';
 
 // `backgroundJobs` is off for the test suite. The jobs all run a pass
 // immediately, and their passes collide with the suite's own setup: the daily
-// aggregation locks extension_daily_downloads before reading download_events,
-// which is the reverse of the order a TRUNCATE takes the same two tables in, so
-// resetDb and a background pass deadlock. Tests that want a job build it
-// themselves and drive it directly.
+// aggregation locks the download rollups before reading download_events, which
+// is the reverse of the order a TRUNCATE takes those tables in, so resetDb and
+// a background pass deadlock. Tests that want a job build it themselves and
+// drive it directly.
 export async function bootstrap(
   config = loadConfig(),
-  { backgroundJobs = true, storageProbe } = {},
+  { backgroundJobs = true, storageProbe, resolveTarget, migrations = true } = {},
 ) {
   ensureDataDirs(config.dataDir);
-  const sql = createDb(config);
+  const db = createDb(config);
   try {
-    await runMigrations(sql);
-    await reconcileOnBoot(sql, config);
-    const { app, rateLimiter, telemetry } = createApp({ config, sql, storageProbe });
+    // The suite applies the migrations once and then tells every later boot to
+    // skip the bridge: each test file boots its own app, so re-running it would
+    // spawn `prisma migrate deploy` a few dozen times to find nothing pending.
+    // Production always applies them.
+    if (migrations) await runMigrations(db, config);
+    await reconcileOnBoot(db, config);
+    const { app, rateLimiter, telemetry } = createApp({ config, db, storageProbe, resolveTarget });
     if (!backgroundJobs) {
-      return { app, sql, config, rateLimiter, telemetry };
+      return { app, db, config, rateLimiter, telemetry };
     }
-    const metricsJob = dailyAggregationJob(sql).start();
-    const webhookWorker = makeWebhooks({ sql }).worker().start();
-    const maintenanceJob = makeMaintenanceJob({ sql, config }).start();
-    return { app, sql, config, rateLimiter, telemetry, metricsJob, webhookWorker, maintenanceJob };
+    const metricsJob = dailyAggregationJob(db).start();
+    const webhookWorker = makeWebhooks({ db }).worker().start();
+    const maintenanceJob = makeMaintenanceJob({ db, config }).start();
+    return { app, db, config, rateLimiter, telemetry, metricsJob, webhookWorker, maintenanceJob };
   } catch (error) {
-    await sql.end();
+    await db.$disconnect();
     throw error;
   }
 }
@@ -40,7 +44,7 @@ const isMain = process.argv[1] && process.argv[1] === fileURLToPath(import.meta.
 
 if (isMain) {
   const configPath = process.argv[2] ?? product.defaults?.configFilename ?? 'config.yaml';
-  const { app, sql, config, rateLimiter, metricsJob, webhookWorker, maintenanceJob } =
+  const { app, db, config, rateLimiter, metricsJob, webhookWorker, maintenanceJob } =
     await bootstrap(loadConfig(configPath));
   const server = app.listen(config.port, () => {
     console.log(`${product.name} v${product.version} listening on http://localhost:${config.port}`);
@@ -56,7 +60,7 @@ if (isMain) {
     const force = setTimeout(() => server.closeAllConnections(), 5000);
     await new Promise((resolve) => server.close(resolve));
     clearTimeout(force);
-    await sql.end();
+    await db.$disconnect();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

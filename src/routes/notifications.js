@@ -7,7 +7,7 @@ import { requireObjectBody } from './shared.js';
 
 const MAX_MARK_READ = 100;
 
-export function makeNotificationsRouter({ sql, config }) {
+export function makeNotificationsRouter({ db, config }) {
   const router = Router();
   const guard = [requireAuth];
 
@@ -20,22 +20,20 @@ export function makeNotificationsRouter({ sql, config }) {
       throw new HttpError(400, { title: 'Bad Request', detail: 'Invalid unread.' });
     }
 
-    const rows = await sql`
-      SELECT * FROM notifications
-      WHERE user_id = ${req.auth.user.id}
-        ${unread === 'true' ? sql`AND read_at IS NULL` : sql``}
-        ${cursor ? (back ? sql`AND id > ${cursor.i}` : sql`AND id < ${cursor.i}`) : sql``}
-      ORDER BY id ${back ? sql`ASC` : sql`DESC`}
-      LIMIT ${limit + 1}
-    `;
+    const rows = await db.notifications.findMany({
+      where: {
+        user_id: req.auth.user.id,
+        ...(unread === 'true' ? { read_at: null } : {}),
+        ...(cursor ? (back ? { id: { gt: cursor.i } } : { id: { lt: cursor.i } }) : {}),
+      },
+      orderBy: { id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
 
-    const [counts] = await sql`
-      SELECT
-        COUNT(*) FILTER (WHERE read_at IS NULL) AS unread,
-        COUNT(*) AS total
-      FROM notifications
-      WHERE user_id = ${req.auth.user.id}
-    `;
+    // Only the unread tally is read out; a filtered count keeps it one column.
+    const unreadCount = await db.notifications.count({
+      where: { user_id: req.auth.user.id, read_at: null },
+    });
 
     res.json(
       keysetPage(req, rows, {
@@ -44,7 +42,7 @@ export function makeNotificationsRouter({ sql, config }) {
         cursor,
         serialize: notificationToObject,
         keyOf: (row) => ({ i: Number(row.id) }),
-        extra: { unreadCount: Number(counts.unread) },
+        extra: { unreadCount },
       }),
     );
   });
@@ -65,10 +63,10 @@ export function makeNotificationsRouter({ sql, config }) {
       if (all !== true) {
         throw fieldErrors([{ field: 'all', message: 'Must be true when provided.' }]);
       }
-      const updated = await sql`
-        UPDATE notifications SET read_at = now()
-        WHERE user_id = ${req.auth.user.id} AND read_at IS NULL
-      `;
+      const updated = await db.notifications.updateMany({
+        where: { user_id: req.auth.user.id, read_at: null },
+        data: { read_at: new Date() },
+      });
       return res.json({ updated: updated.count });
     }
 
@@ -86,23 +84,22 @@ export function makeNotificationsRouter({ sql, config }) {
       parsed.push(n);
     }
 
-    const updated = await sql`
-      UPDATE notifications SET read_at = now()
-      WHERE user_id = ${req.auth.user.id} AND id IN ${sql(parsed)} AND read_at IS NULL
-      RETURNING id
-    `;
+    const updated = await db.notifications.updateMany({
+      where: { user_id: req.auth.user.id, id: { in: parsed }, read_at: null },
+      data: { read_at: new Date() },
+    });
     res.json({ updated: updated.count });
   });
 
   router.patch('/:id', guard, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
-    const [row] = await sql`
-      UPDATE notifications SET read_at = now()
-      WHERE id = ${id} AND user_id = ${req.auth.user.id}
-      RETURNING *
-    `;
-    if (!row) throw notFound();
+    const updated = await db.notifications.updateMany({
+      where: { id, user_id: req.auth.user.id },
+      data: { read_at: new Date() },
+    });
+    if (updated.count === 0) throw notFound();
+    const row = await db.notifications.findUnique({ where: { id } });
     res.json(notificationToObject(row));
   });
 

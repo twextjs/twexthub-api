@@ -9,7 +9,7 @@ import { blobPathFor, hashFile } from '../blobs.js';
 // that is published, everything else needs to pass the caller's access check.
 const PUBLIC_STATUSES = new Set(['published', 'deprecated', 'yanked']);
 
-export function makeBlobsRouter({ sql, config }) {
+export function makeBlobsRouter({ db, config }) {
   const router = Router();
 
   router.get('/blobs/:digest', async (req, res) => {
@@ -21,12 +21,11 @@ export function makeBlobsRouter({ sql, config }) {
     const [, digest] = digestMatch;
     const abs = blobPathFor(config.dataDir, digest);
     if (!existsSync(abs)) throw notFound();
-    const rows = await sql`
-      SELECT namespace, extension_id, status, blob_size
-      FROM versions
-      WHERE blob_digest = ${digest}
-      ORDER BY id DESC
-    `;
+    const rows = await db.versions.findMany({
+      where: { blob_digest: digest },
+      select: { namespace: true, extension_id: true, status: true, blob_size: true },
+      orderBy: { id: 'desc' },
+    });
     if (rows.length === 0) throw notFound();
     const [row] = rows;
     const isPublic = rows.some((candidate) => PUBLIC_STATUSES.has(candidate.status));

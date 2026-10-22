@@ -2,9 +2,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { setTimeout as sleep } from 'node:timers/promises';
 import request from 'supertest';
 import assert from 'node:assert/strict';
-import postgres from 'postgres';
+import pg from 'pg';
 import { bootstrap } from '../src/server.js';
 import { createTarballBuffer } from '../src/tarball.js';
 import { DEFAULTS } from '../src/config.js';
@@ -24,6 +25,39 @@ export function apiPath(suffix = '') {
 export const TEST_DATABASE_URL =
   process.env.TWEXTHUB_TEST_DATABASE_URL ??
   'postgres://postgres:postgres@localhost:5432/twexthub_test';
+
+// `scripts/test-run.mjs` sets this when it runs the files concurrently: each
+// file then builds its app against a clone of the migrated database instead of
+// the one every other file is resetting, so two files running at once cannot
+// truncate each other's rows. A file run straight from the shell (`node --test
+// test/foo.test.js`) leaves the flag unset and shares the one database, which
+// is what the runner expects without the orchestrator.
+const ISOLATED = process.env.TWEXTHUB_TEST_ISOLATED === '1';
+
+// A clone is named `<base>_w<runId>_<pid>`: the run that made it, then the
+// process. The pid keeps two files in the same run apart; the run id — this
+// run's start time, set by `scripts/test-run.mjs` alongside the isolated flag —
+// lets that runner tell the clones a live concurrent run is using from the ones
+// a crashed run left behind, so sweeping one run's residue cannot drop the
+// other's working databases. A pid alone would not: it is unique only among the
+// processes alive at once, so two runs on one machine are indistinguishable.
+const RUN_ID = process.env.TWEXTHUB_TEST_RUN_ID ?? String(Date.now());
+const PROCESS_DATABASE_URL = (() => {
+  if (!ISOLATED) return TEST_DATABASE_URL;
+  const url = new URL(TEST_DATABASE_URL);
+  url.pathname = `/${url.pathname.slice(1)}_w${RUN_ID}_${process.pid}`;
+  return url.toString();
+})();
+
+// A clone is made by connecting to the maintenance database rather than the one
+// being copied: `CREATE DATABASE ... TEMPLATE` refuses to run while anyone is
+// connected to the template, which is why the template is never connected to
+// during a run.
+function adminDatabaseUrl() {
+  const url = new URL(TEST_DATABASE_URL);
+  url.pathname = '/postgres';
+  return url.toString();
+}
 
 let cached = null;
 let seq = 0;
@@ -73,19 +107,22 @@ export function makeConfig(overrides = {}) {
     publicBaseUrl: 'http://hub.test:8080',
     requireHttps: false,
     trustProxy: false,
-    database: { url: TEST_DATABASE_URL, maxConnections: 6 },
-    // scrypt at production cost would dominate the suite's runtime.
-    auth: { scrypt: { N: 16384, r: 8, p: 1 } },
+    database: { url: PROCESS_DATABASE_URL, maxConnections: 6 },
+    // scrypt at production cost would dominate the suite's runtime. The cost is
+    // recorded in each hash as `N:r:p`, so a hash written here still verifies;
+    // no test asserts on the parameters themselves.
+    auth: { scrypt: { N: 4096, r: 8, p: 1 } },
     cors: { allowedOrigins: '*' },
   });
   return mergeOverrides(config, overrides);
 }
 
-// postgres.js connects lazily, so a database that is not there does not fail
-// until bootstrap's first query, as a bare driver error. The two ways that
-// usually happens are worth instructions rather than a stack trace: the server
-// is not running, or the database has not been created. Everything else — bad
-// password, deadlocked migration — is left exactly as the driver reported it.
+// The connection is made with a bare `pg` client rather than the app's Prisma
+// client, so the probe can run without the generated client being on disk. The
+// two ways a missing database usually shows up are worth instructions rather
+// than a stack trace: the server is not running, or the database has not been
+// created. Everything else — bad password, deadlocked migration — is left
+// exactly as the driver reported it.
 const CONNECTION_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'ETIMEDOUT', 'ECONNRESET']);
 
 // The connection-check fallback interpolates the URL into its message, so
@@ -152,17 +189,78 @@ function describeBootFailure(error, url) {
 // boot() with the same hint 200-odd times. boot() keeps its own rewrite as the
 // fallback for files run directly, which skip the preflight.
 export async function checkTestDatabase(url = TEST_DATABASE_URL) {
-  const probe = postgres(url, { max: 1, connect_timeout: 5, idle_timeout: 1 });
+  const probe = new pg.Client({ connectionString: url, connectionTimeoutMillis: 5000 });
   try {
-    await probe`SELECT 1`;
+    await probe.connect();
+    await probe.query('SELECT 1');
   } catch (error) {
     const hint =
       describeBootFailure(error, url) ??
       `the test database at ${redactDatabaseUrl(url)} rejected the connection check.`;
     throw new Error(hint, { cause: error });
   } finally {
-    await probe.end({ timeout: 5 });
+    await probe.end().catch(() => {});
   }
+}
+
+// Each test file boots the whole app in its own process, so a boot that ran the
+// migration bridge would spawn `prisma migrate deploy` once per file just to
+// discover there is nothing to apply. In an `npm test` run the template was
+// already migrated before the files started and every clone inherits that
+// history, so this is that nothing-to-apply case; a single file run against a
+// database that has not been migrated fails the check and migrates as before.
+// `test/migrations.test.js` drives `runMigrations` directly rather than through
+// `boot()`, so the bridge itself stays covered.
+async function migrationsAreCurrent(config) {
+  const client = new pg.Client({
+    connectionString: config.database.url,
+    connectionTimeoutMillis: 5000,
+  });
+  try {
+    await client.connect();
+    const { rows } = await client.query(
+      `SELECT migration_name FROM _prisma_migrations
+       WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`,
+    );
+    const applied = new Set(rows.map((row) => row.migration_name));
+    const entries = await readdir(path.join(import.meta.dirname, '..', 'prisma', 'migrations'), {
+      withFileTypes: true,
+    });
+    const local = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    return local.length > 0 && local.every((name) => applied.has(name));
+  } catch {
+    return false;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+// Clones this process's database from the migrated template, once, before the
+// app boots. The clone carries the template's `_prisma_migrations` history, so
+// `migrationsAreCurrent` sees nothing to do and the migration bridge is skipped
+// the same way it is for a warm shared database.
+let ensured = null;
+export async function ensureTestDatabase() {
+  if (!ISOLATED) return PROCESS_DATABASE_URL;
+  ensured ??= (async () => {
+    const template = new URL(TEST_DATABASE_URL).pathname.slice(1);
+    const clone = new URL(PROCESS_DATABASE_URL).pathname.slice(1);
+    const admin = new pg.Client({
+      connectionString: adminDatabaseUrl(),
+      connectionTimeoutMillis: 5000,
+    });
+    await admin.connect();
+    try {
+      // A pid can be reused, so a name may meet the residue of an earlier
+      // crash: replacing the database is cheaper than proving it is stale.
+      await admin.query(`DROP DATABASE IF EXISTS "${clone}" WITH (FORCE)`);
+      await admin.query(`CREATE DATABASE "${clone}" TEMPLATE "${template}"`);
+    } finally {
+      await admin.end();
+    }
+    return PROCESS_DATABASE_URL;
+  })();
+  return ensured;
 }
 
 export async function boot(overrides = {}, appOptions = {}) {
@@ -174,10 +272,15 @@ export async function boot(overrides = {}, appOptions = {}) {
     }
     return cached;
   }
+  await ensureTestDatabase();
   const config = makeConfig(overrides);
   let booted;
   try {
-    booted = await bootstrap(config, { backgroundJobs: false, ...appOptions });
+    booted = await bootstrap(config, {
+      backgroundJobs: false,
+      migrations: !(await migrationsAreCurrent(config)),
+      ...appOptions,
+    });
   } catch (error) {
     const hint = describeBootFailure(error, config.database.url);
     if (!hint) throw error;
@@ -187,18 +290,47 @@ export async function boot(overrides = {}, appOptions = {}) {
   return cached;
 }
 
+// A download response records its event without awaiting the insert (metrics
+// must never hold up a download), so a reset can meet that write mid-flight and
+// be chosen as the deadlock victim. The insert is a one-shot that is already
+// committed or aborted by the next attempt, so truncating again after a short
+// backoff clears it.
+function isDeadlock(error) {
+  const text = [
+    error?.message,
+    error?.code,
+    error?.meta?.code,
+    error?.meta?.driverAdapterError?.cause?.originalCode,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return text.includes('40P01') || /deadlock/i.test(text);
+}
+
 export async function resetDb() {
-  const { sql } = await boot();
-  await sql.unsafe(`
-    TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
-    users, legal_documents, download_events, extension_daily_downloads, dist_tags,
-    webhook_deliveries, webhooks
-    RESTART IDENTITY CASCADE
-  `);
-  await sql`
-    INSERT INTO legal_documents (kind, version, body)
-    VALUES ('terms', 1, 'Placeholder terms.'), ('privacy', 1, 'Placeholder privacy.')
-  `;
+  const { db } = await boot();
+  // One statement resets every table the suite writes to and restarts the
+  // sequences, so a test that asserts on `String(1)` still sees id 1.
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await db.$executeRawUnsafe(`
+        TRUNCATE TABLE automation_tokens, sessions, versions, rate_limit_entries, notifications,
+        users, legal_documents, download_events, extension_daily_downloads, extension_version_daily_downloads, dist_tags,
+        webhook_deliveries, webhooks, user_identities, oidc_flows
+        RESTART IDENTITY CASCADE
+      `);
+      break;
+    } catch (error) {
+      if (attempt >= 5 || !isDeadlock(error)) throw error;
+      await sleep(25 * attempt);
+    }
+  }
+  await db.legal_documents.createMany({
+    data: [
+      { kind: 'terms', version: 1, body: 'Placeholder terms.' },
+      { kind: 'privacy', version: 1, body: 'Placeholder privacy.' },
+    ],
+  });
 }
 
 // Walk a collection the way a client that has never seen this API would: hand

@@ -17,14 +17,14 @@ import {
 import { compileProject, compilerEnv } from '../src/compiler.js';
 
 let app;
-let sql;
+let db;
 let _config;
 before(async () => {
-  ({ app, sql, config: _config } = await boot());
+  ({ app, db, config: _config } = await boot());
 });
 beforeEach(resetDb);
 after(async () => {
-  await sql.end();
+  await db.$disconnect();
 });
 
 test('a successful build surfaces buildLog and sourceUrl on the pending version', async () => {
@@ -58,6 +58,50 @@ test('a successful build surfaces buildLog and sourceUrl on the pending version'
     .expect(200);
   assert.match(src.headers['content-type'], /gzip/);
   assert.ok(src.body.length > 0);
+});
+
+test('risky source patterns are reported as warnings on the pending version', async () => {
+  const admin = await signupAndAccept(app, uniqNs());
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+
+  const code = [
+    'const body = fetch("http://example.com/data");',
+    'eval("1 + 1");',
+    'new Function("return 1")();',
+    'const request = new XMLHttpRequest();',
+  ].join('\n');
+  const pub = await publishProject(app, ns, 'risky', owner.token, { code });
+  assert.equal(pub.status, 201);
+  assert.equal(pub.body.status, 'pending');
+  assert.deepEqual(pub.body.warnings.map((warning) => warning.code).sort(), [
+    'eval',
+    'fetch',
+    'insecure-http',
+    'new-function',
+    'xmlhttprequest',
+  ]);
+  const fetchWarning = pub.body.warnings.find((warning) => warning.code === 'fetch');
+  assert.equal(fetchWarning.file, 'src/index.js');
+  // The helper wraps the code in the handler body, so line 1 of `code` is the
+  // third line of the generated entry file.
+  assert.equal(fetchWarning.line, 3);
+  assert.ok(fetchWarning.message);
+
+  // The review queue carries the same warnings.
+  const queue = await request(app)
+    .get(apiPath('/versions?status=pending'))
+    .set(bearer(admin.token));
+  assert.equal(queue.body.data.length, 1);
+  assert.deepEqual(queue.body.data[0].warnings, pub.body.warnings);
+});
+
+test('a clean source carries no warnings', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  const pub = await publishProject(app, ns, 'clean', owner.token, { code: 'return 42;' });
+  assert.equal(pub.status, 201);
+  assert.equal(pub.body.warnings, undefined);
 });
 
 test('a failing build rejects the publish with buildLog and buildError', async () => {

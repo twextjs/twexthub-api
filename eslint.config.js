@@ -14,6 +14,8 @@ export default [
     },
   },
   {
-    ignores: ['test-fixtures/*/dist/**', 'data/**'],
+    // The Prisma client is generated, not written: `npm run generate` writes it
+    // and the suite runs against whatever it produced.
+    ignores: ['test-fixtures/*/dist/**', 'data/**', 'prisma/generated/**'],
   },
 ];

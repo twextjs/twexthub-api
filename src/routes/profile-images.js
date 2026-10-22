@@ -26,7 +26,7 @@ import { isValidNamespace } from '../util.js';
 //   mayWrite(row, req)   -> the caller's right to replace an image, awaited so
 //                           an owner-list lookup can decide it
 //   serialize(row)       -> the response body after a write or a delete
-export function makeProfileImageRouter({ sql, config, load, mayWrite, serialize }) {
+export function makeProfileImageRouter({ db, config, load, mayWrite, serialize }) {
   const router = Router();
 
   // One endpoint per image kind serves all three states in priority order: an
@@ -113,11 +113,11 @@ export function makeProfileImageRouter({ sql, config, load, mayWrite, serialize 
         throw forbidden('You can only change your own profile images.');
       }
       const declared = req.get('content-type');
-      const stored = await storeProfileImage(sql, config, target, kind, req.body, declared);
+      const stored = await storeProfileImage(db, config, target, kind, req.body, declared);
       // The replaced image is only unlinked after the new pointer is committed,
       // and only when nothing else references those bytes.
       if (stored.previous && stored.previous !== stored.digest) {
-        await removeProfileImageBlob(sql, config, stored.previous);
+        await removeProfileImageBlob(db, config, stored.previous);
       }
       res.json(serialize(await load(req.params.namespace)));
     },
@@ -134,12 +134,9 @@ export function makeProfileImageRouter({ sql, config, load, mayWrite, serialize 
         throw forbidden('You can only change your own profile images.');
       }
       const { digest, updates } = profileImagePointer(target, kind);
-      await sql`
-        UPDATE users
-        SET ${sql(updates)}
-        WHERE id = ${target.id}
-      `;
-      if (digest) await removeProfileImageBlob(sql, config, digest);
+      // The keys are the avatar/banner column constants from PROFILE_IMAGES.
+      await db.users.update({ where: { id: target.id }, data: updates });
+      if (digest) await removeProfileImageBlob(db, config, digest);
       res.json(serialize(await load(req.params.namespace)));
     },
   ];
