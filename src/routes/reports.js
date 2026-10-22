@@ -1,261 +1,151 @@
 import { Router } from 'express';
-import { requireAdmin, requireAuth } from '../auth.js';
-import { conflict, fieldErrors, forbidden, notFound } from '../errors.js';
+import { requireAuth } from '../auth.js';
+import { uniqueViolation } from '../db.js';
+import { conflict, fieldErrors, notFound } from '../errors.js';
 import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
+import { reportToOwnerObject } from '../serialize.js';
+import { isValidExtensionId, isValidNamespace } from '../util.js';
+import {
+  MAX_REPORT_DESCRIPTION,
+  REPORT_REASONS,
+  REPORT_TARGET_TYPES,
+  resolveReportTarget,
+} from '../reports.js';
 import { requireObjectBody } from './shared.js';
-import { audit } from '../audit.js';
 
-const REASON_MAX_LENGTH = 2000;
-
-function reportToObject(row) {
-  return {
-    id: String(row.Id),
-    reporterId: row.ReporterId ? String(row.ReporterId) : null,
-    targetType: row.TargetType,
-    targetNamespace: row.TargetNamespace ?? null,
-    targetExtensionId: row.TargetExtensionId ?? null,
-    targetUserId: row.TargetUserId ? String(row.TargetUserId) : null,
-    reason: row.Reason,
-    description: row.Description,
-    status: row.Status,
-    reviewedBy: row.ReviewedBy ? String(row.ReviewedBy) : null,
-    reviewedAt: row.ReviewedAt ? row.ReviewedAt.toISOString() : null,
-    resolutionNote: row.ResolutionNote ?? null,
-    createdAt: row.CreatedAt.toISOString(),
-    updatedAt: row.UpdatedAt.toISOString(),
-  };
-}
-
-function normalizeTargetType(type) {
-  if (typeof type !== 'string') return null;
-  const t = type.trim().toLowerCase();
-  if (t === 'user' || t === 'account') return 'user';
-  if (t === 'org' || t === 'organization') return 'organization';
-  if (t === 'extension' || t === 'package') return 'extension';
-  return t;
-}
-
-export function makeReportsRouter({ db, config, rateLimiter }) {
+// The router is mounted at /reports, so the paths below are relative to it.
+//
+// Two audiences read this queue. The account that filed a report may look at
+// its own reports to see whether they were decided, and it sees only that:
+// the description, the reviewer's identity and the reviewer's note are the
+// reviewer's business. The reviewer sees the whole record, through the admin
+// endpoints, which are the only ones that hand it out.
+export function makeReportsRouter({ db, config, rateLimiter, termsGate }) {
   const router = Router();
 
-  router.post('/reports', requireAuth, async (req, res) => {
+  router.post('/', requireAuth, termsGate, async (req, res) => {
     requireObjectBody(req);
     const body = req.body;
 
-    const targetType = normalizeTargetType(body.targetType ?? body.type);
-    if (!targetType) {
-      throw fieldErrors([{ field: 'targetType', message: 'targetType is required.' }]);
-    }
-    if (!['user', 'organization', 'extension'].includes(targetType)) {
-      throw fieldErrors([{ field: 'targetType', message: 'Invalid targetType.' }]);
+    const targetType = body.targetType;
+    if (typeof targetType !== 'string' || !REPORT_TARGET_TYPES.includes(targetType)) {
+      throw fieldErrors([
+        { field: 'targetType', message: `Must be one of: ${REPORT_TARGET_TYPES.join(', ')}.` },
+      ]);
     }
 
+    const namespace = body.targetNamespace;
+    if (typeof namespace !== 'string' || !isValidNamespace(namespace)) {
+      throw fieldErrors([{ field: 'targetNamespace', message: 'Must be a valid namespace.' }]);
+    }
+
+    let extensionId = '';
     if (targetType === 'extension') {
-      if (typeof body.targetNamespace !== 'string' || typeof body.targetExtensionId !== 'string') {
+      if (
+        typeof body.targetExtensionId !== 'string' ||
+        !isValidExtensionId(body.targetExtensionId)
+      ) {
         throw fieldErrors([
-          { field: 'targetNamespace', message: 'targetNamespace is required.' },
-          { field: 'targetExtensionId', message: 'targetExtensionId is required.' },
+          { field: 'targetExtensionId', message: 'Must be a valid extension id.' },
         ]);
       }
-    } else if (targetType === 'user' || targetType === 'organization') {
-      if (typeof body.targetNamespace !== 'string') {
-        throw fieldErrors([{ field: 'targetNamespace', message: 'targetNamespace is required.' }]);
-      }
-    }
-
-    const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
-    if (reason.length === 0 || reason.length > REASON_MAX_LENGTH) {
+      extensionId = body.targetExtensionId;
+    } else if (body.targetExtensionId !== undefined) {
       throw fieldErrors([
-        { field: 'reason', message: `Reason must be between 1 and ${REASON_MAX_LENGTH} characters.` },
+        { field: 'targetExtensionId', message: 'Only a report about an extension names one.' },
       ]);
     }
 
-    const description =
-      typeof body.description === 'string'
-        ? body.description.trim()
-        : typeof body.body === 'string'
-          ? body.body.trim()
-          : '';
-    if (description.length === 0 || description.length > REASON_MAX_LENGTH) {
+    const reason = body.reason;
+    if (typeof reason !== 'string' || !REPORT_REASONS.includes(reason)) {
       throw fieldErrors([
-        { field: 'description', message: `Description must be between 1 and ${REASON_MAX_LENGTH} characters.` },
+        { field: 'reason', message: `Must be one of: ${REPORT_REASONS.join(', ')}.` },
       ]);
     }
 
-    // Rate limit submissions
-    if (rateLimiter) {
-      await rateLimiter.signupCheck?.(`report:${req.auth.user.Id}`)();
-      // Fallback to general rate limiting pattern if needed
+    const description = typeof body.description === 'string' ? body.description.trim() : '';
+    if (description.length === 0 || description.length > MAX_REPORT_DESCRIPTION) {
+      throw fieldErrors([
+        {
+          field: 'description',
+          message: `Must be between 1 and ${MAX_REPORT_DESCRIPTION} characters.`,
+        },
+      ]);
     }
 
-    let targetUserId = null;
-    if (targetType === 'user' || targetType === 'organization') {
-      const targetUser = await db.Users.findUnique({
-        where: { Namespace: body.targetNamespace },
-      });
-      if (!targetUser) {
-        throw notFound('No such account.');
-      }
-      // For org, also ensure it's an org? The requirement says "user accounts, extensions, and organizations"
-      targetUserId = targetUser.Id;
-    } else if (targetType === 'extension') {
-      // Verify extension exists
-      const version = await db.Versions.findFirst({
-        where: {
-          Namespace: body.targetNamespace,
-          ExtensionId: body.targetExtensionId,
-          Status: { in: ['published', 'deprecated', 'pending', 'approved'] },
+    // One window per reporter. The complaint is about somebody else's account,
+    // so the rate that matters is the one at which a single account can fill
+    // the moderators' queue, not the one at which the queue is read.
+    await rateLimiter.reportCheck(`report:${req.auth.user.Namespace}`)();
+
+    // The report has to be about something that is there: a report about an
+    // account that never existed, or an extension that was never published,
+    // is nothing a reviewer could act on. The address the report is filed
+    // against is the one the target lives at now, which is what keeps a
+    // report aimed at a transferred extension pointing at the extension.
+    const target = await resolveReportTarget(db, { targetType, namespace, extensionId });
+
+    let created;
+    try {
+      created = await db.Reports.create({
+        data: {
+          ReporterId: req.auth.user.Id,
+          ReporterNamespace: req.auth.user.Namespace,
+          TargetType: targetType,
+          TargetNamespace: target.namespace,
+          TargetExtensionId: target.extensionId ?? '',
+          Reason: reason,
+          Description: description,
+          Status: 'open',
         },
       });
-      // Also just check existence broadly
-      if (!version) {
-        const anyVersion = await db.Versions.findFirst({
-          where: {
-            Namespace: body.targetNamespace,
-            ExtensionId: body.targetExtensionId,
-          },
-        });
-        if (!anyVersion) {
-          throw notFound('No such extension.');
-        }
+    } catch (error) {
+      // The only unique constraint a report carries is the one that keeps a
+      // second open report about the same target out of the queue. The rule is
+      // in the index rather than in a lookup before the insert, so two reports
+      // filed at the same moment cannot both get in.
+      if (uniqueViolation(error)) {
+        throw conflict('You already have an open report about this target.');
       }
+      throw error;
     }
 
-    // Prevent repeated open reports from the same reporter for the same target
-    const existingOpen = await db.Reports.findFirst({
-      where: {
-        ReporterId: req.auth.user.Id,
-        Status: 'open',
-        TargetType: targetType,
-        ...(targetType === 'extension'
-          ? {
-              TargetNamespace: body.targetNamespace,
-              TargetExtensionId: body.targetExtensionId,
-            }
-          : { TargetUserId: targetUserId }),
-      },
-    });
-    if (existingOpen) {
-      throw conflict('You already have an open report for this target.');
-    }
-
-    const created = await db.Reports.create({
-      data: {
-        ReporterId: req.auth.user.Id,
-        TargetType: targetType,
-        TargetNamespace: body.targetNamespace ?? null,
-        TargetExtensionId: targetType === 'extension' ? body.targetExtensionId ?? null : null,
-        TargetUserId: targetType !== 'extension' ? targetUserId : null,
-        Reason: reason,
-        Description: description,
-        Status: 'open',
-      },
-    });
-
-    res.status(201).json(reportToObject(created));
+    res.status(201).json(reportToOwnerObject(created));
   });
 
-  return router;
-}
-
-export function makeAdminReportsRouter({ db, config }) {
-  const router = Router();
-  router.use(requireAdmin);
-
-  router.get('/admin/reports', async (req, res) => {
+  router.get('/', requireAuth, async (req, res) => {
     const limit = parseLimit(config, req.query.limit);
     const cursor = decodeCursor(req.query.cursor, { i: 'int' });
     const back = parseDir(req.query.dir);
-    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-
-    const where = {};
-    if (status) {
-      where.Status = status;
-    }
-    if (cursor) {
-      where.Id = back ? { gt: cursor.i } : { lt: cursor.i };
-    }
-
     const rows = await db.Reports.findMany({
-      where,
+      where: {
+        ReporterId: req.auth.user.Id,
+        ...(cursor ? (back ? { Id: { gt: cursor.i } } : { Id: { lt: cursor.i } }) : {}),
+      },
       orderBy: { Id: back ? 'asc' : 'desc' },
       take: limit + 1,
     });
-
     res.json(
       keysetPage(req, rows, {
         limit,
         back,
         cursor,
-        serialize: reportToObject,
+        serialize: reportToOwnerObject,
         keyOf: (row) => ({ i: Number(row.Id) }),
       }),
     );
   });
 
-  router.get('/admin/reports/:id', async (req, res) => {
+  router.get('/:id', requireAuth, async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
-    const row = await db.Reports.findUnique({ where: { Id: id } });
-    if (!row) throw notFound();
-    res.json(reportToObject(row));
-  });
-
-  router.patch('/admin/reports/:id', async (req, res) => {
-    requireObjectBody(req);
-    const id = Number(req.params.id);
-    if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
-    const existing = await db.Reports.findUnique({ where: { Id: id } });
-    if (!existing) throw notFound();
-
-    const updates = {};
-    if (typeof req.body.status === 'string') {
-      const s = req.body.status;
-      if (s !== 'open' && s !== 'resolved' && s !== 'dismissed') {
-        throw fieldErrors([{ field: 'status', message: 'Invalid status.' }]);
-      }
-      updates.Status = s;
-    } else if (req.body.resolution === 'resolved' || req.body.resolution === 'dismissed') {
-      updates.Status = req.body.resolution;
-    }
-
-    if (req.body.resolutionNote !== undefined) {
-      if (req.body.resolutionNote === null) {
-        updates.ResolutionNote = null;
-      } else if (typeof req.body.resolutionNote === 'string') {
-        updates.ResolutionNote = req.body.resolutionNote.trim();
-      } else {
-        throw fieldErrors([{ field: 'resolutionNote', message: 'Must be a string or null.' }]);
-      }
-    } else if (req.body.resolution !== undefined && typeof req.body.resolution === 'string' && req.body.resolution !== 'open') {
-      // allow passing resolution as note?
-    }
-
-    if (updates.Status && updates.Status !== 'open') {
-      updates.ReviewedBy = req.auth.user.Id;
-      updates.ReviewedAt = new Date();
-    } else if (updates.Status === 'open') {
-      updates.ReviewedBy = null;
-      updates.ReviewedAt = null;
-      updates.ResolutionNote = null;
-    }
-
-    updates.UpdatedAt = new Date();
-
-    const row = await db.Reports.update({
-      where: { Id: id },
-      data: updates,
+    // A report that belongs to somebody else is a 404 rather than a 403, so
+    // the call does not reveal that it exists.
+    const row = await db.Reports.findFirst({
+      where: { Id: id, ReporterId: req.auth.user.Id },
     });
-
-    await audit(
-      db,
-      req.auth.user,
-      'report.resolve',
-      { namespace: existing.TargetNamespace, id: existing.TargetExtensionId },
-      { reportId: String(id), status: row.Status },
-    );
-
-    res.json(reportToObject(row));
+    if (!row) throw notFound();
+    res.json(reportToOwnerObject(row));
   });
 
   return router;

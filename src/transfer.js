@@ -261,6 +261,18 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
     WHERE "Namespace" = ${toNamespace} AND "ExtensionId" = ${id}
   `;
 
+  // A report is about the extension, not about the address it happened to be
+  // published under, so the reports filed against the old address move with
+  // the extension. Left behind, they would point a reviewer at an address that
+  // holds nothing, and the complaint would look like it had been made about
+  // whoever took the address over. The table is not one of the address-keyed
+  // ones above because its columns are named after the target rather than
+  // after the address.
+  await tx.Reports.updateMany({
+    where: { TargetType: 'extension', TargetNamespace: namespace, TargetExtensionId: id },
+    data: { TargetNamespace: toNamespace, UpdatedAt: new Date() },
+  });
+
   await tx.ExtensionOwners.createMany({
     data: [
       {

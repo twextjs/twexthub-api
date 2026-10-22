@@ -3,7 +3,7 @@ import { Prisma } from '../../prisma/generated/client/index.js';
 import { requireAdmin } from '../auth.js';
 import { renderRegistryMetrics } from '../observability.js';
 import { fieldErrors, notFound } from '../errors.js';
-import { legalDocumentToObject } from '../serialize.js';
+import { legalDocumentToObject, reportToObject } from '../serialize.js';
 import { notifyUsersMatching, termsBumpedMessage } from '../notify.js';
 import { audit, auditRowToObject } from '../audit.js';
 import {
@@ -13,6 +13,12 @@ import {
   EDITABLE_SETTINGS,
 } from '../server-config.js';
 import { decodeCursor, keysetPage, parseDir, parseLimit } from '../pagination.js';
+import {
+  MAX_REPORT_RESOLUTION_NOTE,
+  REPORT_DECISIONS,
+  REPORT_STATUSES,
+  REPORT_TARGET_TYPES,
+} from '../reports.js';
 
 // trim() is applied to the broadcast message before insert, so this limit
 // applies to the trimmed length.
@@ -195,6 +201,114 @@ export function makeAdminRouter({ db, config, termsGate, storageProbe = {} }) {
       blobBytes: Number(user.BlobBytes),
       maxBlobBytes: user.MaxBlobBytes === null ? null : Number(user.MaxBlobBytes),
     });
+  });
+
+  // The report queue. A report is read here and nowhere else: the account
+  // that filed it may look at its own, and a reviewer looks at these. Deciding
+  // a report records who decided it, when, and why -- it does not act on the
+  // target. Nothing counts reports and suspends anybody; enforcement stays a
+  // decision somebody makes by hand.
+  router.get('/admin/reports', requireAdmin, async (req, res) => {
+    const limit = parseLimit(config, req.query.limit);
+    const cursor = decodeCursor(req.query.cursor, { i: 'int' });
+    const back = parseDir(req.query.dir);
+    const where = {};
+    const { status, targetType } = req.query;
+    if (status !== undefined) {
+      if (typeof status !== 'string' || !REPORT_STATUSES.includes(status)) {
+        throw fieldErrors([
+          { field: 'status', message: `Must be one of: ${REPORT_STATUSES.join(', ')}.` },
+        ]);
+      }
+      where.Status = status;
+    }
+    if (targetType !== undefined) {
+      if (typeof targetType !== 'string' || !REPORT_TARGET_TYPES.includes(targetType)) {
+        throw fieldErrors([
+          {
+            field: 'targetType',
+            message: `Must be one of: ${REPORT_TARGET_TYPES.join(', ')}.`,
+          },
+        ]);
+      }
+      where.TargetType = targetType;
+    }
+    if (cursor) where.Id = back ? { gt: cursor.i } : { lt: cursor.i };
+    const rows = await db.Reports.findMany({
+      where,
+      orderBy: { Id: back ? 'asc' : 'desc' },
+      take: limit + 1,
+    });
+    res.json(
+      keysetPage(req, rows, {
+        limit,
+        back,
+        cursor,
+        serialize: reportToObject,
+        keyOf: (row) => ({ i: Number(row.Id) }),
+      }),
+    );
+  });
+
+  router.get('/admin/reports/:id', requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
+    const row = await db.Reports.findUnique({ where: { Id: id } });
+    if (!row) throw notFound();
+    res.json(reportToObject(row));
+  });
+
+  router.patch('/admin/reports/:id', requireAdmin, async (req, res) => {
+    requireObjectBody(req);
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) throw notFound();
+    const status = req.body.status;
+    if (typeof status !== 'string' || !REPORT_DECISIONS.includes(status)) {
+      throw fieldErrors([
+        { field: 'status', message: `Must be one of: ${REPORT_DECISIONS.join(', ')}.` },
+      ]);
+    }
+    const note = req.body.note ?? null;
+    if (
+      note !== null &&
+      (typeof note !== 'string' ||
+        note.trim().length === 0 ||
+        note.length > MAX_REPORT_RESOLUTION_NOTE)
+    ) {
+      throw fieldErrors([
+        {
+          field: 'note',
+          message: `Must be a non-empty string of at most ${MAX_REPORT_RESOLUTION_NOTE} characters.`,
+        },
+      ]);
+    }
+    const existing = await db.Reports.findUnique({ where: { Id: id } });
+    if (!existing) throw notFound();
+    const updated = await db.$transaction(async (tx) => {
+      const row = await tx.Reports.update({
+        where: { Id: id },
+        data: {
+          Status: status,
+          ReviewedBy: req.auth.user.Id,
+          ReviewedByNamespace: req.auth.user.Namespace,
+          ReviewedAt: new Date(),
+          ResolutionNote: note === null ? null : note.trim(),
+          UpdatedAt: new Date(),
+        },
+      });
+      // The decision is the accountable half of a report, so it is written to
+      // the audit trail with the reviewer who made it. A decision may be
+      // revised; the trail keeps the earlier one.
+      await audit(
+        tx,
+        req.auth.user,
+        status === 'resolved' ? 'report.resolve' : 'report.dismiss',
+        { namespace: row.TargetNamespace, id: row.TargetExtensionId || null },
+        { reportId: String(row.Id), status: row.Status, note: row.ResolutionNote },
+      );
+      return row;
+    });
+    res.json(reportToObject(updated));
   });
 
   router.get('/admin/audit', requireAdmin, async (req, res) => {
