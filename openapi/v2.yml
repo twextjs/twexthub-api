@@ -58,6 +58,16 @@ info:
     Because it is only ever acted for by its owners, no
     organization credential exists to leak or revoke, and the account endpoints
     refuse it and point at `/orgs`.
+
+    An account, an organization, or an extension can be reported at
+    `POST /reports` for a moderator to read. A report is a queue entry and
+    nothing more: filing one never suspends, hides, or removes anything, and
+    no number of reports does either. What happens to what was reported is a
+    moderator's decision, taken by hand through `PATCH /admin/reports/{id}`.
+    The reporter may read its own reports and sees only that they were decided
+    and when; what a report said, who reviewed it, and why it was decided are
+    the reviewer's business, and only the `/admin/reports` endpoints hand them
+    out.
 servers:
   - url: https://{host}/v2
     variables:
@@ -1888,6 +1898,112 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  # ------------------------------------------------------------- Reports
+  /reports:
+    post:
+      summary: Report an account, organization, or extension
+      operationId: createReport
+      tags: [Userspace]
+      description: >
+        Files a report for a moderator to read. The target has to be something
+        that is there: an account that exists, an organization that exists, or
+        an extension that was published, so a report is always about something
+        a reviewer could act on. A target of the wrong kind is a `404` rather
+        than a report filed against something else.
+
+        The report names its target by address, so it outlives what it is
+        about: deleting the reported account or the reported extension leaves
+        the report standing, still saying what was reported. An extension that
+        has been transferred is reported against the address it lives at now,
+        and a report filed against the old address follows it there.
+
+        A report is a queue entry and nothing more. Filing one never suspends,
+        hides, or removes anything, and no number of reports does either: what
+        happens to what was reported is a moderator's decision, taken by hand
+        through `PATCH /admin/reports/{id}`.
+
+        One open report per reporter per target. A second one while the first
+        is still open is a `409`; once the first has been decided, a fresh one
+        may be filed. Submissions are rate limited per reporter.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [targetType, targetNamespace, reason, description]
+              properties:
+                targetType:
+                  $ref: '#/components/schemas/ReportTargetType'
+                targetNamespace:
+                  $ref: '#/components/schemas/Namespace'
+                targetExtensionId:
+                  $ref: '#/components/schemas/ExtensionId'
+                reason: { $ref: '#/components/schemas/ReportReason' }
+                description:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                  description: What the reporter saw, in their own words.
+      responses:
+        '201':
+          description: The report was filed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportOwnerView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+    get:
+      summary: List the caller's own reports
+      operationId: listOwnReports
+      tags: [Userspace]
+      description: >
+        The caller's own reports, newest first. Each one is the reduced view:
+        it says what was reported and whether the report has been decided, but
+        not what the report said, who reviewed it, or why it was decided. Those
+        are the reviewer's business. A reviewer reads the queue through
+        `GET /admin/reports`.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated reports
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/ReportOwnerView' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /reports/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ReportIdPath'
+    get:
+      summary: Read one of the caller's own reports
+      operationId: getOwnReport
+      tags: [Userspace]
+      description: >
+        The same reduced view the list gives. A report filed by another account
+        is a `404`, so the call does not reveal that it exists.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReportOwnerView' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # ---------------------------------------------------------- Discovery
   /extensions:
     get:
@@ -3211,6 +3327,117 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
 
+  /admin/reports:
+    get:
+      summary: The report queue
+      operationId: listReports
+      tags: [Adminspace]
+      description: >
+        The queue of reports awaiting a decision, newest first. Unlike the
+        reporter's own view, a report read here carries everything: what the
+        reporter said and who said it. Only admins read reports this way.
+
+        The queue holds what was reported and nothing about what was done
+        about it. Deciding a report does not act on the target — no report, and
+        no number of reports, suspends or removes anything. Enforcement is
+        taken separately, by hand, and it is the moderator's decision to make.
+
+        A report outlives the account or extension it is about, so a report
+        whose target has since been deleted is still here for a decision. A
+        report about a transferred extension names the address the extension
+        lives at now.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [open, resolved, dismissed] }
+          description: Only reports in this state.
+        - name: targetType
+          in: query
+          required: false
+          schema: { type: string, enum: [user, organization, extension] }
+          description: Only reports about this kind of target.
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Dir'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated reports, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data, _links]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Report' }
+                  _links: { $ref: '#/components/schemas/PageLinks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /admin/reports/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ReportIdPath'
+    get:
+      summary: Read one report
+      operationId: getReport
+      tags: [Adminspace]
+      description: The full record, as the queue lists it.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Report' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      summary: Decide a report
+      operationId: decideReport
+      tags: [Adminspace]
+      description: >
+        Records the outcome: the report is `resolved` (something was done
+        about what was reported) or `dismissed` (nothing was, or there was
+        nothing to act on). There is no way back to `open`; a decided report
+        stays decided, and a later complaint about the same target is a new
+        report.
+
+        The decision records who made it, when, and the note the reviewer
+        wrote about it, and it is written to the audit trail. A decision may be
+        revised; the trail keeps the earlier one.
+
+        Deciding a report does not act on the target. Nothing here suspends,
+        hides, or removes anything — that is a separate action, taken by hand.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [resolved, dismissed]
+                note:
+                  type: string
+                  minLength: 1
+                  maxLength: 2000
+                  description: Why the report was decided the way it was.
+      responses:
+        '200':
+          description: The decided report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Report' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
   /versions:
     get:
       summary: Cross-owner moderation queue
@@ -3321,6 +3548,12 @@ components:
       required: true
       schema: { type: string, pattern: '^[0-9]+$' }
       description: Notification id, as a string so it survives a JSON parser that keeps numbers exact.
+    ReportIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[0-9]+$' }
+      description: Report id, as a string so it survives a JSON parser that keeps numbers exact.
     Sort:
       name: sort
       in: query
@@ -3438,6 +3671,84 @@ components:
             notifications against a local project.
         read: { type: boolean }
         createdAt: { type: string, format: date-time }
+
+    ReportTargetType:
+      type: string
+      enum: [user, organization, extension]
+      description: >
+        What a report is about. `user` and `organization` name an account in
+        the `Users` table; `extension` names a published extension at
+        `@namespace/id`.
+    ReportReason:
+      type: string
+      enum: [spam, harassment, malicious_code, copyright, impersonation, other]
+      description: >
+        The category the report falls under. A fixed list rather than free
+        text, because sorting the queue is the first thing a reviewer does
+        with it.
+    ReportStatus:
+      type: string
+      enum: [open, resolved, dismissed]
+      description: >
+        `open` is a report waiting for a decision; `resolved` and `dismissed`
+        are the two outcomes a moderator records.
+    ReportTarget:
+      type: object
+      required: [type, namespace]
+      properties:
+        type: { $ref: '#/components/schemas/ReportTargetType' }
+        namespace: { $ref: '#/components/schemas/Namespace' }
+        id:
+          type: ['string', 'null']
+          description: The extension id, for an extension report; null for the account-shaped targets.
+    Report:
+      type: object
+      description: >
+        A report as a reviewer sees it: the whole record, including who filed
+        it and what they wrote. Only the admin endpoints hand this out.
+      required: [id, reporter, target, reason, description, status, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        reporter:
+          type: string
+          description: The namespace of the account that filed the report.
+        target: { $ref: '#/components/schemas/ReportTarget' }
+        reason: { $ref: '#/components/schemas/ReportReason' }
+        description:
+          type: string
+          description: What the reporter wrote.
+        status: { $ref: '#/components/schemas/ReportStatus' }
+        reviewedBy:
+          type: ['string', 'null']
+          description: The namespace of the reviewer who decided the report; null while it is open.
+        reviewedAt:
+          type: ['string', 'null']
+          format: date-time
+          description: When the report was decided; null while it is open.
+        resolutionNote:
+          type: ['string', 'null']
+          description: Why the reviewer decided it this way; null while it is open.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    ReportOwnerView:
+      type: object
+      description: >
+        A report as the account that filed it sees it. What the report said,
+        who reviewed it, and why it was decided are the reviewer's business, so
+        they are left out; the reporter learns that the report was decided, and
+        when.
+      required: [id, target, reason, status, createdAt, updatedAt]
+      properties:
+        id: { type: string }
+        target: { $ref: '#/components/schemas/ReportTarget' }
+        reason: { $ref: '#/components/schemas/ReportReason' }
+        status: { $ref: '#/components/schemas/ReportStatus' }
+        reviewedAt:
+          type: ['string', 'null']
+          format: date-time
+          description: When the report was decided; null while it is open.
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
 
     Session:
       type: object
@@ -3953,7 +4264,8 @@ components:
             role.change, extension.delete, org.create, org.update, org.delete,
             organization.owner.add, organization.owner.remove,
             organization.webhook.create, organization.webhook.delete,
-            account.webhook.create, account.webhook.delete
+            account.webhook.create, account.webhook.delete,
+            report.resolve, report.dismiss
         target:
           type: object
           properties:
