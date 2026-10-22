@@ -191,23 +191,23 @@ model OidcFlows {
 /// account goes away, so neither a report nor a decision disappears with the
 /// person who filed or made it.
 model Reports {
-  Id                BigInt    @id @default(autoincrement())
-  ReporterId        BigInt?
-  ReporterNamespace String
-  TargetType        String
-  TargetNamespace   String
-  TargetExtensionId String    @default("")
-  Reason            String
-  Description       String
-  Status            String    @default("open")
-  ReviewedBy        BigInt?
+  Id                 BigInt    @id @default(autoincrement())
+  ReporterId         BigInt?
+  ReporterNamespace  String
+  TargetType         String
+  TargetNamespace    String
+  TargetExtensionId  String    @default("")
+  Reason             String
+  Description        String
+  Status             String    @default("open")
+  ReviewedBy         BigInt?
   ReviewedByNamespace String?
-  ReviewedAt        DateTime? @db.Timestamptz(6)
-  ResolutionNote    String?
-  CreatedAt         DateTime  @default(now()) @db.Timestamptz(6)
-  UpdatedAt         DateTime  @default(now()) @db.Timestamptz(6)
-  Reporter          Users?    @relation("reports_reporter", fields: [ReporterId], references: [Id], onDelete: SetNull, onUpdate: NoAction)
-  Reviewer          Users?    @relation("reports_reviewer", fields: [ReviewedBy], references: [Id], onDelete: SetNull, onUpdate: NoAction)
+  ReviewedAt         DateTime? @db.Timestamptz(6)
+  ResolutionNote     String?
+  CreatedAt          DateTime  @default(now()) @db.Timestamptz(6)
+  UpdatedAt          DateTime  @default(now()) @db.Timestamptz(6)
+  Reporter           Users?    @relation("reports_reporter", fields: [ReporterId], references: [Id], onDelete: SetNull, onUpdate: NoAction)
+  Reviewer           Users?    @relation("reports_reviewer", fields: [ReviewedBy], references: [Id], onDelete: SetNull, onUpdate: NoAction)
 
   // One open report per reporter per target. The rule is enforced here rather
   // than in the request handler so two reports filed at the same moment cannot
