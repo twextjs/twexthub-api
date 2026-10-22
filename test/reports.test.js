@@ -463,3 +463,154 @@ test('reports do not act on the target by themselves', async () => {
   const list = await queue(admin.token).expect(200);
   assert.equal(list.body.data.length, 3);
 });
+
+test('a report is linked to the account it is about', async () => {
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  // The report names the account by address and holds a link to the row, so
+  // the database knows which account the complaint is about.
+  const account = await db.Users.findUnique({ where: { Namespace: target.user.namespace } });
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(report.TargetAccountId, account.Id);
+  assert.equal(report.TargetExtensionRefId, null);
+});
+
+test('a report is linked to the extension it is about', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+
+  // The extension has a row of its own, held by the account that owns the
+  // address, and the report points at that row.
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: owner.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.ok(identity, 'the extension has an identity row');
+  const ownerAccount = await db.Users.findUnique({ where: { Namespace: owner.user.namespace } });
+  assert.equal(identity.NamespaceId, ownerAccount.Id);
+
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(report.TargetExtensionRefId, identity.Id);
+  assert.equal(report.TargetAccountId, null);
+});
+
+test('deleting the target clears the link and leaves the report standing', async () => {
+  const admin = await adminAccount();
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  // A moderator's decision is a moderator's decision: the report does not
+  // stand in the way of the account being deleted.
+  await request(app)
+    .delete(apiPath(`/users/${target.user.namespace}`))
+    .set(bearer(admin.token))
+    .expect(204);
+
+  // The link is cleared and the report stays, still saying what was reported.
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.ok(report, 'the report outlives the account it is about');
+  assert.equal(report.TargetAccountId, null);
+  assert.equal(report.TargetNamespace, target.user.namespace);
+
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].target.namespace, target.user.namespace);
+});
+
+test('a reported extension can still be deleted by hand', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+
+  // A complaint is not a hold on the extension: its owner may still delete it.
+  await request(app)
+    .delete(apiPath(`/@${owner.user.namespace}/hello`))
+    .set(bearer(owner.token))
+    .expect(204);
+
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: owner.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.equal(identity, null, 'the extension took its identity with it');
+
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.ok(report, 'the report outlives the extension it is about');
+  assert.equal(report.TargetExtensionRefId, null);
+  assert.equal(report.TargetNamespace, owner.user.namespace);
+  assert.equal(report.TargetExtensionId, 'hello');
+});
+
+test('the link follows the extension through a transfer', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+  const before = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  // The extension is the same extension, so the report still points at the
+  // same row; only the address it names has changed.
+  const after = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(after.TargetExtensionRefId, before.TargetExtensionRefId);
+  assert.equal(after.TargetNamespace, recipient.user.namespace);
+
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: recipient.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.equal(identity.Id, before.TargetExtensionRefId);
+  const recipientAccount = await db.Users.findUnique({
+    where: { Namespace: recipient.user.namespace },
+  });
+  assert.equal(identity.NamespaceId, recipientAccount.Id);
+});
