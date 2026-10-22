@@ -176,28 +176,46 @@ model OidcFlows {
   @@index([ExpiresAt])
 }
 
+/// A report filed by an account about a user account, an organization, or an
+/// extension, for a moderator to read by hand.
+///
+/// The row is a queue entry and nothing more: filing a report never suspends,
+/// hides, or removes anything. Enforcement is a moderator's decision, taken
+/// through the admin endpoints and recorded in the audit trail.
+///
+/// The target is named by its address rather than by a foreign key, so a report
+/// outlives what it is about: deleting the reported account or the reported
+/// extension does not delete the report, and the report still says what was
+/// reported. The reporter and the reviewer are the two parts that are linked
+/// to accounts, and both links are cleared rather than cascading when the
+/// account goes away, so neither a report nor a decision disappears with the
+/// person who filed or made it.
 model Reports {
-  Id              BigInt    @id @default(autoincrement())
-  ReporterId      BigInt
-  TargetType      String
-  TargetNamespace String?
-  TargetExtensionId String?
-  TargetUserId    BigInt?
-  Reason          String
-  Description     String
-  Status          String    @default("open")
-  ReviewedBy      BigInt?
-  ReviewedAt      DateTime? @db.Timestamptz(6)
-  ResolutionNote  String?
-  CreatedAt       DateTime  @default(now()) @db.Timestamptz(6)
-  UpdatedAt       DateTime  @default(now()) @db.Timestamptz(6)
-  Reporter        Users     @relation("reports_reporter", fields: [ReporterId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
-  Reviewer        Users?    @relation("reports_reviewer", fields: [ReviewedBy], references: [Id], onUpdate: NoAction)
+  Id                BigInt    @id @default(autoincrement())
+  ReporterId        BigInt?
+  ReporterNamespace String
+  TargetType        String
+  TargetNamespace   String
+  TargetExtensionId String    @default("")
+  Reason            String
+  Description       String
+  Status            String    @default("open")
+  ReviewedBy        BigInt?
+  ReviewedByNamespace String?
+  ReviewedAt        DateTime? @db.Timestamptz(6)
+  ResolutionNote    String?
+  CreatedAt         DateTime  @default(now()) @db.Timestamptz(6)
+  UpdatedAt         DateTime  @default(now()) @db.Timestamptz(6)
+  Reporter          Users?    @relation("reports_reporter", fields: [ReporterId], references: [Id], onDelete: SetNull, onUpdate: NoAction)
+  Reviewer          Users?    @relation("reports_reviewer", fields: [ReviewedBy], references: [Id], onDelete: SetNull, onUpdate: NoAction)
 
-  @@index([Status, CreatedAt])
-  @@index([ReporterId])
-  @@index([TargetType, TargetNamespace, TargetExtensionId])
-  @@index([TargetUserId])
+  // One open report per reporter per target. The rule is enforced here rather
+  // than in the request handler so two reports filed at the same moment cannot
+  // both slip through, and it stops applying the moment the report is decided:
+  // a target that is reported again later gets a new report.
+  @@unique([ReporterId, TargetType, TargetNamespace, TargetExtensionId], map: "reports_open_unique_idx", where: raw("(\"Status\" = 'open')"))
+  @@index([Status, Id], map: "reports_status_idx")
+  @@index([TargetType, TargetNamespace, TargetExtensionId], map: "reports_target_idx")
 }
 
 /// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
