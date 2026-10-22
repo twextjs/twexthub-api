@@ -82,7 +82,9 @@ export function makeReportsRouter({ db, config, rateLimiter, termsGate }) {
     // account that never existed, or an extension that was never published,
     // is nothing a reviewer could act on. The address the report is filed
     // against is the one the target lives at now, which is what keeps a
-    // report aimed at a transferred extension pointing at the extension.
+    // report aimed at a transferred extension pointing at the extension, and
+    // the target is linked to the row it is held by so the report says which
+    // one it is about.
     const target = await resolveReportTarget(db, { targetType, namespace, extensionId });
 
     let created;
@@ -94,6 +96,8 @@ export function makeReportsRouter({ db, config, rateLimiter, termsGate }) {
           TargetType: targetType,
           TargetNamespace: target.namespace,
           TargetExtensionId: target.extensionId ?? '',
+          TargetAccountId: target.accountId ?? null,
+          TargetExtensionRefId: target.extensionRefId ?? null,
           Reason: reason,
           Description: description,
           Status: 'open',

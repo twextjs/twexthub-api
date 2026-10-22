@@ -51,25 +51,60 @@ const ACCOUNT_KINDS = { user: 'user', organization: 'organization' };
 // so there is nothing there to report.
 const EXISTING_VERSION_STATUSES = ['published', 'deprecated', 'pending', 'yanked'];
 
-// The target a report is about, resolved to the address it lives at now.
+// The target a report is about, resolved to the address it lives at now and to
+// the row it is held by.
 //
 // An extension that has been transferred is reported against the address it
 // has now rather than the one it had when the report was filed: the report is
 // about the extension, and the address is only where the extension can be
 // found. The same rule keeps a report useful after a transfer -- the report
-// moves with the extension -- and it is why the report stores an address
-// rather than a row id.
+// moves with the extension.
+//
+// The address is kept in the report as well as the link, because the address
+// is what a reviewer reads and what the report still says once the target is
+// gone.
 export async function resolveReportTarget(db, { targetType, namespace, extensionId }) {
   if (targetType === 'extension') {
     const address = await resolveExtensionAddress(db, namespace, extensionId);
     if (!address) throw notFound('No such extension.');
-    return address;
+    return {
+      namespace: address.namespace,
+      extensionId: address.extensionId,
+      extensionRefId: await extensionIdentityId(db, address.namespace, address.extensionId),
+    };
   }
   const account = await db.Users.findUnique({ where: { Namespace: namespace } });
   if (!account || account.Kind !== ACCOUNT_KINDS[targetType]) {
     throw notFound('No such account.');
   }
-  return { namespace: account.Namespace };
+  return { namespace: account.Namespace, accountId: account.Id };
+}
+
+// The id of the row that gives an extension its identity.
+//
+// The row is written by the publish path and by the migration that introduced
+// the table, so it is normally already there. Creating it here as well keeps a
+// report from being refused over a row that only the registry is missing: the
+// extension is there, so the report about it has somewhere to point.
+async function extensionIdentityId(db, namespace, extensionId) {
+  const found = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: namespace, ExtensionId: extensionId } },
+    select: { Id: true },
+  });
+  if (found) return found.Id;
+  const account = await db.Users.findUnique({
+    where: { Namespace: namespace },
+    select: { Id: true },
+  });
+  await db.Extensions.createMany({
+    data: [{ Namespace: namespace, ExtensionId: extensionId, NamespaceId: account?.Id ?? null }],
+    skipDuplicates: true,
+  });
+  const created = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: namespace, ExtensionId: extensionId } },
+    select: { Id: true },
+  });
+  return created?.Id ?? null;
 }
 
 async function resolveExtensionAddress(db, namespace, extensionId) {
