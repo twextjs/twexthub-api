@@ -1917,6 +1917,11 @@ paths:
         has been transferred is reported against the address it lives at now,
         and a report filed against the old address follows it there.
 
+        The report is linked to the target as well as naming it, and the link
+        is what the database checks: it is cleared, and only the link is
+        cleared, when the target goes away. Nothing about a report stands in
+        the way of the account or extension it is about being deleted.
+
         A report is a queue entry and nothing more. Filing one never suspends,
         hides, or removes anything, and no number of reports does either: what
         happens to what was reported is a moderator's decision, taken by hand
