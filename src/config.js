@@ -47,6 +47,8 @@ export const DEFAULTS = {
     publishWindowMinutes: 60,
     downloadsPerIpPerWindow: 240,
     downloadWindowMinutes: 5,
+    reportsPerWindow: 10,
+    reportsWindowMinutes: 60,
     routesPerIpPerWindow: 600,
     routeWindowMinutes: 15,
   },
@@ -83,10 +85,11 @@ export const DEFAULTS = {
 const NULLABLE_KEYS = new Set([
   'rateLimits.publishPerWindow',
   'rateLimits.downloadsPerIpPerWindow',
+  'rateLimits.reportsPerWindow',
 ]);
 
 // Merge the config file over the defaults. `path` is the dotted key the value
-// came from, because an explicit null means "off" for the two nullable buckets
+// came from, because an explicit null means "off" for the nullable buckets
 // and "not set" for everything else: keeping the default when a file says
 // `publishPerWindow: null` would silently leave the bucket on, which is the one
 // thing that line is there to do.
@@ -130,6 +133,8 @@ const ENV_OVERRIDES = [
   ['rateLimits.publishWindowMinutes', 'TWEXTHUB_PUBLISH_WINDOW_MINUTES'],
   ['rateLimits.downloadsPerIpPerWindow', 'TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW'],
   ['rateLimits.downloadWindowMinutes', 'TWEXTHUB_DOWNLOAD_WINDOW_MINUTES'],
+  ['rateLimits.reportsPerWindow', 'TWEXTHUB_REPORTS_PER_WINDOW'],
+  ['rateLimits.reportsWindowMinutes', 'TWEXTHUB_REPORTS_WINDOW_MINUTES'],
   ['rateLimits.routesPerIpPerWindow', 'TWEXTHUB_ROUTES_PER_IP_PER_WINDOW'],
   ['rateLimits.routeWindowMinutes', 'TWEXTHUB_ROUTE_WINDOW_MINUTES'],
   ['pagination.defaultLimit', 'TWEXTHUB_PAGINATION_DEFAULT_LIMIT'],
