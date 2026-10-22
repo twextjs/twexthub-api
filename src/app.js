@@ -20,6 +20,7 @@ import { makeBlobsRouter } from './routes/blobs.js';
 import { makeDiscoveryRouter } from './routes/discovery.js';
 import { makeOrgsRouter } from './routes/orgs.js';
 import { makeAdminRouter } from './routes/admin.js';
+import { makeReportsRouter, makeAdminReportsRouter } from './routes/reports.js';
 
 export function createApp(opts = {}) {
   const config = opts.config ?? loadConfig();
@@ -92,8 +93,10 @@ export function createApp(opts = {}) {
   app.use(root || '/', makeMeRouter(shared));
   app.use(root || '/', makeBlobsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));
+  app.use(root || '/', makeReportsRouter(shared));
   app.use(root || '/', discovery.router);
   app.use(root || '/', makeAdminRouter(shared));
+  app.use(root || '/', makeAdminReportsRouter(shared));
 
   app.use((req, res, next) => next(notFound()));
   app.use(errorHandler);
