@@ -170,6 +170,45 @@ test('the reporter is handed a receipt, not the record', async () => {
     .expect(401);
 });
 
+test('a reporter sees its own reports, and only its own', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const peer = await signupAndAccept(app, uniqNs());
+
+  const first = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+  const second = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: peer.user.namespace,
+    reason: 'harassment',
+    description: 'This account is abusive.',
+  }).expect(201);
+  // Somebody else's report, which the list must not carry.
+  await fileReport(peer.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(201);
+
+  const list = await request(app).get(apiPath('/reports')).set(bearer(reporter.token)).expect(200);
+  assert.deepEqual(
+    list.body.data.map((row) => row.id),
+    [second.body.id, first.body.id],
+    'the newest report is first, and only the reporter’s own reports are there',
+  );
+  // The list is the same reduced view the single report gives.
+  assert.equal(list.body.data[0].description, undefined);
+  assert.equal(list.body.data[0].reporter, undefined);
+  assert.equal(list.body.data[0].status, 'open');
+
+  await request(app).get(apiPath('/reports')).expect(401);
+});
+
 test('a reporter cannot pile a second open report onto the same target', async () => {
   const admin = await adminAccount();
   const reporter = await signupAndAccept(app, uniqNs());
