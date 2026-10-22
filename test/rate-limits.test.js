@@ -22,12 +22,16 @@ let coarseApp;
 let coarseTelemetry;
 
 function makeRateConfig(overrides = {}) {
-  // makeConfig deep-merges, so the nulls switch off exactly these two buckets
-  // and every other key stays at its default.
+  // makeConfig deep-merges, so the nulls switch off exactly these three
+  // buckets and every other key stays at its default. The signup bucket is
+  // opened up because these tests need several accounts and the signup
+  // window is not what they are about.
   return makeConfig({
     rateLimits: {
       publishPerWindow: null,
       downloadsPerIpPerWindow: null,
+      reportsPerWindow: null,
+      signupsPerIpPerWindow: 10_000,
       ...overrides,
     },
   });
@@ -42,6 +46,7 @@ before(async () => {
   const tight = makeRateConfig({
     publishPerWindow: 2,
     downloadsPerIpPerWindow: 1,
+    reportsPerWindow: 2,
   });
   // The coarse limiter keys on req.ip and skips loopback, so this one counts a
   // forwarded address.
@@ -137,6 +142,62 @@ test('the download bucket is per IP, keyed on real paths, and a null limit disab
     SELECT 1 FROM "RateLimitEntries" WHERE "Bucket" LIKE 'download:%'
   `;
   assert.equal(disabled.length, 0, 'a null download limit records no bucket');
+});
+
+test('the report bucket is per reporter, and a null limit disables it', async () => {
+  const reporter = await signupAndAccept(tightApp, uniqNs());
+  const target = await signupAndAccept(tightApp, uniqNs());
+  const report = (app) =>
+    request(app).post(apiPath('/reports')).set(bearer(reporter.token)).send({
+      targetType: 'user',
+      targetNamespace: target.user.namespace,
+      reason: 'spam',
+      description: 'This account is sending spam.',
+    });
+
+  await report(tightApp).expect(201);
+  // The same target twice is a 409, but it still counts: the server did the
+  // work either way.
+  await report(tightApp).expect(409);
+  const third = await report(tightApp);
+  assert.equal(third.status, 429);
+  assert.ok(third.headers['retry-after'], 'a Retry-After rides the 429');
+
+  // A different reporter has its own bucket.
+  const peer = await signupAndAccept(tightApp, uniqNs());
+  await request(tightApp)
+    .post(apiPath('/reports'))
+    .set(bearer(peer.token))
+    .send({
+      targetType: 'user',
+      targetNamespace: target.user.namespace,
+      reason: 'spam',
+      description: 'This account is sending spam.',
+    })
+    .expect(201);
+
+  // With the bucket disabled, reports keep landing and nothing is counted. The
+  // targets are different accounts, so each one is a filing rather than a
+  // duplicate of the report above.
+  await db.$executeRaw`DELETE FROM "RateLimitEntries" WHERE "Bucket" LIKE 'report:%'`;
+  const others = [];
+  for (let i = 0; i < 3; i += 1) others.push(await signupAndAccept(tightApp, uniqNs()));
+  for (const other of others) {
+    await request(looseApp)
+      .post(apiPath('/reports'))
+      .set(bearer(reporter.token))
+      .send({
+        targetType: 'user',
+        targetNamespace: other.user.namespace,
+        reason: 'spam',
+        description: 'This account is sending spam.',
+      })
+      .expect(201);
+  }
+  const disabled = await db.$queryRaw`
+    SELECT 1 FROM "RateLimitEntries" WHERE "Bucket" LIKE 'report:%'
+  `;
+  assert.equal(disabled.length, 0, 'a null report limit records no bucket');
 });
 
 test('signup and login limits still work alongside the new buckets', async () => {
