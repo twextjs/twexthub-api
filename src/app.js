@@ -20,6 +20,7 @@ import { makeBlobsRouter } from './routes/blobs.js';
 import { makeDiscoveryRouter } from './routes/discovery.js';
 import { makeOrgsRouter } from './routes/orgs.js';
 import { makeAdminRouter } from './routes/admin.js';
+import { makeReportsRouter } from './routes/reports.js';
 
 export function createApp(opts = {}) {
   const config = opts.config ?? loadConfig();
@@ -89,6 +90,7 @@ export function createApp(opts = {}) {
   app.use(mount('/users'), makeUsersRouter(shared));
   app.use(mount('/orgs'), makeOrgsRouter({ ...shared, listExtensions: discovery.listExtensions }));
   app.use(mount('/notifications'), makeNotificationsRouter(shared));
+  app.use(mount('/reports'), makeReportsRouter(shared));
   app.use(root || '/', makeMeRouter(shared));
   app.use(root || '/', makeBlobsRouter(shared));
   app.use(root || '/', makePackagesRouter(shared));

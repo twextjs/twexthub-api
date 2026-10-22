@@ -261,6 +261,41 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
     WHERE "Namespace" = ${toNamespace} AND "ExtensionId" = ${id}
   `;
 
+  // Move only reports linked to this identity, leaving reports about deleted
+  // extensions at their original address. An open report that would collide
+  // at the destination keeps its address and identity link. If earlier moves
+  // left multiple open reports from one reporter linked here, move the oldest.
+  // The correlated conflict check cannot be expressed by the typed client.
+  await tx.$executeRaw`
+    UPDATE "Reports" r SET "TargetNamespace" = ${toNamespace}, "UpdatedAt" = now()
+    WHERE r."TargetExtensionRefId" = (
+      SELECT "Id" FROM "Extensions"
+      WHERE "Namespace" = ${namespace} AND "ExtensionId" = ${id}
+    )
+      AND (r."Status" <> 'open' OR NOT EXISTS (
+        SELECT 1 FROM "Reports" existing
+        WHERE existing."ReporterId" = r."ReporterId"
+          AND existing."TargetType" = r."TargetType"
+          AND existing."TargetExtensionId" = r."TargetExtensionId"
+          AND existing."Status" = 'open'
+          AND (
+            existing."TargetNamespace" = ${toNamespace}
+            OR (existing."TargetExtensionRefId" = r."TargetExtensionRefId" AND existing."Id" < r."Id")
+          )
+      ))
+  `;
+
+  // The extension's identity row moves with it: the address it is published
+  // under is now the destination's. The row keeps its id, so the reports filed
+  // about the extension keep their link to it, and only the address they name
+  // changes. A stale row at the destination is cleared first, the same way the
+  // address-keyed tables above are.
+  await tx.Extensions.deleteMany({ where: { Namespace: toNamespace, ExtensionId: id } });
+  await tx.Extensions.updateMany({
+    where: { Namespace: namespace, ExtensionId: id },
+    data: { Namespace: toNamespace, NamespaceId: account.Id },
+  });
+
   await tx.ExtensionOwners.createMany({
     data: [
       {

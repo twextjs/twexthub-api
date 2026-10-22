@@ -209,7 +209,7 @@ test('a complete legacy history is adopted in place', async () => {
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa', '4_reports'],
       'the baseline is recorded as applied, without its DDL running again',
     );
     const [kept] = await db.$queryRaw`
@@ -239,7 +239,7 @@ test('a history that stops before the download rollup is adopted and gets the ta
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa', '4_reports'],
       'the baseline is marked applied and the rollup is run after it',
     );
     const [{ present }] = await db.$queryRaw`
@@ -278,7 +278,7 @@ test('two bootstraps racing for one database serialize', async () => {
     `;
     assert.deepEqual(
       applied.map((row) => row.migration_name),
-      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa'],
+      ['0_baseline', '1_version_download_metrics', '2_pascal_case', '3_mfa', '4_reports'],
       'the baseline is applied exactly once',
     );
   });

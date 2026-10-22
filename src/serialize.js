@@ -130,6 +130,51 @@ export function legalDocumentToObject(row) {
   };
 }
 
+// The target a report is about, as the address it can be looked up by. The
+// extension id is null for the account-shaped targets, which have no id of
+// their own.
+function reportTarget(row) {
+  return {
+    type: row.TargetType,
+    namespace: row.TargetNamespace,
+    id: row.TargetExtensionId || null,
+  };
+}
+
+// A report as a reviewer sees it: the whole record, including who filed it
+// and what they wrote. Only the admin surfaces hand this out.
+export function reportToObject(row) {
+  return {
+    id: String(row.Id),
+    reporter: row.ReporterNamespace,
+    target: reportTarget(row),
+    reason: row.Reason,
+    description: row.Description,
+    status: row.Status,
+    reviewedBy: row.ReviewedByNamespace ?? null,
+    reviewedAt: row.ReviewedAt ? row.ReviewedAt.toISOString() : null,
+    resolutionNote: row.ResolutionNote ?? null,
+    createdAt: row.CreatedAt.toISOString(),
+    updatedAt: row.UpdatedAt.toISOString(),
+  };
+}
+
+// A report as the account that filed it sees it. The description is left out
+// -- what a report says is the reviewer's business -- and so are the
+// reviewer's identity and the note the reviewer wrote about it. The reporter
+// learns that the report was decided, and when, and nothing else.
+export function reportToOwnerObject(row) {
+  return {
+    id: String(row.Id),
+    target: reportTarget(row),
+    reason: row.Reason,
+    status: row.Status,
+    reviewedAt: row.ReviewedAt ? row.ReviewedAt.toISOString() : null,
+    createdAt: row.CreatedAt.toISOString(),
+    updatedAt: row.UpdatedAt.toISOString(),
+  };
+}
+
 // The pages a version is reachable through, so a client holding one version
 // does not have to know the shape of the paths to it. `self` and `extension`
 // are relative to the API root like the collection links in a paginated body;

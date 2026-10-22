@@ -1,0 +1,789 @@
+import { test, before, beforeEach, after } from 'node:test';
+import assert from 'node:assert/strict';
+import request from 'supertest';
+import {
+  apiPath,
+  approveVersion,
+  bearer,
+  boot,
+  publishProject,
+  resetDb,
+  signupAndAccept,
+  uniqNs,
+} from './helpers.mjs';
+
+let app;
+let db;
+
+before(async () => {
+  // The report window is small here so that the limit is reachable without a
+  // hundred requests. The bucket is counted per reporter, and every test
+  // files its reports under an account of its own. The signup window is opened
+  // up alongside it, because the test that reaches the report limit needs a
+  // target account for every report it files.
+  ({ app, db } = await boot({ rateLimits: { reportsPerWindow: 5, signupsPerIpPerWindow: 100 } }));
+});
+beforeEach(resetDb);
+after(async () => {
+  await db.$disconnect();
+});
+
+// The first account created after a reset is the one that gets the admin role.
+async function adminAccount() {
+  return signupAndAccept(app, uniqNs());
+}
+
+const fileReport = (token, body) =>
+  request(app).post(apiPath('/reports')).set(bearer(token)).send(body);
+
+const queue = (token, query = '') =>
+  request(app)
+    .get(apiPath(`/admin/reports${query}`))
+    .set(bearer(token));
+
+const decide = (token, id, body) =>
+  request(app)
+    .patch(apiPath(`/admin/reports/${id}`))
+    .set(bearer(token))
+    .send(body);
+
+test('a report needs an authenticated caller', async () => {
+  await request(app)
+    .post(apiPath('/reports'))
+    .send({
+      targetType: 'user',
+      targetNamespace: uniqNs(),
+      reason: 'spam',
+      description: 'Spam.',
+    })
+    .expect(401);
+});
+
+test('a report has to be about something that is there', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+
+  // An account that does not exist.
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: uniqNs(),
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(404);
+
+  // An extension that was never published.
+  await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: admin.user.namespace,
+    targetExtensionId: 'nothing',
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(404);
+
+  // A namespace that is not a namespace.
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: 'Not A Namespace',
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(422);
+
+  // A category that is not one of the categories.
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'because',
+    description: 'Spam.',
+  }).expect(422);
+
+  // A description that says nothing.
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: '   ',
+  }).expect(422);
+});
+
+test('an extension awaiting its first approval cannot be reported', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  const body = {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'spam',
+    description: 'Spam.',
+  };
+
+  await fileReport(reporter.token, body).expect(404);
+  assert.equal(await db.Reports.count(), 0);
+
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  await fileReport(reporter.token, body).expect(201);
+});
+
+test('an organization is a target of its own', async () => {
+  const owner = await signupAndAccept(app, uniqNs());
+  const org = uniqNs();
+  await request(app)
+    .post(apiPath('/orgs'))
+    .set(bearer(owner.token))
+    .send({ namespace: org, displayName: 'Acme Inc' })
+    .expect(201);
+
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'organization',
+    targetNamespace: org,
+    reason: 'impersonation',
+    description: 'It pretends to be somebody else.',
+  }).expect(201);
+  assert.equal(created.body.target.namespace, org);
+
+  // The same namespace filed as an account is a different kind of target, and
+  // the report is refused rather than quietly recorded as one.
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: org,
+    reason: 'impersonation',
+    description: 'It pretends to be somebody else.',
+  }).expect(404);
+});
+
+test('the reporter is handed a receipt, not the record', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+  assert.equal(created.body.status, 'open');
+  assert.equal(created.body.target.namespace, admin.user.namespace);
+  assert.equal(created.body.reason, 'spam');
+  // What the report says, and who said it, are the reviewer's business.
+  assert.equal(created.body.description, undefined);
+  assert.equal(created.body.reporter, undefined);
+  assert.equal(created.body.resolutionNote, undefined);
+  assert.equal(created.body.reviewedBy, undefined);
+
+  // The reporter may read its own report, and it is the same reduced view.
+  const own = await request(app)
+    .get(apiPath(`/reports/${created.body.id}`))
+    .set(bearer(reporter.token))
+    .expect(200);
+  assert.deepEqual(own.body, created.body);
+
+  // And nobody else's.
+  const stranger = await signupAndAccept(app, uniqNs());
+  await request(app)
+    .get(apiPath(`/reports/${created.body.id}`))
+    .set(bearer(stranger.token))
+    .expect(404);
+  await request(app)
+    .get(apiPath(`/reports/${created.body.id}`))
+    .expect(401);
+});
+
+test('a reporter sees its own reports, and only its own', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const peer = await signupAndAccept(app, uniqNs());
+
+  const first = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+  const second = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: peer.user.namespace,
+    reason: 'harassment',
+    description: 'This account is abusive.',
+  }).expect(201);
+  // Somebody else's report, which the list must not carry.
+  await fileReport(peer.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(201);
+
+  const list = await request(app).get(apiPath('/reports')).set(bearer(reporter.token)).expect(200);
+  assert.deepEqual(
+    list.body.data.map((row) => row.id),
+    [second.body.id, first.body.id],
+    'the newest report is first, and only the reporter’s own reports are there',
+  );
+  // The list is the same reduced view the single report gives.
+  assert.equal(list.body.data[0].description, undefined);
+  assert.equal(list.body.data[0].reporter, undefined);
+  assert.equal(list.body.data[0].status, 'open');
+
+  await request(app).get(apiPath('/reports')).expect(401);
+});
+
+test('a reporter cannot pile a second open report onto the same target', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const body = {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'Spam.',
+  };
+
+  const first = await fileReport(reporter.token, body).expect(201);
+  await fileReport(reporter.token, body).expect(409);
+
+  // Once the report has been decided, the reporter may file another one.
+  await decide(admin.token, first.body.id, {
+    status: 'dismissed',
+    note: 'Not a violation.',
+  }).expect(200);
+  await fileReport(reporter.token, body).expect(201);
+});
+
+test('the report and the reporter are the reviewer’s to read', async () => {
+  const admin = await adminAccount();
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  // The queue is not for the reporter, and not for a stranger either.
+  await queue(reporter.token).expect(403);
+  await queue(target.token).expect(403);
+  await request(app).get(apiPath('/admin/reports')).expect(401);
+
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 1);
+  const row = list.body.data[0];
+  assert.equal(row.id, created.body.id);
+  assert.equal(row.reporter, reporter.user.namespace);
+  assert.equal(row.description, 'This account is sending spam.');
+  assert.equal(row.status, 'open');
+
+  // The queue can be narrowed to the reports still waiting.
+  await queue(admin.token, '?status=open').expect(200);
+  const decided = await queue(admin.token, '?status=resolved').expect(200);
+  assert.equal(decided.body.data.length, 0);
+  await queue(admin.token, '?status=maybe').expect(422);
+});
+
+test('a decision records who made it, when, and why', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  const decided = await decide(admin.token, created.body.id, {
+    status: 'resolved',
+    note: 'The account was suspended.',
+  }).expect(200);
+  assert.equal(decided.body.status, 'resolved');
+  assert.equal(decided.body.reviewedBy, admin.user.namespace);
+  assert.ok(decided.body.reviewedAt);
+  assert.equal(decided.body.resolutionNote, 'The account was suspended.');
+
+  // The reporter learns that it was decided, and nothing else.
+  const own = await request(app)
+    .get(apiPath(`/reports/${created.body.id}`))
+    .set(bearer(reporter.token))
+    .expect(200);
+  assert.equal(own.body.status, 'resolved');
+  assert.equal(own.body.resolutionNote, undefined);
+  assert.equal(own.body.reviewedBy, undefined);
+
+  // The decision is in the audit trail, with the reviewer who made it.
+  const trail = await request(app)
+    .get(apiPath('/admin/audit'))
+    .set(bearer(admin.token))
+    .expect(200);
+  const entry = trail.body.data.find((row) => row.action === 'report.resolve');
+  assert.ok(entry, 'the decision is audited');
+  assert.equal(entry.detail.reportId, created.body.id);
+  assert.equal(entry.actor, admin.user.namespace);
+});
+
+test('a decision has to be one of the two outcomes', async () => {
+  const admin = await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: admin.user.namespace,
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(201);
+
+  // There is no way back to open, and no outcome that is not one of the two.
+  await decide(admin.token, created.body.id, { status: 'open' }).expect(422);
+  await decide(admin.token, created.body.id, { status: 'deleted' }).expect(422);
+  // A decision without a reason is not a decision anybody can account for.
+  await decide(admin.token, created.body.id, { status: 'resolved', note: '  ' }).expect(422);
+
+  // The reporter cannot decide their own report, and a missing one is a 404.
+  await decide(reporter.token, created.body.id, { status: 'resolved' }).expect(403);
+  await decide(admin.token, 999999, { status: 'resolved' }).expect(404);
+});
+
+test('submissions are rate limited per reporter', async () => {
+  await adminAccount();
+  const reporter = await signupAndAccept(app, uniqNs());
+  const targets = [];
+  for (let i = 0; i < 6; i += 1) targets.push(await signupAndAccept(app, uniqNs()));
+
+  for (const target of targets.slice(0, 5)) {
+    await fileReport(reporter.token, {
+      targetType: 'user',
+      targetNamespace: target.user.namespace,
+      reason: 'spam',
+      description: 'Spam.',
+    }).expect(201);
+  }
+  await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: targets[5].user.namespace,
+    reason: 'spam',
+    description: 'Spam.',
+  }).expect(429);
+});
+
+test('a report outlives the account it is about', async () => {
+  const admin = await adminAccount();
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  await request(app)
+    .delete(apiPath(`/users/${target.user.namespace}`))
+    .set(bearer(admin.token))
+    .expect(204);
+
+  // The report is still in the queue, still saying what was reported: a
+  // deleted account does not take the complaint about it with it.
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].id, created.body.id);
+  assert.equal(list.body.data[0].target.namespace, target.user.namespace);
+});
+
+test('a report follows the extension it is about', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+  assert.equal(created.body.target.namespace, owner.user.namespace);
+  assert.equal(created.body.target.id, 'hello');
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  // The extension moved, so the report about it moved with it: a reviewer
+  // reads about the extension, not about the address it used to live at.
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].id, created.body.id);
+  assert.equal(list.body.data[0].target.namespace, recipient.user.namespace);
+  assert.equal(list.body.data[0].target.id, 'hello');
+});
+
+test('a report is filed against where the extension lives now', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  // The old address redirects, and the report lands on the extension.
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+  assert.equal(created.body.target.namespace, recipient.user.namespace);
+});
+
+test('reports do not act on the target by themselves', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+
+  // Three accounts, three reports, one extension.
+  for (let i = 0; i < 3; i += 1) {
+    const reporter = await signupAndAccept(app, uniqNs());
+    await fileReport(reporter.token, {
+      targetType: 'extension',
+      targetNamespace: owner.user.namespace,
+      targetExtensionId: 'hello',
+      reason: 'malicious_code',
+      description: 'It runs code it should not.',
+    }).expect(201);
+  }
+
+  // Nothing was suspended, hidden, or removed: enforcement is a decision
+  // somebody makes by hand, not a count.
+  await request(app)
+    .get(apiPath(`/@${owner.user.namespace}/hello`))
+    .expect(200);
+  await publishProject(app, owner.user.namespace, 'hello', owner.token, {
+    version: '2.0.0',
+    code: '// two',
+  });
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 3);
+});
+
+test('a report is linked to the account it is about', async () => {
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  // The report names the account by address and holds a link to the row, so
+  // the database knows which account the complaint is about.
+  const account = await db.Users.findUnique({ where: { Namespace: target.user.namespace } });
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(report.TargetAccountId, account.Id);
+  assert.equal(report.TargetExtensionRefId, null);
+});
+
+test('a report is linked to the extension it is about', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+
+  // The extension has a row of its own, held by the account that owns the
+  // address, and the report points at that row.
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: owner.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.ok(identity, 'the extension has an identity row');
+  const ownerAccount = await db.Users.findUnique({ where: { Namespace: owner.user.namespace } });
+  assert.equal(identity.NamespaceId, ownerAccount.Id);
+
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(report.TargetExtensionRefId, identity.Id);
+  assert.equal(report.TargetAccountId, null);
+});
+
+test('deleting the target clears the link and leaves the report standing', async () => {
+  const admin = await adminAccount();
+  const target = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const created = await fileReport(reporter.token, {
+    targetType: 'user',
+    targetNamespace: target.user.namespace,
+    reason: 'spam',
+    description: 'This account is sending spam.',
+  }).expect(201);
+
+  // A moderator's decision is a moderator's decision: the report does not
+  // stand in the way of the account being deleted.
+  await request(app)
+    .delete(apiPath(`/users/${target.user.namespace}`))
+    .set(bearer(admin.token))
+    .expect(204);
+
+  // The link is cleared and the report stays, still saying what was reported.
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.ok(report, 'the report outlives the account it is about');
+  assert.equal(report.TargetAccountId, null);
+  assert.equal(report.TargetNamespace, target.user.namespace);
+
+  const list = await queue(admin.token).expect(200);
+  assert.equal(list.body.data.length, 1);
+  assert.equal(list.body.data[0].target.namespace, target.user.namespace);
+});
+
+test('a reported extension can still be deleted by hand', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+
+  // A complaint is not a hold on the extension: its owner may still delete it.
+  await request(app)
+    .delete(apiPath(`/@${owner.user.namespace}/hello`))
+    .set(bearer(owner.token))
+    .expect(204);
+
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: owner.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.equal(identity, null, 'the extension took its identity with it');
+
+  const report = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.ok(report, 'the report outlives the extension it is about');
+  assert.equal(report.TargetExtensionRefId, null);
+  assert.equal(report.TargetNamespace, owner.user.namespace);
+  assert.equal(report.TargetExtensionId, 'hello');
+});
+
+test('account deletion preserves reported extensions with surviving co-owner versions', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const coowner = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const ns = owner.user.namespace;
+  await publishProject(app, ns, 'hello', owner.token);
+  await approveVersion(app, admin.token, ns, 'hello', '1.0.0');
+  await request(app)
+    .put(apiPath(`/@${ns}/hello/owners/${coowner.user.namespace}`))
+    .set(bearer(owner.token))
+    .expect(204);
+  await request(app)
+    .post(apiPath(`/@${ns}/hello/owners/${coowner.user.namespace}/accept`))
+    .set(bearer(coowner.token))
+    .expect(200);
+  await publishProject(app, ns, 'hello', coowner.token, { version: '2.0.0' });
+  await publishProject(app, ns, 'solo', owner.token);
+
+  const reports = [];
+  for (const id of ['hello', 'solo']) {
+    const created = await fileReport(reporter.token, {
+      targetType: 'extension',
+      targetNamespace: ns,
+      targetExtensionId: id,
+      reason: 'spam',
+      description: 'Spam.',
+    }).expect(201);
+    reports.push(await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } }));
+  }
+
+  await request(app)
+    .delete(apiPath(`/users/${ns}`))
+    .set(bearer(admin.token))
+    .expect(204);
+
+  const remaining = await db.Versions.findMany({ where: { Namespace: ns } });
+  assert.deepEqual(
+    remaining.map((row) => row.Version),
+    ['2.0.0'],
+  );
+  const identity = await db.Extensions.findUnique({
+    where: { Id: reports[0].TargetExtensionRefId },
+  });
+  assert.ok(identity, 'the co-owner still uses the extension identity');
+  assert.equal(identity.NamespaceId, null);
+  const shared = await db.Reports.findUnique({ where: { Id: reports[0].Id } });
+  assert.equal(shared.TargetExtensionRefId, identity.Id);
+  assert.equal(
+    await db.Extensions.findUnique({ where: { Id: reports[1].TargetExtensionRefId } }),
+    null,
+  );
+  const solo = await db.Reports.findUnique({ where: { Id: reports[1].Id } });
+  assert.equal(solo.TargetExtensionRefId, null);
+  assert.equal(solo.TargetNamespace, ns);
+});
+
+test('the link follows the extension through a transfer', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  await approveVersion(app, admin.token, owner.user.namespace, 'hello', '1.0.0');
+  const created = await fileReport(reporter.token, {
+    targetType: 'extension',
+    targetNamespace: owner.user.namespace,
+    targetExtensionId: 'hello',
+    reason: 'malicious_code',
+    description: 'It runs code it should not.',
+  }).expect(201);
+  const before = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  // The extension is the same extension, so the report still points at the
+  // same row; only the address it names has changed.
+  const after = await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } });
+  assert.equal(after.TargetExtensionRefId, before.TargetExtensionRefId);
+  assert.equal(after.TargetNamespace, recipient.user.namespace);
+
+  const identity = await db.Extensions.findUnique({
+    where: { Namespace_ExtensionId: { Namespace: recipient.user.namespace, ExtensionId: 'hello' } },
+  });
+  assert.equal(identity.Id, before.TargetExtensionRefId);
+  const recipientAccount = await db.Users.findUnique({
+    where: { Namespace: recipient.user.namespace },
+  });
+  assert.equal(identity.NamespaceId, recipientAccount.Id);
+});
+
+test('a transfer preserves reports when an open destination report conflicts', async () => {
+  const admin = await adminAccount();
+  const owner = await signupAndAccept(app, uniqNs());
+  const recipient = await signupAndAccept(app, uniqNs());
+  const reporter = await signupAndAccept(app, uniqNs());
+  const historicalReporter = await signupAndAccept(app, uniqNs());
+  const body = {
+    targetType: 'extension',
+    targetExtensionId: 'hello',
+    reason: 'spam',
+    description: 'Spam.',
+  };
+
+  // Both addresses previously held a different extension with the same id.
+  const historical = [];
+  for (const [account, token] of [
+    [recipient, reporter.token],
+    [owner, historicalReporter.token],
+  ]) {
+    await publishProject(app, account.user.namespace, 'hello', account.token);
+    await approveVersion(app, admin.token, account.user.namespace, 'hello', '1.0.0');
+    const created = await fileReport(token, {
+      ...body,
+      targetNamespace: account.user.namespace,
+    }).expect(201);
+    await request(app)
+      .delete(apiPath(`/@${account.user.namespace}/hello`))
+      .set(bearer(account.token))
+      .expect(204);
+    historical.push(await db.Reports.findUnique({ where: { Id: BigInt(created.body.id) } }));
+  }
+
+  await publishProject(app, owner.user.namespace, 'hello', owner.token);
+  const sourceBody = { ...body, targetNamespace: owner.user.namespace };
+  const resolved = await fileReport(reporter.token, sourceBody).expect(201);
+  await decide(admin.token, resolved.body.id, { status: 'resolved', note: 'Reviewed.' }).expect(
+    200,
+  );
+  const open = await fileReport(reporter.token, sourceBody).expect(201);
+  const before = await db.Reports.findUnique({ where: { Id: BigInt(open.body.id) } });
+
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers`))
+    .set(bearer(owner.token))
+    .send({ to: recipient.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${owner.user.namespace}/hello/transfers/${recipient.user.namespace}/accept`))
+    .set(bearer(recipient.token))
+    .expect(200);
+
+  const identity = await db.Extensions.findUnique({ where: { Id: before.TargetExtensionRefId } });
+  assert.equal(identity.Namespace, recipient.user.namespace);
+  assert.equal(await db.Versions.count({ where: { Namespace: recipient.user.namespace } }), 1);
+
+  const skipped = await db.Reports.findUnique({ where: { Id: before.Id } });
+  assert.deepEqual(skipped, before, 'the conflicting open report keeps its link and address');
+  const moved = await db.Reports.findUnique({ where: { Id: BigInt(resolved.body.id) } });
+  assert.equal(moved.TargetNamespace, recipient.user.namespace);
+  assert.equal(moved.TargetExtensionRefId, identity.Id);
+  for (const report of historical) {
+    assert.equal(report.TargetExtensionRefId, null);
+    assert.deepEqual(await db.Reports.findUnique({ where: { Id: report.Id } }), report);
+  }
+
+  // A later report and transfer must also handle the earlier skipped report.
+  await decide(admin.token, String(historical[0].Id), {
+    status: 'resolved',
+    note: 'Reviewed.',
+  }).expect(200);
+  const later = await fileReport(reporter.token, {
+    ...body,
+    targetNamespace: recipient.user.namespace,
+  }).expect(201);
+  await request(app)
+    .post(apiPath(`/@${recipient.user.namespace}/hello/transfers`))
+    .set(bearer(recipient.token))
+    .send({ to: admin.user.namespace })
+    .expect(201);
+  await request(app)
+    .post(apiPath(`/@${recipient.user.namespace}/hello/transfers/${admin.user.namespace}/accept`))
+    .set(bearer(admin.token))
+    .expect(200);
+
+  const openReports = await db.Reports.findMany({
+    where: { TargetExtensionRefId: identity.Id, Status: 'open' },
+  });
+  assert.equal(openReports.length, 2);
+  assert.equal(openReports.filter((row) => row.TargetNamespace === admin.user.namespace).length, 1);
+  const laterReport = await db.Reports.findUnique({ where: { Id: BigInt(later.body.id) } });
+  assert.equal(laterReport.TargetExtensionRefId, identity.Id);
+  assert.equal(laterReport.TargetNamespace, recipient.user.namespace);
+  const earlierReport = await db.Reports.findUnique({ where: { Id: before.Id } });
+  assert.equal(earlierReport.TargetNamespace, admin.user.namespace);
+});

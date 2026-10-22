@@ -47,6 +47,8 @@ rateLimits:
   publishWindowMinutes: 60
   downloadsPerIpPerWindow: 240 # null turns this bucket off
   downloadWindowMinutes: 5
+  reportsPerWindow: 10 # null turns this bucket off
+  reportsWindowMinutes: 60
   routesPerIpPerWindow: 600
   routeWindowMinutes: 15
 
@@ -97,13 +99,13 @@ cors:
 
 ## 🔀 How Settings Are Applied
 
-The configuration file is merged over the defaults one key at a time, so a file only has to set what it wants to change. An explicit `null` in the file means "not set" and falls back to the default — except for `rateLimits.publishPerWindow` and `rateLimits.downloadsPerIpPerWindow`, where `null` is how you switch a bucket off.
+The configuration file is merged over the defaults one key at a time, so a file only has to set what it wants to change. An explicit `null` in the file means "not set" and falls back to the default — except for `rateLimits.publishPerWindow`, `rateLimits.downloadsPerIpPerWindow`, and `rateLimits.reportsPerWindow`, where `null` is how you switch a bucket off.
 
 Environment variables are read last and win over the file. They are typed by the default they override:
 
 - Booleans accept `true` or `1` and `false` or `0`. Anything else fails startup with an error naming the variable.
 - Numbers must be positive integers. A typo like `TWEXTHUB_PORT=3000x` fails startup instead of quietly becoming `3000`.
-- The two switchable rate-limit buckets also accept `off` or `null`, which sets them to `null`.
+- The switchable rate-limit buckets also accept `off` or `null`, which sets them to `null`.
 - `cors.allowedOrigins` is a comma-separated list, or `*`.
 - `trustProxy` accepts `true`, `false`, a number of hops, or one of Express's keyword values.
 
@@ -197,9 +199,10 @@ Limits are counted in fixed windows aligned to the clock — a 15-minute window 
 - `signupsPerIpPerWindow` / `signupWindowMinutes`: Sign-up attempts from one IP, counting attempts at both accounts and organizations whether they succeed or not. Defaults to `5` per `15` minutes. `TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW`, `TWEXTHUB_SIGNUP_WINDOW_MINUTES`.
 - `publishPerWindow` / `publishWindowMinutes`: Publishes per account — per account rather than per IP because CI runners often share one. Defaults to `30` per `60` minutes. `TWEXTHUB_PUBLISH_PER_WINDOW`, `TWEXTHUB_PUBLISH_WINDOW_MINUTES`.
 - `downloadsPerIpPerWindow` / `downloadWindowMinutes`: Downloads from one IP. Defaults to `240` per `5` minutes. `TWEXTHUB_DOWNLOADS_PER_IP_PER_WINDOW`, `TWEXTHUB_DOWNLOAD_WINDOW_MINUTES`.
+- `reportsPerWindow` / `reportsWindowMinutes`: Reports filed per account — per account rather than per IP because a report is about somebody else's account, and the rate that matters is the one at which a single account can fill the moderators' queue. Defaults to `10` per `60` minutes. `TWEXTHUB_REPORTS_PER_WINDOW`, `TWEXTHUB_REPORTS_WINDOW_MINUTES`.
 - `routesPerIpPerWindow` / `routeWindowMinutes`: A coarse cap on every route, as a backstop for floods the buckets above don't cover. Loopback addresses are exempt. Both must be positive integers — the server won't start without them. Defaults to `600` per `15` minutes. `TWEXTHUB_ROUTES_PER_IP_PER_WINDOW`, `TWEXTHUB_ROUTE_WINDOW_MINUTES`.
 
-The publish and download buckets can be switched off entirely with `null` in the file, or `off` in the environment.
+The publish, download, and report buckets can be switched off entirely with `null` in the file, or `off` in the environment.
 
 ## 📄 Pagination
 

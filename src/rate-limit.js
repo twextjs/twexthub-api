@@ -77,11 +77,20 @@ export function makeRateLimiter(db, config) {
     return windowedCheck(bucket, max, limits.downloadWindowMinutes ?? 5);
   }
 
+  // Reports are counted per reporter rather than per address: the complaint is
+  // about somebody else's account, so the rate that matters is the one at which
+  // one account can fill the moderators' queue.
+  function reportCheck(bucket) {
+    const max = limits.reportsPerWindow === undefined ? 10 : limits.reportsPerWindow;
+    return windowedCheck(bucket, max, limits.reportsWindowMinutes ?? 60);
+  }
+
   const maxWindow = Math.max(
     limits.loginWindowMinutes,
     limits.signupWindowMinutes,
     limits.publishWindowMinutes ?? 60,
     limits.downloadWindowMinutes ?? 5,
+    limits.reportsWindowMinutes ?? 60,
   );
   const cleanupInterval = setInterval(async () => {
     try {
@@ -98,6 +107,7 @@ export function makeRateLimiter(db, config) {
     signupCheck,
     publishCheck,
     downloadCheck,
+    reportCheck,
     stop() {
       clearInterval(cleanupInterval);
     },
