@@ -1396,6 +1396,11 @@ export function makePackagesRouter({ db, config, termsGate, rateLimiter, resolve
         throw conflict('A publish is in progress for this extension.');
       }
       await tx.Versions.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
+      // The extension is gone, so its identity goes with it. The reports filed
+      // about it keep their address and lose only the link to the row, which
+      // is the same thing the delete does to every other link in the schema:
+      // nothing is taken away, and nothing is put in the way of the delete.
+      await tx.Extensions.deleteMany({ where: { Namespace: namespace, ExtensionId: id } });
       // An invitation to manage an extension that no longer exists can never
       // be accepted, and the extension_owners rows survive on purpose, so
       // these have to be cleared here rather than left for a cascade.
@@ -1559,6 +1564,19 @@ async function publishVersion(
           },
         ],
         skipDuplicates: true,
+      });
+      // The extension's identity row: the thing a report about this extension
+      // points at. An extension is an address rather than a row, so without
+      // this there would be nothing to point at. It belongs to the account
+      // holding the address, and it lives until the extension is deleted.
+      await tx.Extensions.upsert({
+        where: { Namespace_ExtensionId: { Namespace: owner.Namespace, ExtensionId: id } },
+        create: {
+          Namespace: owner.Namespace,
+          ExtensionId: id,
+          NamespaceId: owner.Id,
+        },
+        update: { NamespaceId: owner.Id },
       });
       // Charge the blob and source bytes to the namespace account. Identical
       // content is re-charged per version row; deleting a version refunds it.

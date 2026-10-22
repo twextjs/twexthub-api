@@ -273,6 +273,17 @@ export async function acceptTransfer(tx, { config, actor, namespace, id, toNames
     data: { TargetNamespace: toNamespace, UpdatedAt: new Date() },
   });
 
+  // The extension's identity row moves with it: the address it is published
+  // under is now the destination's. The row keeps its id, so the reports filed
+  // about the extension keep their link to it, and only the address they name
+  // changes. A stale row at the destination is cleared first, the same way the
+  // address-keyed tables above are.
+  await tx.Extensions.deleteMany({ where: { Namespace: toNamespace, ExtensionId: id } });
+  await tx.Extensions.updateMany({
+    where: { Namespace: namespace, ExtensionId: id },
+    data: { Namespace: toNamespace, NamespaceId: account.Id },
+  });
+
   await tx.ExtensionOwners.createMany({
     data: [
       {

@@ -382,6 +382,10 @@ export function makeUsersRouter({ db, config, termsGate, rateLimiter, resolveTar
       // deleting the user row would leave its per-extension and account-wide
       // hooks orphaned; take them, and the deliveries they cascade to, with it.
       await tx.Webhooks.deleteMany({ where: { Namespace: target.Namespace } });
+      // The address dies with the account that held it, so the extensions
+      // published under it lose their identity with it. The reports filed
+      // about them keep the address they name.
+      await tx.Extensions.deleteMany({ where: { Namespace: target.Namespace } });
       await tx.Users.delete({ where: { Id: target.Id } });
       return rows;
     });

@@ -249,6 +249,9 @@ export function makeOrgsRouter({
       await tx.ExtensionRedirects.deleteMany({
         where: { OR: [{ FromNamespace: org.Namespace }, { ToNamespace: org.Namespace }] },
       });
+      // The extensions the organization published are gone with its versions,
+      // so their identity rows go with them.
+      await tx.Extensions.deleteMany({ where: { Namespace: org.Namespace } });
       await tx.Users.delete({ where: { Id: org.Id } });
       await audit(tx, req.auth.user, 'org.delete', { namespace: org.Namespace });
       return rows;
