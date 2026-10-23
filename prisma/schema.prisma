@@ -38,6 +38,27 @@ model AutomationTokens {
   @@index([UserId], map: "automation_tokens_user_id_idx")
 }
 
+/// A CLI sign-in waiting on a browser: the secret the client polls with, the
+/// short code a person types into the approval page, and the account that
+/// approved it. Both codes are stored as hashes, like a session token, so
+/// neither can be recovered from the table.
+model DeviceCodes {
+  Id             BigInt    @id @default(autoincrement())
+  DeviceCodeHash String    @unique
+  UserCodeHash   String    @unique
+  ClientName     String
+  UserId         BigInt?
+  ApprovedAt     DateTime? @db.Timestamptz(6)
+  DeniedAt       DateTime? @db.Timestamptz(6)
+  LastPolledAt   DateTime? @db.Timestamptz(6)
+  CreatedAt      DateTime  @default(now()) @db.Timestamptz(6)
+  ExpiresAt      DateTime  @db.Timestamptz(6)
+  Users          Users?    @relation(fields: [UserId], references: [Id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([ExpiresAt])
+  @@index([UserId])
+}
+
 model DistTags {
   OwnerId     BigInt
   Namespace   String
@@ -385,6 +406,7 @@ model Users {
   Kind                                                       String                  @default("user")
   AuditLog                                                   AuditLog[]
   AutomationTokens                                           AutomationTokens[]
+  DeviceCodes                                                DeviceCodes[]
   DistTags                                                   DistTags[]
   ExtensionOwnerInvitesExtensionOwnerInvitesInvitedByTousers ExtensionOwnerInvites[] @relation("extension_owner_invites_invited_byTousers")
   ExtensionOwnerInvitesExtensionOwnerInvitesOwnerIdTousers   ExtensionOwnerInvites[] @relation("extension_owner_invites_owner_idTousers")

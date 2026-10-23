@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { hashToken, requireSession } from '../auth.js';
 import { beginSigninMfa, hasPasskeys } from '../mfa.js';
 import { makeOidcClient, newSecret, oidcEnabled, OidcError } from '../oidc.js';
+import { deviceEnabled } from '../device.js';
 import { conflict, fieldErrors, HttpError, notFound } from '../errors.js';
 import { isValidNamespace, normalizeApiRoot } from '../util.js';
 import { sessionToObject, userToObject } from '../serialize.js';
@@ -55,6 +56,11 @@ export function makeAuthRouter({ db, config, rateLimiter }) {
     res.json({
       passwordAuth: !oidc.required,
       oidc: enabled ? { issuer: oidc.issuer, required: Boolean(oidc.required) } : null,
+      // A client that cannot run a browser flow reads this to know it can ask
+      // for a code instead of prompting for a password.
+      device: deviceEnabled(config)
+        ? { verificationUrl: config.auth.device.verificationUrl }
+        : null,
     });
   });
 

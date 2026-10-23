@@ -36,6 +36,8 @@ auth:
   webauthn:
     rpId: null # defaults to the hostname of publicBaseUrl
     rpName: null # defaults to the product name
+  device:
+    verificationUrl: null # the page a browser approves a CLI sign-in on
   reauthWindowMinutes: 10
 
 rateLimits:
@@ -87,6 +89,7 @@ cors:
 - [🔐 Authentication](#-authentication)
   - [Signing in with an identity provider](#signing-in-with-an-identity-provider)
   - [Signing in with a passkey](#signing-in-with-a-passkey)
+  - [Signing in from a CLI](#signing-in-from-a-cli)
 - [🚦 Rate Limits](#-rate-limits)
 - [📄 Pagination](#-pagination)
 - [📦 Size Limits](#-size-limits)
@@ -139,6 +142,7 @@ Migrations are applied by Prisma Migrate. The server runs `prisma migrate deploy
 - `oidc.clientId`: Client identifier registered at the provider. `TWEXTHUB_OIDC_CLIENT_ID`.
 - `oidc.clientSecret`: Client secret for a confidential client. Leave unset for a public client that authenticates with PKCE alone. `TWEXTHUB_OIDC_CLIENT_SECRET`.
 - `oidc.required`: When `true`, password sign-in and registration are refused and the provider is the only way to get an account. Defaults to `false`. `TWEXTHUB_OIDC_REQUIRED`.
+- `device.verificationUrl`: The page a browser visits to approve a CLI sign-in. Defaults to `null`, which turns the device flow off. `TWEXTHUB_DEVICE_VERIFICATION_URL`.
 - `webauthn.rpId`: The domain passkeys are scoped to — the hostname of the site that runs the ceremony, without a scheme or port. Defaults to `null`, which uses the hostname of `publicBaseUrl`. Set it explicitly when the web client is served from a parent domain of the API (for example `example.com` with the API on `api.example.com` and the client on `app.example.com`) or from a different host. `TWEXTHUB_WEBAUTHN_RP_ID`.
 - `webauthn.rpName`: The name an authenticator shows when it offers to store a passkey. Defaults to `null`, which uses the product name. `TWEXTHUB_WEBAUTHN_RP_NAME`.
 - `reauthWindowMinutes`: How long a session counts as recently authenticated for the operations that demand it — adding or removing a passkey, regenerating backup codes. Must be a finite positive number. Defaults to `10`. `TWEXTHUB_REAUTH_WINDOW_MINUTES`.
@@ -190,6 +194,23 @@ The second step of a sign-in uses its own pair:
 Adding or removing a passkey and regenerating backup codes require the session to be recently authenticated: within `reauthWindowMinutes` of a sign-in (or of a completed `POST /auth/mfa/reauth`). A sign-in that just happened counts, so the common path needs nothing extra. Failed second-factor attempts count against the login rate limit, alongside failed passwords.
 
 A sign-in that stops at the second step returns `202` with `{ "mfaRequired": true, "mfaToken": ..., "methods": [...] }` instead of the `201` session. The token is the credential for the `/auth/mfa/options` and `/auth/mfa/verify` calls and is shown once, like a session token. `POST /sessions`, `POST /auth/oidc/exchange`, and the API-client form of `GET /auth/oidc/callback` all answer this way when the account has MFA on.
+
+### Signing in from a CLI
+
+`twext login` signs in with a password prompt, and the provider and passkey paths both need a browser on the instance's own origin. A different client — another build tool, a script, anything that would rather not collect a password — cannot run either. The device authorization flow (RFC 8628) is for those: the client asks for a code, the person approves it in a browser, and the client polls until it has a session.
+
+Set `auth.device.verificationUrl` to the page that approves a code to turn the flow on. With it unset, the endpoints answer `404` and `GET /auth` reports `device: null`, because a client that asked for a code would otherwise wait for a page nobody can visit. The API serves the endpoints; the page itself belongs to the web client.
+
+The flow runs on five endpoints:
+
+1. `POST /auth/device/code` with an optional `clientName`. The response has a long `deviceCode`, a short `userCode` in the `ABCD-EFGH` shape, `verificationUriComplete` with the code filled in, `expiresIn`, and the `interval` to poll at.
+2. The person opens that URL. The page reads `POST /auth/device/lookup` with their session to show the client name, then calls `POST /auth/device/approve` or `POST /auth/device/deny`.
+3. The client polls `POST /auth/device/token` with the `deviceCode`. Until the page approves it the answer is `400` with `error: authorization_pending`. A poll inside the interval answers `slow_down`, a refusal answers `access_denied`, and an unknown or expired code answers `expired_token`.
+4. The poll after approval answers `200` with the same body as `POST /sessions` — `{ session, user, token }` — and consumes the code, so a replayed device code does not mint a second session.
+
+Approval requires a session authenticated within `reauthWindowMinutes` of a sign-in or a completed `POST /auth/mfa/reauth`. An older session receives `403` until the person reauthenticates. The browser has to finish a passkey or provider sign-in before it has a session to approve with, and the client never sees either. A pending `mfaToken` from `POST /sessions` is not a session and is refused. An approved code stays uncollected until the client's next poll, so the page can still decline it in that window; that is also why the approval page should show the client name it got from the lookup.
+
+The session this issues is the same credential `twext login` stores: every scope, `sessionTtlDays` of life, and revocable with `DELETE /sessions/current`. The device code is shown only to the client that asked, both codes are stored as hashes, and they expire after ten minutes.
 
 ## 🚦 Rate Limits
 

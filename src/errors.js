@@ -24,6 +24,9 @@ export class HttpError extends Error {
     };
     if (this.detail) body.detail = this.detail;
     if (this.errors) body.errors = this.errors;
+    // Device-flow failures name their state the way RFC 8628 spells it, so a
+    // client can branch on `error` rather than parse the wording.
+    if (this.error) body.error = this.error;
     if (this.buildLog) body.buildLog = this.buildLog;
     if (this.buildError) body.buildError = this.buildError;
     return body;
