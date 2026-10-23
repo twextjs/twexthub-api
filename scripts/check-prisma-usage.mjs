@@ -23,6 +23,8 @@ const ALLOWED_RAW_FUNCTIONS = new Map([
   ['latestBadgeRow', 'window ranking picks the newest acceptable version'],
   ['listDeliveries', 'grouped counts alongside the page'],
   ['listLatestVersions', 'window ranking and keyset boundary'],
+  ['lockByDeviceCode', 'row lock makes the poll and the approval race-free'],
+  ['lockByUserCode', 'row lock makes the approval and the poll race-free'],
   ['makeAuthRouter', 'OIDC transitions update conditionally in one statement'],
   ['makeDiscoveryRouter', 'window ranking, keyset boundaries and rollups'],
   ['makeOrgsRouter', 'row locks and dynamic scoped-table deletes'],

@@ -89,7 +89,7 @@ export function makeDeviceRouter({ db, config }) {
     requireObjectBody(req);
     const user = req.auth.user;
     const outcome = await db.$transaction(async (tx) => {
-      const row = await lockCode(tx, hashUserCode(requireUserCode(req.body)));
+      const row = await lockByUserCode(tx, hashUserCode(requireUserCode(req.body)));
       if (!row) return { reason: 'unknown' };
       if (row.DeniedAt !== null) return { reason: 'denied' };
       if (row.UserId !== null) {
@@ -118,7 +118,7 @@ export function makeDeviceRouter({ db, config }) {
     requireObjectBody(req);
     const user = req.auth.user;
     const outcome = await db.$transaction(async (tx) => {
-      const row = await lockCode(tx, hashUserCode(requireUserCode(req.body)));
+      const row = await lockByUserCode(tx, hashUserCode(requireUserCode(req.body)));
       if (!row) return { reason: 'unknown' };
       if (row.UserId !== null && Number(row.UserId) !== Number(user.Id)) {
         return { reason: 'taken' };
@@ -151,11 +151,7 @@ export function makeDeviceRouter({ db, config }) {
     }
 
     const outcome = await db.$transaction(async (tx) => {
-      const [row] = await tx.$queryRaw`
-        SELECT * FROM "DeviceCodes"
-        WHERE "DeviceCodeHash" = ${hashDeviceCode(deviceCode)} AND "ExpiresAt" > now()
-        FOR UPDATE
-      `;
+      const row = await lockByDeviceCode(tx, hashDeviceCode(deviceCode));
       if (!row) return { error: 'expired_token' };
       if (row.DeniedAt !== null) return { error: 'access_denied' };
 
@@ -223,11 +219,22 @@ function requireUserCode(body) {
 
 // `FOR UPDATE` on the pending row serializes the browser's approve/deny with
 // the client's poll, so a decision and a redemption cannot both pass a check
-// that only one of them should.
-async function lockCode(tx, codeHash) {
+// that only one of them should. Two helpers rather than one with the column as
+// a parameter: the SQL is fixed either way, and a dynamic column name would be
+// a name spliced into a statement.
+async function lockByUserCode(tx, codeHash) {
   const [row] = await tx.$queryRaw`
     SELECT * FROM "DeviceCodes"
     WHERE "UserCodeHash" = ${codeHash} AND "ExpiresAt" > now()
+    FOR UPDATE
+  `;
+  return row ?? null;
+}
+
+async function lockByDeviceCode(tx, codeHash) {
+  const [row] = await tx.$queryRaw`
+    SELECT * FROM "DeviceCodes"
+    WHERE "DeviceCodeHash" = ${codeHash} AND "ExpiresAt" > now()
     FOR UPDATE
   `;
   return row ?? null;
