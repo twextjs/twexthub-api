@@ -322,7 +322,7 @@ export async function resetDb() {
         TRUNCATE TABLE "AutomationTokens", "Sessions", "Versions", "RateLimitEntries", "Notifications",
         "Users", "LegalDocuments", "DownloadEvents", "ExtensionDailyDownloads", "ExtensionVersionDailyDownloads", "DistTags",
         "WebhookDeliveries", "Webhooks", "UserIdentities", "OidcFlows",
-        "Passkeys", "MfaBackupCodes", "MfaChallenges"
+        "Passkeys", "MfaBackupCodes", "MfaChallenges", "DeviceCodes"
         RESTART IDENTITY CASCADE
       `);
       break;
