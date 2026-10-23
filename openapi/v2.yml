@@ -319,6 +319,171 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  # --------------------------------------- Device sign-in for CLI clients
+  /auth/device/code:
+    post:
+      summary: Ask for a code a CLI can be approved with
+      operationId: createDeviceCode
+      tags: [Open]
+      security: []
+      description: >
+        The first step of RFC 8628. The response carries a long `deviceCode` the
+        client polls with, and a short `userCode` a person types into the
+        approval page. Nothing is signed in until that page approves the code,
+        so the client never handles a password, an OIDC redirect, or a WebAuthn
+        ceremony. `clientName` is shown on the page so the person can see what
+        is asking. The flow is off unless `auth.device.verificationUrl` is
+        configured, and answers `404` when it is not.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                clientName:
+                  type: string
+                  maxLength: 80
+                  description: Shown on the approval page; defaults to "Unnamed client".
+      responses:
+        '200':
+          description: The two codes and where to approve them
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceAuthorization' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/device/lookup:
+    post:
+      summary: Show what a pending code is asking to sign in
+      operationId: lookupDeviceCode
+      tags: [Userspace]
+      description: >
+        What the approval page reads before it renders its button: the client
+        name and whether the code is still open. A code approved by another
+        account is not visible here, so this cannot be used to watch somebody
+        else's sign-in.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceUserCode' }
+      responses:
+        '200':
+          description: The pending code
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeviceCodeState' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/device/approve:
+    post:
+      summary: Approve a code the client is showing
+      operationId: approveDeviceCode
+      tags: [Userspace]
+      description: >
+        Binds the pending sign-in to the caller's account. Session-authenticated
+        rather than open to automation tokens, because it mints a credential
+        for the account. Approval does not issue the session — the client's
+        next poll does — so a code can still be declined from the same page
+        before it is collected. Approving the same code twice from the same
+        account answers `200` both times, which is what a page reload looks
+        like; a second account gets `409`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceUserCode' }
+      responses:
+        '200':
+          description: The code is approved
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [approved, clientName]
+                properties:
+                  approved: { type: boolean }
+                  clientName: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/device/deny:
+    post:
+      summary: Decline a code the client is showing
+      operationId: denyDeviceCode
+      tags: [Userspace]
+      description: >
+        Ends the pending sign-in, including one that was approved but not yet
+        collected: the client has no session until it polls, so declining
+        before that poll takes the sign-in back.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DeviceUserCode' }
+      responses:
+        '200':
+          description: The code is declined
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [denied]
+                properties:
+                  denied: { type: boolean }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /auth/device/token:
+    post:
+      summary: Poll for the session behind an approved code
+      operationId: pollDeviceCode
+      tags: [Open]
+      security: []
+      description: >
+        Polled with the `deviceCode` from `/auth/device/code`, no faster than
+        the `interval` it was issued with. Until the page approves the code the
+        answer is `400` with `error: authorization_pending`; a poll inside the
+        interval answers `slow_down`; a declined code answers `access_denied`;
+        an unknown or expired one answers `expired_token`. The first poll after
+        approval answers `200` with the same body as `POST /sessions` and
+        consumes the code, so a replayed device code cannot mint a second
+        session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceCode]
+              properties:
+                deviceCode: { type: string }
+      responses:
+        '200':
+          description: The approved session, its owner, and its one-time token
+          headers:
+            Location:
+              description: The new session's own URL
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthSession' }
+        '400':
+          description: The sign-in is not ready, was declined, or the code is spent
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
   # -------------------------------------------------- Multi-factor auth
   /auth/mfa:
     get:
@@ -3842,7 +4007,7 @@ components:
 
     AuthDescriptor:
       type: object
-      required: [passwordAuth, oidc]
+      required: [passwordAuth, oidc, device]
       properties:
         passwordAuth:
           type: boolean
@@ -3856,6 +4021,72 @@ components:
             required:
               type: boolean
               description: When true, the provider is the only way to get an account.
+        device:
+          type: ['object', 'null']
+          description: >
+            Where a browser approves a CLI sign-in, or `null` when the device
+            flow is off.
+          required: [verificationUrl]
+          properties:
+            verificationUrl: { type: string, format: uri }
+
+    DeviceAuthorization:
+      type: object
+      required:
+        - deviceCode
+        - userCode
+        - verificationUri
+        - verificationUriComplete
+        - expiresIn
+        - interval
+      properties:
+        deviceCode:
+          type: string
+          description: The secret the client polls with. Shown once.
+        userCode:
+          type: string
+          description: The short code a person reads off the terminal and types into the approval page.
+          example: ABCD-EFGH
+        verificationUri:
+          type: string
+          format: uri
+          description: The approval page, for a person opening it on another device.
+        verificationUriComplete:
+          type: string
+          format: uri
+          description: The approval page with the user code already filled in.
+        expiresIn:
+          type: integer
+          description: Seconds the code stays usable.
+          example: 600
+        interval:
+          type: integer
+          description: Seconds the client must wait between polls.
+          example: 5
+
+    DeviceUserCode:
+      type: object
+      required: [userCode]
+      properties:
+        userCode:
+          type: string
+          description: >
+            The code from the client, in any case and with or without the
+            hyphen.
+          example: ABCD-EFGH
+
+    DeviceCodeState:
+      type: object
+      required: [clientName, expiresAt, approved, denied]
+      properties:
+        clientName: { type: string }
+        expiresAt: { type: string, format: date-time }
+        approved:
+          type: boolean
+          description: Whether this code has been approved by the caller and is waiting to be collected.
+        denied:
+          type: boolean
+          description: Whether the code was declined and can no longer be approved.
 
     OidcIdentity:
       type: object
@@ -4348,6 +4579,12 @@ components:
             properties:
               field: { type: string }
               message: { type: string }
+        error:
+          type: string
+          description: >
+            A machine-readable failure name. Device sign-in uses the RFC 8628
+            values `authorization_pending`, `slow_down`, `access_denied`, and
+            `expired_token`.
 
   responses:
     BadRequest:
