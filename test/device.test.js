@@ -165,6 +165,44 @@ test('a declined code ends the sign-in, even after it was approved', async () =>
     .expect(409);
 });
 
+test('approval requires recent authentication and accepts a reauthenticated session', async () => {
+  const account = await signupAndAccept(app, uniqNs());
+  const { authenticator } = await registerPasskey(app, account.token);
+  const code = (await requestCode().expect(200)).body;
+
+  await db.Sessions.update({
+    where: { Id: BigInt(account.session.id) },
+    data: { CreatedAt: new Date(Date.now() - 3600_000), ReauthAt: null },
+  });
+
+  const refused = await approve(account.token, code.userCode).expect(403);
+  assert.match(refused.body.detail, /recent/i);
+  const pending = await poll(code.deviceCode).expect(400);
+  assert.equal(pending.body.error, 'authorization_pending');
+
+  const options = await request(app)
+    .post(apiPath('/auth/mfa/reauth/options'))
+    .set(bearer(account.token))
+    .expect(200);
+  const site = new URL(TEST_PUBLIC_BASE_URL);
+  await request(app)
+    .post(apiPath('/auth/mfa/reauth'))
+    .set(bearer(account.token))
+    .send({
+      response: authenticator.authenticationResponse({
+        challenge: options.body.options.challenge,
+        origin: site.origin,
+        rpId: site.hostname,
+      }),
+    })
+    .expect(200);
+
+  await approve(account.token, code.userCode).expect(200);
+  await clearPollClock();
+  const issued = await poll(code.deviceCode).expect(200);
+  assert.equal(issued.body.user.namespace, account.user.namespace);
+});
+
 test('a passkey account approves only after its second factor has been answered', async () => {
   const account = await signupAndAccept(app, uniqNs());
   const { authenticator } = await registerPasskey(app, account.token);

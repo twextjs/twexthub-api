@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { requireSession } from '../auth.js';
+import { makeRequireRecentAuth, requireSession } from '../auth.js';
 import {
   DEVICE_CODE_TTL_MS,
   MAX_CLIENT_NAME_LENGTH,
@@ -20,11 +20,12 @@ import { createSession, requireObjectBody } from './shared.js';
 // A client with no browser cannot run a WebAuthn ceremony or read the provider
 // page, so it does neither: it asks for a code, shows the person where to
 // approve it, and polls. The browser half is the existing sign-in -- password,
-// provider, passkey, backup code -- and approval only accepts a session, which
+// provider, passkey, backup code -- and approval requires a recent session, which
 // is what makes the second factor part of the handoff without this router
 // knowing anything about it.
 export function makeDeviceRouter({ db, config }) {
   const router = Router();
+  const requireRecentAuth = makeRequireRecentAuth(config);
   const enabled = deviceEnabled(config);
   const sessionTtlMs = config.auth.sessionTtlDays * 86_400_000;
   const root = normalizeApiRoot(config.apiRoot);
@@ -64,7 +65,7 @@ export function makeDeviceRouter({ db, config }) {
   });
 
   // What the approval page shows before the person commits: which client is
-  // asking, and whether this code is still open. Session-only, like approve.
+  // asking, and whether this code is still open. Requires a session.
   router.post('/lookup', requireSession, async (req, res) => {
     if (!enabled) throw notFound();
     requireObjectBody(req);
@@ -84,7 +85,7 @@ export function makeDeviceRouter({ db, config }) {
     });
   });
 
-  router.post('/approve', requireSession, async (req, res) => {
+  router.post('/approve', requireSession, requireRecentAuth, async (req, res) => {
     if (!enabled) throw notFound();
     requireObjectBody(req);
     const user = req.auth.user;

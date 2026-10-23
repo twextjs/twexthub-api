@@ -391,7 +391,9 @@ paths:
         next poll does — so a code can still be declined from the same page
         before it is collected. Approving the same code twice from the same
         account answers `200` both times, which is what a page reload looks
-        like; a second account gets `409`.
+        like; a second account gets `409`. Requires a session authenticated
+        within `auth.reauthWindowMinutes` of sign-in or passkey reauthentication;
+        an older session receives `403`.
       requestBody:
         required: true
         content:
@@ -409,6 +411,7 @@ paths:
                   approved: { type: boolean }
                   clientName: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
         '422': { $ref: '#/components/responses/UnprocessableEntity' }
