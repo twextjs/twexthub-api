@@ -1,11 +1,11 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomInt } from 'node:crypto';
 import { hashToken, newToken } from './auth.js';
 import { product } from './product.js';
 
 // The characters a backup code is drawn from: no `0`/`O`, `1`/`I`/`L`, or
-// `U`, so a code read off paper and typed back in is unambiguous. Five bits a
-// character, twelve characters, so a code carries sixty bits -- enough that
-// guessing one is hopeless even before the login rate limit is counted.
+// `U`, so a code read off paper and typed back in is unambiguous. Twelve
+// characters from a thirty-letter alphabet is about fifty-nine bits -- enough
+// that guessing one is hopeless even before the login rate limit is counted.
 export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
 const CODE_GROUPS = 3;
 const CODE_GROUP_SIZE = 4;
@@ -51,11 +51,15 @@ export function normalizeBackupCode(input) {
 }
 
 function randomCode() {
-  // One byte per character would bias the alphabet: 256 is not a multiple of
-  // 32, but the top five bits of a byte are uniformly distributed, so take
-  // those instead of reducing the whole byte.
-  const bytes = randomBytes(CODE_GROUPS * CODE_GROUP_SIZE);
-  const chars = Array.from(bytes, (byte) => CODE_ALPHABET[byte >> 3]);
+  // `randomInt` draws from the whole alphabet without bias: it rejects the
+  // values that would otherwise push the first few characters over the others.
+  // Slicing five bits out of a byte instead would index past the end of a
+  // thirty-character alphabet, and the resulting `undefined` disappears when
+  // the group is joined, leaving a code shorter than the twelve it promises.
+  const chars = Array.from(
+    { length: CODE_GROUPS * CODE_GROUP_SIZE },
+    () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)],
+  );
   const groups = [];
   for (let i = 0; i < chars.length; i += CODE_GROUP_SIZE) {
     groups.push(chars.slice(i, i + CODE_GROUP_SIZE).join(''));

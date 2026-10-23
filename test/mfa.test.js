@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import request from 'supertest';
 import { createAuthenticator } from './fake-authenticator.mjs';
 import { hashToken, newToken } from '../src/auth.js';
-import { CEREMONY_TTL_MS, CHALLENGE_KINDS } from '../src/mfa.js';
+import { CEREMONY_TTL_MS, CHALLENGE_KINDS, generateBackupCodes } from '../src/mfa.js';
 import {
   FIXTURE_PASSWORD,
   TEST_PUBLIC_BASE_URL,
@@ -110,6 +110,19 @@ test('the first passkey turns MFA on and shows a set of backup codes once', asyn
   const list = await request(app).get(apiPath('/auth/mfa')).set(bearer(token)).expect(200);
   assert.equal(list.body.passkeys.length, 2);
   assert.equal(list.body.backupCodesRemaining, 10);
+});
+
+test('every backup code is twelve characters from the unambiguous alphabet', () => {
+  // A code read off paper is only as good as its length. The alphabet has
+  // thirty characters, so taking an index from five bits of a byte can run
+  // past the end and drop a character when the group is joined.
+  const codes = generateBackupCodes(200);
+  for (const code of codes) {
+    assert.match(
+      code,
+      /^[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}(-[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}){2}$/,
+    );
+  }
 });
 
 test('a password sign-in stops at the second factor and a passkey finishes it', async () => {
