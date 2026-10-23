@@ -34,6 +34,12 @@ export const DEFAULTS = {
       // The name an authenticator shows when it asks to store the passkey.
       rpName: null,
     },
+    device: {
+      // The page a browser visits to approve a CLI sign-in. Null turns the
+      // device flow off, since without a page to approve on a client would
+      // wait for something nobody can do.
+      verificationUrl: null,
+    },
     // How long a session stays "recently authenticated" for the operations
     // that demand it (adding/removing a passkey, regenerating backup codes).
     reauthWindowMinutes: 10,
@@ -125,6 +131,7 @@ const ENV_OVERRIDES = [
   ['auth.webauthn.rpId', 'TWEXTHUB_WEBAUTHN_RP_ID'],
   ['auth.webauthn.rpName', 'TWEXTHUB_WEBAUTHN_RP_NAME'],
   ['auth.reauthWindowMinutes', 'TWEXTHUB_REAUTH_WINDOW_MINUTES'],
+  ['auth.device.verificationUrl', 'TWEXTHUB_DEVICE_VERIFICATION_URL'],
   ['rateLimits.loginAttemptsPerWindow', 'TWEXTHUB_LOGIN_ATTEMPTS_PER_WINDOW'],
   ['rateLimits.loginWindowMinutes', 'TWEXTHUB_LOGIN_WINDOW_MINUTES'],
   ['rateLimits.signupsPerIpPerWindow', 'TWEXTHUB_SIGNUPS_PER_IP_PER_WINDOW'],
@@ -221,6 +228,33 @@ function normalizeOidc(config) {
   }
 }
 
+// The approval page belongs to the web client, so its URL is configured rather
+// than derived from publicBaseUrl: the API cannot know which path the client
+// serves it on, and a wrong guess would send people to a 404 mid sign-in.
+function normalizeDevice(config) {
+  const device = config.auth.device;
+  if (
+    device.verificationUrl === undefined ||
+    device.verificationUrl === null ||
+    device.verificationUrl === ''
+  ) {
+    device.verificationUrl = null;
+    return;
+  }
+  if (typeof device.verificationUrl !== 'string') {
+    throw new Error(
+      `auth.device.verificationUrl must be a URL string (got ${JSON.stringify(device.verificationUrl)})`,
+    );
+  }
+  const parsed = URL.parse(device.verificationUrl);
+  if (!parsed || (parsed.protocol !== 'https:' && parsed.protocol !== 'http:')) {
+    throw new Error(
+      `auth.device.verificationUrl must be an http or https URL (got "${device.verificationUrl}")`,
+    );
+  }
+  device.verificationUrl = parsed.toString();
+}
+
 // A WebAuthn relying party is an origin's host, so the RP ID is a bare
 // hostname: a scheme, a port, or a path in it would be accepted here and then
 // silently never match what the browser sends. The name is free text shown by
@@ -278,6 +312,7 @@ export function loadConfig(configPath = product.defaults?.configFilename ?? 'con
   config.apiRoot = normalizeApiRoot(config.apiRoot);
   normalizeOidc(config);
   normalizeWebauthn(config);
+  normalizeDevice(config);
   const reauthWindow = config.auth.reauthWindowMinutes;
   const reauthWindowMinutes = Number(reauthWindow);
   if (

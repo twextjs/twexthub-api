@@ -6,7 +6,7 @@ import { product } from './product.js';
 // `U`, so a code read off paper and typed back in is unambiguous. Five bits a
 // character, twelve characters, so a code carries sixty bits -- enough that
 // guessing one is hopeless even before the login rate limit is counted.
-const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
+export const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTVWXYZ23456789';
 const CODE_GROUPS = 3;
 const CODE_GROUP_SIZE = 4;
 
