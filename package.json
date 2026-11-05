@@ -54,7 +54,7 @@
     "@lifelinejs/lifeline": "^0.1.0",
     "doctoc": "^2.5.0",
     "eslint": "^10.13.0",
-    "globals": "^17.13.0",
+    "globals": "^17.14.0",
     "pg": "^8.23.1",
     "prettier": "^3.9.10",
     "supertest": "^7.3.1"
